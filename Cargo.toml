@@ -1,0 +1,31 @@
+[package]
+name = "pg-backup-tg"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ashkan"]
+license = "MIT"
+description = "Stream a compressed, age-encrypted PostgreSQL dump to Telegram in chunks"
+readme = "README.md"
+
+[[bin]]
+name = "pg-backup-tg"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "socks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+age = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+hex = "0.4"
+shell-words = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

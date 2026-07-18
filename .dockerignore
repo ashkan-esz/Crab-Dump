@@ -1,0 +1,10 @@
+target/
+.git/
+.env
+*.env
+identity.txt
+*.dump
+*.age
+*.zst
+README.md
+*.md

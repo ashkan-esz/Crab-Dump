@@ -1,0 +1,19 @@
+# Example: run pg-backup-tg on a schedule via docker-compose.
+#
+#   docker compose run --rm pg-backup-tg           # one-shot backup
+#   docker compose run --rm pg-backup-tg --dry-run # validate config
+#
+# Put secrets in a .env file next to this compose file (see .env.example).
+# Note: the container has its own network namespace. If your Postgres or
+# SOCKS proxy runs on the Docker host, use host.docker.internal or the
+# host's LAN IP instead of 127.0.0.1.
+
+services:
+  pg-backup-tg:
+    build: .
+    image: pg-backup-tg:latest
+    env_file: .env
+    # ONE-SHOT container: exit immediately after the backup.
+    # For scheduling, use `docker compose run` from cron, or wrap with
+    # supercronic / a sidecar. See README for a cron example.
+    restart: "no"
