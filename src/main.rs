@@ -1,4 +1,4 @@
-//! pg-backup-tg: stream an encrypted, compressed Postgres dump to Telegram.
+//! pg-backup-tg: stream a compressed, optionally encrypted Postgres dump to Telegram.
 
 use std::io::{Read, Write};
 use std::time::SystemTime;
@@ -17,12 +17,16 @@ mod telegram;
 use chunk::ChunkWriter;
 use config::Config;
 
-/// Stream a compressed, age-encrypted PostgreSQL dump to Telegram in chunks.
+/// Stream a compressed, optionally age-encrypted PostgreSQL dump to Telegram in chunks.
 #[derive(Debug, Parser)]
 struct Cli {
     /// Validate config and check that pg_dump exists, but do not dump or upload.
     #[arg(long)]
     dry_run: bool,
+
+    /// Disable age encryption for this backup, even if AGE_RECIPIENT is set.
+    #[arg(long)]
+    no_encryption: bool,
 }
 
 fn main() -> Result<()> {
@@ -48,18 +52,23 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Err(e) = run_backup(&cfg) {
+    if let Err(e) = run_backup(&cfg, cli.no_encryption) {
         tracing::error!(error = %e, "backup failed");
         return Err(e);
     }
     Ok(())
 }
 
-fn run_backup(cfg: &Config) -> Result<()> {
+fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
     let started = SystemTime::now();
     let stamp = ymdhms(started)?;
     let base_name = format!("pgdump-{stamp}");
-    let encrypted = cfg.age_recipient.is_some();
+    let age_recipient = if no_encryption {
+        None
+    } else {
+        cfg.age_recipient.as_deref()
+    };
+    let encrypted = age_recipient.is_some();
 
     // ---- streaming pipeline ----
     //   encrypted:  pg_dump | zstd | age  | chunked files
@@ -77,9 +86,7 @@ fn run_backup(cfg: &Config) -> Result<()> {
     // Build the zstd encoder wrapping either the age StreamWriter (encrypted)
     // or the chunker directly (plain). `sink` remembers how to finalize.
     let sink;
-    let mut zstd_writer: zstd::Encoder<'static, Box<dyn std::io::Write + Send>> = match &cfg
-        .age_recipient
-    {
+    let mut zstd_writer: zstd::Encoder<'static, Box<dyn std::io::Write + Send>> = match age_recipient {
         Some(recipient) => {
             tracing::info!("encryption enabled (age X25519)");
             let enc =
@@ -90,7 +97,11 @@ fn run_backup(cfg: &Config) -> Result<()> {
             compress::encoder(Box::new(sink.writer())).context("building zstd encoder")?
         }
         None => {
-            tracing::warn!("AGE_RECIPIENT not set — dump will be compressed but NOT encrypted");
+            if no_encryption {
+                tracing::warn!("--no-encryption set — dump will be compressed but NOT encrypted");
+            } else {
+                tracing::warn!("AGE_RECIPIENT not set — dump will be compressed but NOT encrypted");
+            }
             sink = Sink::Plain(chunker);
             compress::encoder(Box::new(sink.writer())).context("building zstd encoder")?
         }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Ashkan"]
 license = "MIT"
-description = "Stream a compressed, age-encrypted PostgreSQL dump to Telegram in chunks"
+description = "Stream a compressed, optionally age-encrypted PostgreSQL dump to Telegram in chunks"
 readme = "README.md"
 
 [[bin]]

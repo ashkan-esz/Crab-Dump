@@ -1,10 +1,12 @@
-target/
-.git/
-.env
-*.env
-identity.txt
-*.dump
-*.age
-*.zst
-README.md
-*.md
+# Dependencies from target folder (including debug/release artifacts) are unnecessary in image context:
+/target/debug/deps/*
+/target/release/deps/*
+/target/wheels/*.whl
+
+# VS Code extension dependencies, etc.:
+.vscode/extensions.json
+vsix-install-state.json
+
+# Local .git directory is not needed since it's already on host machine or git history will be preserved in repo anyway:
+.git/HEAD.lock*
+

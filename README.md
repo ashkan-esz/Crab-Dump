@@ -1,10 +1,10 @@
 # pg-backup-tg
 
-Stream a **compressed, encrypted** PostgreSQL dump to **Telegram**, in chunks.
+Stream a **compressed**, optionally **encrypted** PostgreSQL dump to **Telegram**, in chunks.
 
 ```
-pg_dump  →  zstd  →  age (X25519)  →  ≤49 MiB parts  →  Telegram (sendDocument)
-```
+encrypted:  pg_dump  →  zstd  →  age (X25519)  →  ≤49 MiB parts  →  Telegram
+plain:      pg_dump  →  zstd                          →  ≤49 MiB parts  →  Telegram
 
 Single self-contained binary. No external services to run. Designed to be
 scheduled from cron or a systemd timer.
@@ -15,7 +15,7 @@ scheduled from cron or a systemd timer.
 |---------|----------------|-------------------------------------------------------------------|
 | Dump    | `pg_dump -Fc`  | Custom format → fast, supports selective `pg_restore`.            |
 | Compress| `zstd`         | ~2× better ratio than gzip at higher speed; built-in checksum.    |
-| Encrypt | `age` (X25519) | Modern, audited, hybrid encryption to a public key. No password to leak. |
+| Encrypt | `age` (X25519) | Optional — modern, audited, hybrid encryption to a public key. No password to leak. Set `AGE_RECIPIENT` to enable; otherwise the dump is compressed but not encrypted. |
 | Upload  | `reqwest`      | Direct Bot API calls; no bot-framework overhead for a one-shot job.|
 
 **Chunking** is used instead of a self-hosted Telegram Bot API server: the
@@ -41,7 +41,9 @@ docker build -t pg-backup-tg .
 The runtime image is based on `postgres:17-bookworm`, so it ships a matching
 `pg_dump` — no need to install Postgres client tools on the host.
 
-### 2. Generate an age keypair
+### 2. (Optional) Generate an age keypair
+
+The backup works without encryption — only set this up if you want encrypted dumps.
 
 You only need the `age` tooling for key generation and for restoring. The
 backup itself uses the `age` Rust crate internally and needs no external CLI.
@@ -73,18 +75,19 @@ avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
 2. Create a chat/channel, add the bot, and promote it (channels: *Post Messages*; groups: *not* a member-only restriction).
 3. Get the chat id. For a channel: `-100` + channel id. Easiest way: post a message, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and read `result[].message.chat.id`.
 
-### 4. Configure
+### 5. Configure
 
 ```bash
 cp .env.example .env  # then edit
 ```
 
-### 5. Run
+### 6. Run
 
 ```bash
 set -a; source .env; set +a
 ./target/release/pg-backup-tg            # run a backup
 ./target/release/pg-backup-tg --dry-run  # validate config, no upload
+./target/release/pg-backup-tg --no-encryption  # disable encryption for this run
 ```
 
 On success the binary prints a **manifest**:
@@ -94,13 +97,15 @@ On success the binary prints a **manifest**:
 base:   pgdump-20260704-205532
 chunks: 3
 bytes:  145572521
-sha256: 4d52dfe801d349c71de6d485f2af62f5d01ab6dd208fb33fc037cdea4e964117
+encrypted: false
+sha256: 4d52dfe801d349c71de6d485f2af62f5d01ab6dd08fb33fc037cdea4e964117
 parts:
   pgdump-20260704-205532.part00
   pgdump-20260704-205532.part01
   pgdump-20260704-205532.part02
 
-# restore: cat pgdump-20260704-205532.part* | age -d | zstd -d | pg_restore --dbname=...
+# restore (encrypted): cat pgdump-20260704-205532.part* | age -d | zstd -d | pg_restore --dbname=...
+# restore (plain):     cat pgdump-20260704-205532.part* | zstd -d | pg_restore --dbname=...
 ```
 
 Temp chunk files are deleted on success and **kept on failure** for debugging.
@@ -112,7 +117,8 @@ Temp chunk files are deleted on success and **kept on failure** for debugging.
 | `DATABASE_URL`       | yes      |                | `postgresql://user:pass@host:5432/db`              |
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
 | `TG_CHAT_ID`         | yes      |                | numeric id or `@channelusername`                   |
-| `AGE_RECIPIENT`      | yes      |                | `age1…` X25519 public key                          |
+| `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
+| `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
 | `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
@@ -125,7 +131,14 @@ The image runs as the `postgres` user and ships `pg_dump` 17, so the only
 thing you need to provide is configuration via environment variables.
 
 ```bash
-# One-shot backup
+# One-shot backup (without encryption):
+docker run --rm \
+  -e DATABASE_URL="postgresql://user:pass@dbhost:5432/mydb" \
+  -e TG_BOT_TOKEN="..." \
+  -e TG_CHAT_ID="..." \
+  pg-backup-tg
+
+# One-shot backup (with encryption):
 docker run --rm \
   -e DATABASE_URL="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
@@ -165,7 +178,7 @@ Example systemd timer (replace paths/users as needed):
 ```ini
 # /etc/systemd/system/pg-backup-tg.service
 [Unit]
-Description=PostgreSQL → Telegram encrypted backup
+Description=PostgreSQL → Telegram backup
 Wants=network-online.target
 After=network-online.target postgresql.service
 
@@ -194,8 +207,14 @@ Enable with `systemctl enable --now pg-backup-tg.timer`.
 On a machine with the `identity.txt` (private key) and the downloaded parts:
 
 ```bash
+# Encrypted dump:
 cat pgdump-YYYYmmdd-HHMMSS.part* \
   | rage -d -i identity.txt \
+  | zstd -d \
+  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
+
+# Plain (unencrypted) dump:
+cat pgdump-YYYYmmdd-HHMMSS.part* \
   | zstd -d \
   | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
 ```
@@ -204,11 +223,16 @@ For a **plain-text** dump (if you set `PG_DUMP_EXTRA_ARGS=--format=plain`),
 swap `pg_restore` for `psql`:
 
 ```bash
+# Encrypted plain dump:
 cat pgdump-*.part* | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
+
+# Plain plain dump:
+cat pgdump-*.part* | zstd -d | psql "$DATABASE_URL"
 ```
 
-> The `sha256` in the manifest covers the **encrypted** stream (all parts
-> concatenated). Verify before decrypting:
+> The `sha256` in the manifest covers the stream that was written to
+> the parts (encrypted if AGE_RECIPIENT was set, otherwise the
+> compressed stream before uploading). Verify before decrypting:
 > ```bash
 > cat pgdump-*.part* | sha256sum
 > ```
@@ -234,7 +258,7 @@ cat pgdump-*.part* | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
 cargo test                 # unit tests for chunk rolling/reassembly
 ```
 
-A full end-to-end round-trip (dump → encrypt → chunk → decrypt → restore)
+A full end-to-end round-trip (dump → chunk → restore)
 was validated against a containerized Postgres 17: 128 MiB of data → 2 chunks
 → restored row count matched exactly.
 
