@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Status Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f6f8;
+            padding: 30px;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #1f2937;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .refresh-btn {
+            display: block;
+            margin: 0 auto 30px;
+            padding: 10px 24px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .refresh-btn:hover {
+            background: #1d4ed8;
+        }
+        .refresh-btn:active {
+            background: #1e40af;
+        }
+        .refresh-btn:disabled {
+            background: #93c5fd;
+            cursor: wait;
+        }
+        .status-card {
+            border: 1px solid #e5e7eb;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+        }
+        .status-indicator {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 20px;
+            animation: pulse 1.5s infinite ease-in-out;
+        }
+        .status-details h2 {
+            margin-top: 0;
+            font-size: 1.4em;
+            color: #4b5563;
+        }
+        .status-details p {
+            margin-bottom: 5px;
+            line-height: 1.4;
+        }
+
+        /* Status Colors */
+        .up .status-indicator { background-color: #10b981; box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.3); }
+        .degraded .status-indicator { background-color: #f59e0b; box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.3); }
+        .down .status-indicator { background-color: #ef4444; box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.3); }
+
+        /* Animation */
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🚀 pg-backup-tg Service Dashboard</h1>
+    <p style="text-align: center; color: #6b7280;">Live status powered by the local backend service (API Port <span id="apiPortDisplay">8080</span>).</p>
+
+    <!-- Telegram Service Status Card -->
+    <button class="refresh-btn" id="refreshBtn" onclick="refreshDashboard()">Refresh</button>
+    <div id="telegramStatusCard" class="status-card up">
+        <div class="status-indicator"></div>
+        <div class="status-details">
+            <h2>Telegram API Connection</h2>
+            <p id="telegramServiceMessage">Awaiting status...</p>
+        </div>
+    </div>
+
+    <!-- Database Dump Status Card -->
+    <div id="dumpStatusCard" class="status-card up">
+        <div class="status-indicator"></div>
+        <div class="status-details">
+            <h2>PostgreSQL Dumping</h2>
+            <p id="dumpProcessMessage">Awaiting status...</p>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    // API_PORT is discovered from the /api/config endpoint on first load.
+    let API_PORT = null;
+
+    async function discoverPort() {
+        try {
+            const resp = await fetch("/api/config");
+            if (resp.ok) {
+                const data = await resp.json();
+                API_PORT = data.port;
+                console.log("Discovered API port:", API_PORT);
+                // Update the displayed port in the header
+<p style="text-align: center; color: #6b7280;">Live status powered by the local backend service (API Port <span id="apiPortDisplay">8080</span>).</p>
+    <button class="refresh-btn" id="refreshBtn" onclick="refreshDashboard()">Refresh</button>
+                if (portDisplay) portDisplay.textContent = API_PORT;
+            } else {
+                API_PORT = 8080; // fallback
+            }
+        } catch {
+            API_PORT = 8080; // fallback
+        }
+    }
+
+    /** Refresh button — re-fetch both endpoints and update the UI. */
+    async function refreshDashboard() {
+        const btn = document.getElementById("refreshBtn");
+        btn.disabled = true;
+        btn.textContent = "⏳ Refreshing...";
+
+        try {
+            await Promise.all([
+                fetchAndDisplayStatus("/api/status/service", document.getElementById("telegramStatusCard"), "telegramServiceMessage"),
+                fetchAndDisplayStatus("/api/status/process", document.getElementById("dumpStatusCard"), "dumpProcessMessage"),
+            ]);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "🔄 Refresh";
+        }
+    }
+    const POLLING_INTERVAL_MS = 2000; // Poll every 2 seconds
+
+    /**
+     * Updates the DOM element with the given status information.
+     * @param {HTMLElement} cardElement - The parent div for the status (e.g., telegramStatusCard).
+     * @param {string} stateString - UP, DEGRADED, or DOWN.
+     * @param {string} message - The detailed message to display.
+     */
+    function updateStatus(cardElement, stateString, message) {
+        const statusClass = stateString.toLowerCase();
+
+        // Reset classes and set the new primary class for coloring/shadowing
+        Object.values(['up', 'degraded', 'down']).forEach(cls => cardElement.classList.remove(cls));
+        cardElement.classList.add(`${statusClass} ${stateString}`);
+
+        const messageElement = cardElement.querySelector('p');
+        if (messageElement) {
+            messageElement.textContent = message;
+        }
+    }
+
+    /**
+     * Fetches and displays the status for a given API endpoint.
+     * @param {string} endpoint - The API path (e.g., '/api/status/service').
+     * @param {HTMLElement} cardElement - The container element to update.
+     * @param {HTMLElement} messageElementId - The ID of the <p> tag within the card.
+     */
+    async function fetchAndDisplayStatus(endpoint, cardElement, messageElementId) {
+        try {
+            const response = await fetch(`http://localhost:${API_PORT}${endpoint}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status} ${response.statusText}`);
+            }
+            const statusData = await response.json();
+
+            // Assume the backend provides a clear state string (UP, DEGRADED, DOWN)
+            const stateString = statusData.state;
+            const message = `[${new Date(statusData.timestamp).toLocaleTimeString()}] ${statusData.message}`;
+
+            updateStatus(cardElement, stateString, message);
+
+        } catch (error) {
+            console.error(`Error fetching status from ${endpoint}:`, error);
+            const fallbackMessage = `Connection failed. Is the Rust server running on port ${API_PORT}? Error: ${(error.message || "Unknown error")}`;
+            updateStatus(cardElement, 'down', fallbackMessage);
+        }
+    }
+
+    // --- Initialization and Polling Loop ---
+
+    async function initializeDashboard() {
+        console.log("Starting status dashboard poll loop...");
+
+        // Discover the API port from the server
+        await discoverPort();
+
+        // Initial run immediately
+        fetchAndDisplayStatus('/api/status/service', document.getElementById('telegramStatusCard'), 'telegramServiceMessage');
+        fetchAndDisplayStatus('/api/status/process', document.getElementById('dumpStatusCard'), 'dumpProcessMessage');
+
+        // Set up recurring polling
+        setInterval(() => {
+            console.log("Polling status endpoints...");
+            fetchAndDisplayStatus('/api/status/service', document.getElementById('telegramStatusCard'), 'telegramServiceMessage');
+            fetchAndDisplayStatus('/api/status/process', document.getElementById('dumpStatusCard'), 'dumpProcessMessage');
+        }, POLLING_INTERVAL_MS);
+    }
+
+    // Start the process when the window loads
+    window.onload = initializeDashboard;
+</script>

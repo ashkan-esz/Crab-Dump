@@ -42,7 +42,8 @@ impl ChunkWriter {
     }
 
     fn next_path(&self, index: usize) -> PathBuf {
-        self.work_dir.join(format!("{}.part{:02}", self.prefix, index))
+        self.work_dir
+            .join(format!("{}.part{:02}", self.prefix, index))
     }
 
     fn roll_if_needed(&mut self) -> io::Result<()> {
@@ -54,10 +55,7 @@ impl ChunkWriter {
         if self.current.is_none() {
             let path = self.next_path(self.index);
             let f = File::create(&path).map_err(|e| {
-                io::Error::other(format!(
-                    "creating chunk file {}: {e}",
-                    path.display()
-                ))
+                io::Error::other(format!("creating chunk file {}: {e}", path.display()))
             })?;
             tracing::debug!(index = self.index, path = %path.display(), "rolling new chunk");
             self.paths.push(path.clone());
@@ -76,8 +74,7 @@ impl ChunkWriter {
     /// empty stream still has a representable artifact to upload.
     pub fn finish(mut self) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
         // Ensure at least one file exists even if nothing was written.
-        self.roll_if_needed()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.roll_if_needed().map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(f) = self.current.take() {
             f.sync_all().context("syncing final chunk")?;
             drop(f);
@@ -93,11 +90,10 @@ impl ChunkWriter {
 
 impl Write for ChunkWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        use std::io::ErrorKind;
         // Defensive: with empty state and the file can't be created, surface
         // as io::Error so async/sync plumbing still works as expected.
         self.roll_if_needed()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         // Never write past the current chunk's limit.
         let room = (self.max_bytes - self.current_len) as usize;
@@ -214,7 +210,12 @@ mod tests {
         // Each file is at most `max` bytes.
         for p in &paths {
             let len = std::fs::metadata(p).unwrap().len();
-            assert!(len <= max, "chunk {} is {} bytes (> {max})", p.display(), len);
+            assert!(
+                len <= max,
+                "chunk {} is {} bytes (> {max})",
+                p.display(),
+                len
+            );
         }
 
         // Reassembly is byte-exact and the hash matches.

@@ -29,6 +29,7 @@ struct RawConfig {
     age_recipient: Option<String>,
     chunk_size_mb: Option<u64>,
     work_dir: Option<String>,
+    api_port: Option<u16>,
     socks_proxy: Option<String>,
 }
 
@@ -50,6 +51,8 @@ pub struct Config {
     pub chunk_size_mb: u64,
     /// Directory used for temp chunks; defaults to the OS temp dir.
     pub work_dir: PathBuf,
+    /// Port the status dashboard HTTP server binds to (default: 8080).
+    pub api_port: u16,
     /// Optional SOCKS5 proxy URL, e.g. `socks5://127.0.0.1:1080` or
     /// `socks5h://host:port` (the `h` variant resolves DNS through the proxy).
     pub socks_proxy: Option<String>,
@@ -87,9 +90,9 @@ impl TryFrom<RawConfig> for Config {
         let tg_bot_token = raw.tg_bot_token.ok_or_else(|| {
             anyhow!("TG_BOT_TOKEN is required (set in config.toml or environment)")
         })?;
-        let tg_chat_id = raw.tg_chat_id.ok_or_else(|| {
-            anyhow!("TG_CHAT_ID is required (set in config.toml or environment)")
-        })?;
+        let tg_chat_id = raw
+            .tg_chat_id
+            .ok_or_else(|| anyhow!("TG_CHAT_ID is required (set in config.toml or environment)"))?;
 
         let age_recipient = match raw.age_recipient {
             Some(s) => {
@@ -126,14 +129,14 @@ impl TryFrom<RawConfig> for Config {
         let socks_proxy = match raw.socks_proxy {
             Some(s) => {
                 if !(s.starts_with("socks5://") || s.starts_with("socks5h://")) {
-                    bail!(
-                        "SOCKS_PROXY must start with `socks5://` or `socks5h://`, got `{s}`"
-                    );
+                    bail!("SOCKS_PROXY must start with `socks5://` or `socks5h://`, got `{s}`");
                 }
                 Some(s)
             }
             None => None,
         };
+
+        let api_port = raw.api_port.unwrap_or(8080); // default dashboard port
 
         Ok(Self {
             database_url,
@@ -143,6 +146,7 @@ impl TryFrom<RawConfig> for Config {
             age_recipient,
             chunk_size_mb,
             work_dir,
+            api_port,
             socks_proxy,
         })
     }
@@ -150,9 +154,7 @@ impl TryFrom<RawConfig> for Config {
 
 /// Load and merge config: defaults < file < env.
 fn load_config_path(path: Option<&Path>) -> RawConfig {
-    let get_env = |k: &str| -> Option<String> {
-        env::var(k).ok().filter(|v| !v.trim().is_empty())
-    };
+    let get_env = |k: &str| -> Option<String> { env::var(k).ok().filter(|v| !v.trim().is_empty()) };
 
     let default_cfg = RawConfig {
         database_url: get_env("DATABASE_URL"),
@@ -162,6 +164,7 @@ fn load_config_path(path: Option<&Path>) -> RawConfig {
         age_recipient: get_env("AGE_RECIPIENT"),
         chunk_size_mb: get_env("CHUNK_SIZE_MB").and_then(|v| v.parse().ok()),
         work_dir: get_env("WORK_DIR"),
+        api_port: get_env("API_PORT").and_then(|v| v.parse().ok()),
         socks_proxy: get_env("SOCKS_PROXY"),
     };
 
@@ -199,14 +202,17 @@ fn load_config_path(path: Option<&Path>) -> RawConfig {
 
     // Merge: file overrides default, env overrides both.
     RawConfig {
-        database_url: file_cfg.database_url.or(default_cfg.database_url),
-        pg_dump_extra_args: file_cfg.pg_dump_extra_args.or(default_cfg.pg_dump_extra_args),
-        tg_bot_token: file_cfg.tg_bot_token.or(default_cfg.tg_bot_token),
-        tg_chat_id: file_cfg.tg_chat_id.or(default_cfg.tg_chat_id),
-        age_recipient: file_cfg.age_recipient.or(default_cfg.age_recipient),
-        chunk_size_mb: file_cfg.chunk_size_mb.or(default_cfg.chunk_size_mb),
-        work_dir: file_cfg.work_dir.or(default_cfg.work_dir),
-        socks_proxy: file_cfg.socks_proxy.or(default_cfg.socks_proxy),
+        database_url: default_cfg.database_url.or(file_cfg.database_url),
+        pg_dump_extra_args: default_cfg
+            .pg_dump_extra_args
+            .or(file_cfg.pg_dump_extra_args),
+        tg_bot_token: default_cfg.tg_bot_token.or(file_cfg.tg_bot_token),
+        tg_chat_id: default_cfg.tg_chat_id.or(file_cfg.tg_chat_id),
+        age_recipient: default_cfg.age_recipient.or(file_cfg.age_recipient),
+        chunk_size_mb: default_cfg.chunk_size_mb.or(file_cfg.chunk_size_mb),
+        work_dir: default_cfg.work_dir.or(file_cfg.work_dir),
+        api_port: default_cfg.api_port.or(file_cfg.api_port),
+        socks_proxy: default_cfg.socks_proxy.or(file_cfg.socks_proxy),
     }
 }
 

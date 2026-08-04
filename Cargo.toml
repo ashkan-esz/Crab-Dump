@@ -2,31 +2,41 @@
 name = "pg-backup-tg"
 version = "0.1.0"
 edition = "2021"
-authors = ["Ashkan"]
-license = "MIT"
-description = "Stream a compressed, optionally age-encrypted PostgreSQL dump to Telegram in chunks"
-readme = "README.md"
-
-[[bin]]
-name = "pg-backup-tg"
-path = "src/main.rs"
 
 [dependencies]
+# Core dependencies for CLI and general use
 anyhow = "1"
 thiserror = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "socks"] }
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Async Web Server & Networking
+actix-web = "4"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "socks"] }
+
+# Compression, Crypto & Utilities
 zstd = "0.13"
 age = "0.11"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 hex = "0.4"
-shell-words = "1"
-toml = "0.8"
-clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
 
-[profile.release]
-opt-level = 3
-lto = "thin"
+[dependencies.dotenv]
+version = "0.15"
+
+[dependencies.tracing]
+version = "0.1"
+features = ["log"]
+
+[dependencies.tracing-subscriber]
+version = "0.3"
+features = ["env-filter"]
+
+[dependencies.shell-words]
+version = "1"
+
+# Configuration file parsing
+[dependencies.toml]
+version = "1.1.4"

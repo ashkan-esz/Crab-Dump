@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::blocking::{Client,multipart};
+use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 
 const API_BASE: &str = "https://api.telegram.org";
@@ -23,12 +23,7 @@ struct ApiResponse {
 /// Retries with exponential backoff on transient failures (network errors,
 /// 429, 5xx). Returns the `document.file_id` Telegram assigned (useful for
 /// logging / a manifest).
-pub fn send_document(
-    client: &Client,
-    bot_token: &str,
-    chat_id: &str,
-    path: &Path,
-) -> Result<()> {
+pub fn send_document(client: &Client, bot_token: &str, chat_id: &str, path: &Path) -> Result<()> {
     let url = format!("{API_BASE}/bot{bot_token}/sendDocument");
     let file_name = path
         .file_name()
@@ -59,9 +54,7 @@ pub fn send_document(
         let outcome = match send_result {
             Ok(resp) => {
                 let status = resp.status();
-                let body: ApiResponse = resp
-                    .json()
-                    .context("parsing Telegram JSON response")?;
+                let body: ApiResponse = resp.json().context("parsing Telegram JSON response")?;
                 if body.ok {
                     Ok(())
                 } else {

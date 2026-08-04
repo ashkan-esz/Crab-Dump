@@ -20,10 +20,7 @@ impl DumpPipe {
     pub fn finish(mut self) -> Result<()> {
         // Make sure we've drained stdout so the child isn't blocked writing.
         drop(self.stdout);
-        let status = self
-            .child
-            .wait()
-            .context("waiting for pg_dump to exit")?;
+        let status = self.child.wait().context("waiting for pg_dump to exit")?;
         if !status.success() {
             anyhow::bail!("pg_dump exited with status {status}");
         }
@@ -35,14 +32,12 @@ impl DumpPipe {
 ///
 /// Default args: `--format=custom` (so `pg_restore` can do selective restores),
 /// unless the caller supplies extra args that already specify a format.
-pub fn spawn_pg_dump(
-    database_url: &str,
-    extra_args: Option<&str>,
-) -> Result<DumpPipe> {
+pub fn spawn_pg_dump(database_url: &str, extra_args: Option<&str>) -> Result<DumpPipe> {
     let mut args = vec!["--format=custom".to_string(), "--no-owner".to_string()];
     let user_args = match extra_args {
-        Some(s) if !s.trim().is_empty() => split(s)
-            .context("PG_DUMP_EXTRA_ARGS is not valid shell syntax")?,
+        Some(s) if !s.trim().is_empty() => {
+            split(s).context("PG_DUMP_EXTRA_ARGS is not valid shell syntax")?
+        }
         _ => vec![],
     };
     args.extend(user_args);

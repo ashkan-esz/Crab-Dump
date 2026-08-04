@@ -1,0 +1,38 @@
+# ── pg-backup-tg configuration ─────────────────────────────────────────────
+#
+# This file uses TOML format. Copy it to `config.toml` and fill in your values.
+# Environment variables always override file values — for sensitive data
+# (tokens, secrets) prefer env vars; for everything else a file is convenient.
+#
+# Required fields: database_url, tg_bot_token, tg_chat_id
+# ---------------------------------------------------------------------------
+
+# PostgreSQL connection string. REPLACE THIS WITH YOUR ACTUAL URL
+#database_url = "postgresql://user:password@localhost:5432/dbname"
+
+# Telegram bot token from @BotFather. REPLACE THIS
+#tg_bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
+
+# Target chat ID (e.g., -1001234567890 for a channel). REPLACE THIS
+#tg_chat_id = "-1001234567890"
+
+
+# Optional fields -----------------------------------------------------------
+
+# age X25519 recipient public key (starts with `age1`).
+# Omit or comment out for unencrypted dumps.
+# age_recipient = "age1..."
+
+# SOCKS5 proxy for Telegram API.
+# socks_proxy = "socks5h://127.0.0.1:2080"
+
+# Extra args passed verbatim to pg_dump.
+# pg_dump_extra_args = "--format=custom --no-owner"
+
+# Max size of each uploaded part in MiB (default: 49).
+chunk_size_mb = 49
+
+# Directory for temporary chunk files (default: OS temp dir).
+# work_dir = "/var/tmp/pg-backup-tg"
+# Port for the status dashboard HTTP server (default: 8080).
+# api_port = 8080
