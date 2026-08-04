@@ -24,7 +24,7 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Disable age encryption for this backup, even if AGE_RECIPIENT is set.
+    /// Disable age encryption for this run, even if AGE_RECIPIENT is set.
     #[arg(long)]
     no_encryption: bool,
 }
@@ -80,21 +80,17 @@ fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
         dump::spawn_pg_dump(&cfg.database_url, cfg.pg_dump_extra_args.as_deref())
             .context("starting pg_dump")?;
 
-    // Innermost writer: the rolling chunk writer (final destination of bytes).
-    let chunker = ChunkWriter::new(&cfg.work_dir, &base_name, cfg.chunk_size_bytes());
-
-    // Build the zstd encoder wrapping either the age StreamWriter (encrypted)
-    // or the chunker directly (plain). `sink` remembers how to finalize.
-    let sink;
-    let mut zstd_writer: zstd::Encoder<'static, Box<dyn std::io::Write + Send>> = match age_recipient {
+    // Build the pipeline: zstd wraps age (encrypted) or chunker directly (plain).
+    let mut sink = match age_recipient {
         Some(recipient) => {
             tracing::info!("encryption enabled (age X25519)");
             let enc =
                 encrypt::encryptor_for(recipient).context("building age encryptor")?;
             let age_writer =
-                encrypt::wrap(enc, chunker).context("wrapping chunker in age StreamWriter")?;
-            sink = Sink::Encrypted(age_writer);
-            compress::encoder(Box::new(sink.writer())).context("building zstd encoder")?
+                encrypt::wrap(enc, ChunkWriter::new(&cfg.work_dir, &base_name, cfg.chunk_size_bytes()))
+                    .context("wrapping chunker in age StreamWriter")?;
+            let zstd = compress::encoder(age_writer).context("building zstd encoder")?;
+            Sink::Encrypted(zstd)
         }
         None => {
             if no_encryption {
@@ -102,12 +98,13 @@ fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
             } else {
                 tracing::warn!("AGE_RECIPIENT not set — dump will be compressed but NOT encrypted");
             }
-            sink = Sink::Plain(chunker);
-            compress::encoder(Box::new(sink.writer())).context("building zstd encoder")?
+            let chunker = ChunkWriter::new(&cfg.work_dir, &base_name, cfg.chunk_size_bytes());
+            let zstd = compress::encoder(chunker).context("building zstd encoder")?;
+            Sink::Plain(zstd)
         }
     };
 
-    // Drive pg_dump stdout through the whole stack.
+    // Drive pg_dump stdout through the pipeline.
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = pipe
@@ -117,14 +114,12 @@ fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
         if n == 0 {
             break;
         }
-        zstd_writer
-            .write_all(&buf[..n])
+        sink.write(&buf[..n])
             .context("writing through pipeline")?;
     }
 
-    // Finalize zstd first (flushes into the sink), then the sink itself.
-    zstd_writer.finish().context("finalizing zstd encoder")?;
-    let (chunks, hash, total_bytes) = sink.finish()?;
+    // Finalize zstd and inner layers, extract the chunk list + hash.
+    let (chunks, hash, total_bytes) = sink.finish().context("finalizing pipeline")?;
 
     // Now that stdout is drained, wait on pg_dump and confirm success.
     pipe.finish().context("pg_dump did not complete successfully")?;
@@ -182,36 +177,60 @@ fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
     Ok(())
 }
 
-/// Finalization sink: holds either the age StreamWriter (encrypted) or the
-/// bare ChunkWriter (plain), and finalizes them in the correct order.
-///
-/// The `writer()` method borrows the inner writer mutably so the zstd encoder
-/// (built before `finish` is called) can write into it; `finish()` then drains
-/// the appropriate layer and returns the chunk list + hash.
+/// Finalization sink: owns the zstd encoder and its inner writer(s).
+/// Implementing `Write` delegates to the zstd encoder for the main loop.
 enum Sink {
-    Encrypted(age::stream::StreamWriter<ChunkWriter>),
-    Plain(ChunkWriter),
+    Encrypted(zstd::Encoder<'static, age::stream::StreamWriter<ChunkWriter>>),
+    Plain(zstd::Encoder<'static, ChunkWriter>),
 }
 
-impl Sink {
-    /// Borrow the innermost writable destination (the chunker or the age
-    /// writer sitting on top of it) as a trait object for the zstd encoder.
-    fn writer(&mut self) -> &mut (dyn std::io::Write + Send) {
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            Sink::Encrypted(w) => w,
-            Sink::Plain(w) => w,
+            Sink::Encrypted(e) => e.write(buf),
+            Sink::Plain(e) => e.write(buf),
         }
     }
 
-    /// Finalize the sink layers (zstd has already been finished by the caller)
-    /// and return the chunk list, full-stream sha256, and total bytes.
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Encrypted(e) => e.flush(),
+            Sink::Plain(e) => e.flush(),
+        }
+    }
+}
+
+impl Sink {
+    /// Finalize the zstd encoder (flushing into age→chunker), then unwrap
+    /// the inner layers back to the ChunkWriter, finalize it, and return
+    /// the chunk list, sha256, and total bytes.
+    ///
+    /// zstd::Encoder::finish(self) → io::Result<InnerWriter>
+    /// age::stream::StreamWriter::finish() → Result<ChunkWriter>
+    /// ChunkWriter::finish() → Result<(paths, hash, total)>
     fn finish(self) -> Result<(Vec<std::path::PathBuf>, [u8; 32], u64)> {
         match self {
-            Sink::Encrypted(w) => {
-                let chunker = w.finish().context("finalizing age StreamWriter")?;
-                chunker.finish().context("finalizing chunk writer")
+            Sink::Plain(encoder) => {
+                // Finish zstd, get back the owned ChunkWriter, finalize it.
+                let chunker = encoder
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("zstd finish: {e}"))?;
+                chunker
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
-            Sink::Plain(chunker) => chunker.finish().context("finalizing chunk writer"),
+            Sink::Encrypted(encoder) => {
+                // Finish zstd → get age StreamWriter, finish that → get ChunkWriter.
+                let age_writer = encoder
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("zstd finish: {e}"))?;
+                let chunker = age_writer
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("age writer finish: {e}"))?;
+                chunker
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
+            }
         }
     }
 }

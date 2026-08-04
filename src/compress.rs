@@ -10,7 +10,7 @@ pub const ZSTD_LEVEL: i32 = 3;
 
 /// Wrap `inner` in a zstd [`Encoder`]. The returned writer must be finalized
 /// via `finish()` — see the orchestrator in `main.rs`.
-pub fn encoder<W: Write>(inner: W) -> Result<zstd::Encoder<'static, W>> {
+pub fn encoder<'a, W: Write + Send + 'a>(inner: W) -> Result<zstd::Encoder<'a, W>> {
     let mut e = zstd::Encoder::new(inner, ZSTD_LEVEL).context("creating zstd encoder")?;
     e.include_checksum(true)
         .context("enabling zstd checksum")?;
