@@ -3,223 +3,486 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Service Status Dashboard</title>
+    <title>pg-backup-tg · Status Dashboard</title>
     <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg:         #0b0f19;
+            --bg-card:    #111827;
+            --bg-hover:   #1a2332;
+            --border:     #1e293b;
+            --text:       #e2e8f0;
+            --text-muted: #64748b;
+            --accent:     #3b82f6;
+            --accent-glow:rgba(59,130,246,.25);
+            --up:         #22c55e;
+            --up-bg:      rgba(34,197,94,.10);
+            --up-border:  rgba(34,197,94,.30);
+            --up-glow:    rgba(34,197,94,.35);
+            --warn:       #f59e0b;
+            --warn-bg:    rgba(245,158,11,.10);
+            --warn-border:rgba(245,158,11,.30);
+            --warn-glow:  rgba(245,158,11,.35);
+            --err:        #ef4444;
+            --err-bg:     rgba(239,68,68,.10);
+            --err-border: rgba(239,68,68,.30);
+            --err-glow:   rgba(239,68,68,.35);
+            --radius:     14px;
+            --font:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            --mono:       'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #f4f6f8;
-            padding: 30px;
-            color: #333;
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: #ffffff;
-            border-radius: 12px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
-            padding: 30px;
-        }
-        h1 {
-            color: #1f2937;
+
+        /* ---------- header ---------- */
+        .header {
+            width: 100%;
+            max-width: 900px;
             text-align: center;
-            margin-bottom: 10px;
+            margin-bottom: 2rem;
         }
-        .refresh-btn {
-            display: block;
-            margin: 0 auto 30px;
-            padding: 10px 24px;
-            background: #2563eb;
-            color: #fff;
-            border: none;
-            border-radius: 8px;
-            font-size: 1em;
-            font-family: inherit;
-            cursor: pointer;
-            transition: background 0.2s;
+        .header h1 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            letter-spacing: -.02em;
+            margin-bottom: .3rem;
         }
-        .refresh-btn:hover {
-            background: #1d4ed8;
+        .header h1 .dot {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent-glow);
+            margin-right: .5rem;
+            vertical-align: middle;
+            animation: pulse-dot 2s ease-in-out infinite;
         }
-        .refresh-btn:active {
-            background: #1e40af;
+        @keyframes pulse-dot {
+            0%,100% { opacity:1; transform:scale(1); }
+            50%     { opacity:.5; transform:scale(1.2); }
         }
-        .refresh-btn:disabled {
-            background: #93c5fd;
-            cursor: wait;
+        .header p {
+            color: var(--text-muted);
+            font-size: .9rem;
         }
-        .status-card {
-            border: 1px solid #e5e7eb;
-            padding: 20px;
-            margin-bottom: 20px;
-            border-radius: 8px;
-            transition: all 0.3s ease;
+
+        /* ---------- server info bar ---------- */
+        .info-bar {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: .75rem;
+            margin-bottom: 1.5rem;
+        }
+        .info-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: .45rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: .4rem .9rem;
+            font-size: .78rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            white-space: nowrap;
+        }
+        .info-chip .icon { font-size: .9rem; }
+        .info-chip strong { color: var(--text); font-weight: 600; }
+
+        /* ---------- status grid ---------- */
+        .grid {
+            width: 100%;
+            max-width: 900px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.25rem;
+        }
+        @media (max-width: 640px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+
+        /* ---------- card ---------- */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            transition: border-color .3s, box-shadow .3s, transform .15s;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            position: relative;
+            overflow: hidden;
+        }
+        .card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: var(--radius);
+            opacity: 0;
+            transition: opacity .3s;
+            pointer-events: none;
+            background: radial-gradient(600px circle at var(--mx, 50%) var(--my, 50%), rgba(255,255,255,.02), transparent 40%);
+        }
+        .card:hover::before { opacity: 1; }
+        .card:hover { transform: translateY(-2px); }
+
+        /* state variants */
+        .card.up       { border-color: var(--up-border);   box-shadow: 0 0 20px rgba(34,197,94,.06); }
+        .card.up .card-header .status-dot { background: var(--up); box-shadow: 0 0 10px var(--up-glow); }
+        .card.degraded { border-color: var(--warn-border); box-shadow: 0 0 20px rgba(245,158,11,.06); }
+        .card.degraded .card-header .status-dot { background: var(--warn); box-shadow: 0 0 10px var(--warn-glow); }
+        .card.down     { border-color: var(--err-border);  box-shadow: 0 0 20px rgba(239,68,68,.06); }
+        .card.down .card-header .status-dot { background: var(--err); box-shadow: 0 0 10px var(--err-glow); }
+
+        .card-header {
             display: flex;
             align-items: center;
+            gap: .75rem;
         }
-        .status-indicator {
-            width: 40px;
-            height: 40px;
+        .status-dot {
+            width: 12px; height: 12px;
             border-radius: 50%;
-            margin-right: 20px;
-            animation: pulse 1.5s infinite ease-in-out;
+            flex-shrink: 0;
+            animation: pulse-dot 2s ease-in-out infinite;
         }
-        .status-details h2 {
-            margin-top: 0;
-            font-size: 1.4em;
-            color: #4b5563;
+        .card-title {
+            font-size: .95rem;
+            font-weight: 600;
+            color: var(--text);
         }
-        .status-details p {
-            margin-bottom: 5px;
-            line-height: 1.4;
+        .card-body {
+            flex: 1;
+        }
+        .card-body .status-msg {
+            font-size: .85rem;
+            color: var(--text-muted);
+            line-height: 1.55;
+        }
+        .card-body .status-time {
+            font-family: var(--mono);
+            font-size: .72rem;
+            color: var(--text-muted);
+            opacity: .7;
+            margin-top: .4rem;
         }
 
-        /* Status Colors */
-        .up .status-indicator { background-color: #10b981; box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.3); }
-        .degraded .status-indicator { background-color: #f59e0b; box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.3); }
-        .down .status-indicator { background-color: #ef4444; box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.3); }
-
-        /* Animation */
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.1); opacity: 0.8; }
-            100% { transform: scale(1); opacity: 1; }
+        /* ---------- full-width card ---------- */
+        .card.full {
+            grid-column: 1 / -1;
         }
+        .card.full .card-body {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: .75rem;
+        }
+        @media (max-width: 640px) {
+            .card.full .card-body { grid-template-columns: 1fr; }
+        }
+
+        /* ---------- controls ---------- */
+        .controls {
+            display: flex;
+            gap: .75rem;
+            flex-wrap: wrap;
+            width: 100%;
+            max-width: 900px;
+            margin-top: 1.5rem;
+            justify-content: center;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            padding: .55rem 1.2rem;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text);
+            font-size: .82rem;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .2s, border-color .2s;
+        }
+        .btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+        .btn.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+        .btn.primary:hover { background: #2563eb; }
+
+        /* ---------- footer ---------- */
+        .footer {
+            margin-top: 2.5rem;
+            color: var(--text-muted);
+            font-size: .72rem;
+            text-align: center;
+            opacity: .5;
+        }
+
+        /* ---------- spinner ---------- */
+        .spinner {
+            display: inline-block;
+            width: 14px; height: 14px;
+            border: 2px solid rgba(255,255,255,.15);
+            border-top-color: currentColor;
+            border-radius: 50%;
+            animation: spin .6s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ---------- shimmer skeleton ---------- */
+        .skeleton {
+            background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-hover) 50%, var(--bg-card) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s ease-in-out infinite;
+            border-radius: 6px;
+            height: 14px;
+        }
+        @keyframes shimmer { to { background-position: -200% 0; } }
     </style>
 </head>
 <body>
 
-<div class="container">
-    <h1>🚀 pg-backup-tg Service Dashboard</h1>
-    <p style="text-align: center; color: #6b7280;">Live status powered by the local backend service (API Port <span id="apiPortDisplay">8080</span>).</p>
+<!-- Header -->
+<div class="header">
+    <h1><span class="dot" id="mainDot"></span>pg-backup-tg</h1>
+    <p>PostgreSQL backup pipeline &mdash; Telegram delivery</p>
+</div>
 
-    <!-- Telegram Service Status Card -->
-    <button class="refresh-btn" id="refreshBtn" onclick="refreshDashboard()">Refresh</button>
-    <div id="telegramStatusCard" class="status-card up">
-        <div class="status-indicator"></div>
-        <div class="status-details">
-            <h2>Telegram API Connection</h2>
-            <p id="telegramServiceMessage">Awaiting status...</p>
+<!-- Server info bar -->
+<div class="info-bar" id="infoBar">
+    <div class="info-chip"><span class="icon">&#x1f5a5;&#xfe0f;</span> <strong id="infoHost">loading...</strong></div>
+    <div class="info-chip"><span class="icon">&#x1f50c;</span> Port <strong id="infoPort">—</strong></div>
+    <div class="info-chip"><span class="icon">&#x23f1;&#xfe0f;</span> Uptime <strong id="infoUptime">—</strong></div>
+</div>
+
+<!-- Status grid -->
+<div class="grid">
+
+    <!-- Telegram card -->
+    <div class="card up" id="tgCard">
+        <div class="card-header">
+            <span class="status-dot" id="tgDot"></span>
+            <span class="card-title">Telegram API</span>
+        </div>
+        <div class="card-body">
+            <div class="status-msg" id="tgMsg">
+                <div class="skeleton" style="width:80%"></div>
+            </div>
+            <div class="status-time" id="tgTime"></div>
         </div>
     </div>
 
-    <!-- Database Dump Status Card -->
-    <div id="dumpStatusCard" class="status-card up">
-        <div class="status-indicator"></div>
-        <div class="status-details">
-            <h2>PostgreSQL Dumping</h2>
-            <p id="dumpProcessMessage">Awaiting status...</p>
+    <!-- Dump card -->
+    <div class="card up" id="dumpCard">
+        <div class="card-header">
+            <span class="status-dot" id="dumpDot"></span>
+            <span class="card-title">PostgreSQL Dump</span>
+        </div>
+        <div class="card-body">
+            <div class="status-msg" id="dumpMsg">
+                <div class="skeleton" style="width:80%"></div>
+            </div>
+            <div class="status-time" id="dumpTime"></div>
         </div>
     </div>
 
 </div>
 
-<script>
-    // API_PORT is discovered from the /api/config endpoint on first load.
-    let API_PORT = null;
+<!-- Controls -->
+<div class="controls">
+    <button class="btn primary" id="refreshBtn" onclick="refreshDashboard()">
+        <span id="refreshIcon">&#x1f504;</span> Refresh
+    </button>
+</div>
 
-    async function discoverPort() {
+<!-- Footer -->
+<div class="footer">pg-backup-tg &middot; Dashboard auto-refreshes every 2 s</div>
+
+<script>
+    /**
+     * pg-backup-tg Status Dashboard
+     *
+     * This script polls the backend API every 2 seconds and updates
+     * the UI in real time. On first load it fetches /api/config to
+     * discover the server port, uptime, and hostname.
+     */
+
+    // ── State ──────────────────────────────────────────────────────
+    /** Server metadata cached from /api/config. */
+    let config = null;
+
+    // ── Info bar helpers ───────────────────────────────────────────
+    /** Convert seconds to a human-readable uptime string. */
+    function formatUptime(seconds) {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+    }
+
+    /** Fetch /api/config and populate the server info chips. */
+    async function loadConfig() {
         try {
-            const resp = await fetch("/api/config");
-            if (resp.ok) {
-                const data = await resp.json();
-                API_PORT = data.port;
-                console.log("Discovered API port:", API_PORT);
-                // Update the displayed port in the header
-<p style="text-align: center; color: #6b7280;">Live status powered by the local backend service (API Port <span id="apiPortDisplay">8080</span>).</p>
-    <button class="refresh-btn" id="refreshBtn" onclick="refreshDashboard()">Refresh</button>
-                if (portDisplay) portDisplay.textContent = API_PORT;
-            } else {
-                API_PORT = 8080; // fallback
-            }
-        } catch {
-            API_PORT = 8080; // fallback
+            const res = await fetch('/api/config');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            config = await res.json();
+
+            document.getElementById('infoHost').textContent = config.hostname;
+            document.getElementById('infoPort').textContent = config.port;
+            document.getElementById('infoUptime').textContent = formatUptime(config.uptime_seconds);
+
+            // Start a 1-second timer so uptime counter ticks live.
+            startUptimeTimer();
+        } catch (err) {
+            console.warn('Failed to load config:', err);
         }
     }
 
-    /** Refresh button — re-fetch both endpoints and update the UI. */
+    /** Refresh the uptime chip every second. */
+    let uptimeTimer = null;
+    function startUptimeTimer() {
+        if (uptimeTimer) clearInterval(uptimeTimer);
+        uptimeTimer = setInterval(loadConfig, 1000);
+    }
+
+    // ── Card helpers ───────────────────────────────────────────────
+    /**
+     * Apply the visual state class to a card and its dot.
+     * @param {HTMLElement} card  - The card div element.
+     * @param {HTMLElement} dot   - The status dot element.
+     * @param {string} state      - "UP", "DEGRADED", or "DOWN".
+     */
+    function applyState(card, dot, state) {
+        card.classList.remove('up', 'degraded', 'down');
+        card.classList.add(state.toLowerCase());
+        dot.style.animation = 'pulse-dot 2s ease-in-out infinite';
+    }
+
+    /**
+     * Write status data into a card's message area.
+     * @param {HTMLElement} msgEl   - The message paragraph.
+     * @param {HTMLElement} timeEl  - The timestamp element.
+     * @param {string} state        - State label (UP, DEGRADED, DOWN).
+     * @param {string} message      - Human-readable message.
+     * @param {string} timestamp    - ISO 8601 timestamp string.
+     */
+    function setStatus(msgEl, timeEl, state, message, timestamp) {
+        const colorMap = {
+            'UP': 'var(--up)',
+            'DEGRADED': 'var(--warn)',
+            'DOWN': 'var(--err)',
+        };
+        const color = colorMap[state] || 'var(--text-muted)';
+
+        msgEl.innerHTML = `
+            <span style="color:${color}; font-weight:600; font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; margin-bottom:.35rem; display:inline-block;">${state}</span>
+            <br>${message}`;
+
+        if (timestamp) {
+            try {
+                const d = new Date(timestamp);
+                timeEl.textContent = d.toLocaleString();
+            } catch {
+                timeEl.textContent = timestamp;
+            }
+        }
+    }
+
+    // ── Fetch logic ────────────────────────────────────────────────
+    /**
+     * Fetch a JSON status endpoint and throw on HTTP error.
+     * Uses relative URLs so the dashboard works when the page is
+     * served from any host — critical for remote server access.
+     * @param {string} endpoint - API path like '/api/status/service'.
+     * @returns {Promise<object>} Parsed JSON response.
+     */
+    async function fetchStatus(endpoint) {
+        const res = await fetch(endpoint);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        return res.json();
+    }
+
+    /**
+     * Manually trigger a status refresh for both cards.
+     * The refresh button disables while in-flight to prevent spam.
+     */
     async function refreshDashboard() {
-        const btn = document.getElementById("refreshBtn");
+        const btn = document.getElementById('refreshBtn');
+        const icon = document.getElementById('refreshIcon');
         btn.disabled = true;
-        btn.textContent = "⏳ Refreshing...";
+        icon.innerHTML = '<span class="spinner"></span>';
 
         try {
             await Promise.all([
-                fetchAndDisplayStatus("/api/status/service", document.getElementById("telegramStatusCard"), "telegramServiceMessage"),
-                fetchAndDisplayStatus("/api/status/process", document.getElementById("dumpStatusCard"), "dumpProcessMessage"),
+                fetchStatus('/api/status/service').then(data => {
+                    const card = document.getElementById('tgCard');
+                    const dot = document.getElementById('tgDot');
+                    applyState(card, dot, data.state);
+                    setStatus(document.getElementById('tgMsg'), document.getElementById('tgTime'), data.state, data.message, data.timestamp);
+                }),
+                fetchStatus('/api/status/process').then(data => {
+                    const card = document.getElementById('dumpCard');
+                    const dot = document.getElementById('dumpDot');
+                    applyState(card, dot, data.state);
+                    setStatus(document.getElementById('dumpMsg'), document.getElementById('dumpTime'), data.state, data.message, data.timestamp);
+                }),
             ]);
+        } catch (err) {
+            console.error('Refresh error:', err);
         } finally {
             btn.disabled = false;
-            btn.textContent = "🔄 Refresh";
+            icon.textContent = '\u{1f504}';
         }
     }
-    const POLLING_INTERVAL_MS = 2000; // Poll every 2 seconds
 
+    // ── Mouse glow effect ──────────────────────────────────────────
     /**
-     * Updates the DOM element with the given status information.
-     * @param {HTMLElement} cardElement - The parent div for the status (e.g., telegramStatusCard).
-     * @param {string} stateString - UP, DEGRADED, or DOWN.
-     * @param {string} message - The detailed message to display.
+     * Track mouse position inside each card so the radial-gradient
+     * pseudo-element follows the cursor for a subtle spotlight effect.
      */
-    function updateStatus(cardElement, stateString, message) {
-        const statusClass = stateString.toLowerCase();
+    document.addEventListener('mousemove', (e) => {
+        document.querySelectorAll('.card').forEach(card => {
+            const r = card.getBoundingClientRect();
+            card.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+            card.style.setProperty('--my', (e.clientY - r.top) + 'px');
+        });
+    });
 
-        // Reset classes and set the new primary class for coloring/shadowing
-        Object.values(['up', 'degraded', 'down']).forEach(cls => cardElement.classList.remove(cls));
-        cardElement.classList.add(`${statusClass} ${stateString}`);
-
-        const messageElement = cardElement.querySelector('p');
-        if (messageElement) {
-            messageElement.textContent = message;
-        }
-    }
-
+    // ── Init ───────────────────────────────────────────────────────
     /**
-     * Fetches and displays the status for a given API endpoint.
-     * @param {string} endpoint - The API path (e.g., '/api/status/service').
-     * @param {HTMLElement} cardElement - The container element to update.
-     * @param {HTMLElement} messageElementId - The ID of the <p> tag within the card.
+     * On DOM ready, fetch config + run initial status poll in parallel,
+     * then start the 2-second polling loop.
      */
-    async function fetchAndDisplayStatus(endpoint, cardElement, messageElementId) {
-        try {
-            const response = await fetch(`http://localhost:${API_PORT}${endpoint}`);
-            if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status} ${response.statusText}`);
-            }
-            const statusData = await response.json();
-
-            // Assume the backend provides a clear state string (UP, DEGRADED, DOWN)
-            const stateString = statusData.state;
-            const message = `[${new Date(statusData.timestamp).toLocaleTimeString()}] ${statusData.message}`;
-
-            updateStatus(cardElement, stateString, message);
-
-        } catch (error) {
-            console.error(`Error fetching status from ${endpoint}:`, error);
-            const fallbackMessage = `Connection failed. Is the Rust server running on port ${API_PORT}? Error: ${(error.message || "Unknown error")}`;
-            updateStatus(cardElement, 'down', fallbackMessage);
-        }
+    async function init() {
+        await Promise.all([
+            loadConfig(),
+            refreshDashboard(),
+        ]);
+        // Poll status endpoints every 2 seconds.
+        setInterval(refreshDashboard, 2000);
     }
 
-    // --- Initialization and Polling Loop ---
-
-    async function initializeDashboard() {
-        console.log("Starting status dashboard poll loop...");
-
-        // Discover the API port from the server
-        await discoverPort();
-
-        // Initial run immediately
-        fetchAndDisplayStatus('/api/status/service', document.getElementById('telegramStatusCard'), 'telegramServiceMessage');
-        fetchAndDisplayStatus('/api/status/process', document.getElementById('dumpStatusCard'), 'dumpProcessMessage');
-
-        // Set up recurring polling
-        setInterval(() => {
-            console.log("Polling status endpoints...");
-            fetchAndDisplayStatus('/api/status/service', document.getElementById('telegramStatusCard'), 'telegramServiceMessage');
-            fetchAndDisplayStatus('/api/status/process', document.getElementById('dumpStatusCard'), 'dumpProcessMessage');
-        }, POLLING_INTERVAL_MS);
-    }
-
-    // Start the process when the window loads
-    window.onload = initializeDashboard;
+    window.addEventListener('DOMContentLoaded', init);
 </script>
+</body>
+</html>
