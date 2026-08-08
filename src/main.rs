@@ -1,4 +1,4 @@
-//! pg-backup-tg: stream a compressed, optionally encrypted Postgres dump to Telegram.
+//! crab-dump: stream a compressed, optionally encrypted Postgres dump to Telegram.
 
 use std::io::{Read, Write};
 use std::time::SystemTime;
@@ -196,7 +196,7 @@ fn run_backup(cfg: &Config, no_encryption: bool) -> Result<()> {
     }
 
     // Manifest to stdout for the receiving side.
-    println!("# pg-backup-tg manifest");
+    println!("# crab-dump manifest");
     println!("base:   {base_name}");
     println!("chunks: {}", chunks.len());
     println!("bytes:  {total_bytes}");

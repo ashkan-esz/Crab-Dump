@@ -1,4 +1,4 @@
-# pg-backup-tg
+# crab-dump
 
 Stream a **compressed**, optionally **encrypted** PostgreSQL dump to **Telegram**, in chunks.
 
@@ -30,12 +30,12 @@ receiving side reassembles with plain `cat`.
 **Option A — Cargo (local binary):**
 ```bash
 cargo build --release
-# binary: target/release/pg-backup-tg
+# binary: target/release/crab-dump
 ```
 
 **Option B — Docker (image with `pg_dump` baked in):**
 ```bash
-docker build -t pg-backup-tg .
+docker build -t crab-dump .
 # or: docker compose build
 ```
 The runtime image is based on `postgres:17-bookworm`, so it ships a matching
@@ -85,15 +85,15 @@ cp .env.example .env  # then edit
 
 ```bash
 set -a; source .env; set +a
-./target/release/pg-backup-tg            # run a backup
-./target/release/pg-backup-tg --dry-run  # validate config, no upload
-./target/release/pg-backup-tg --no-encryption  # disable encryption for this run
+./target/release/crab-dump            # run a backup
+./target/release/crab-dump --dry-run  # validate config, no upload
+./target/release/crab-dump --no-encryption  # disable encryption for this run
 ```
 
 On success the binary prints a **manifest**:
 
 ```
-# pg-backup-tg manifest
+# crab-dump manifest
 base:   pgdump-20260704-205532
 chunks: 3
 bytes:  145572521
@@ -136,7 +136,7 @@ docker run --rm \
   -e DATABASE_URL="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID="..." \
-  pg-backup-tg
+  crab-dump
 
 # One-shot backup (with encryption):
 docker run --rm \
@@ -145,10 +145,10 @@ docker run --rm \
   -e TG_CHAT_ID="..." \
   -e AGE_RECIPIENT="age1..." \
   -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
-  pg-backup-tg
+  crab-dump
 
 # Or with docker-compose (uses a .env file)
-docker compose run --rm pg-backup-tg
+docker compose run --rm crab-dump
 ```
 
 ### Networking notes (important)
@@ -168,7 +168,7 @@ The container has its own network namespace:
 docker run --rm \
   -v pgbackup-work:/work \
   -e WORK_DIR=/work \
-  ... pg-backup-tg
+  ... crab-dump
 ```
 
 ## Scheduling
@@ -176,7 +176,7 @@ docker run --rm \
 Example systemd timer (replace paths/users as needed):
 
 ```ini
-# /etc/systemd/system/pg-backup-tg.service
+# /etc/systemd/system/crab-dump.service
 [Unit]
 Description=PostgreSQL → Telegram backup
 Wants=network-online.target
@@ -185,10 +185,10 @@ After=network-online.target postgresql.service
 [Service]
 Type=oneshot
 User=postgres
-EnvironmentFile=/etc/pg-backup-tg.env
-ExecStart=/usr/local/bin/pg-backup-tg
+EnvironmentFile=/etc/crab-dump.env
+ExecStart=/usr/local/bin/crab-dump
 
-# /etc/systemd/system/pg-backup-tg.timer
+# /etc/systemd/system/crab-dump.timer
 [Unit]
 Description=Daily PostgreSQL backup to Telegram
 
@@ -200,7 +200,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Enable with `systemctl enable --now pg-backup-tg.timer`.
+Enable with `systemctl enable --now crab-dump.timer`.
 
 ## Restoring
 

@@ -159,7 +159,7 @@ mod tests {
 
     fn tmpdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "pg-backup-tg-test-{}-{}",
+            "crab-dump-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

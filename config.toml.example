@@ -1,4 +1,4 @@
-# ── pg-backup-tg configuration ─────────────────────────────────────────────
+# ── crab-dump configuration ────────────────────────────────────────────────
 #
 # This file uses TOML format. Copy it to `config.toml` and fill in your values.
 # Environment variables always override file values — for sensitive data
@@ -32,4 +32,4 @@ tg_chat_id = "-1001234567890"
 # chunk_size_mb = 49
 
 # Directory for temporary chunk files (default: OS temp dir).
-# work_dir = "/var/tmp/pg-backup-tg"
+# work_dir = "/var/tmp/crab-dump"

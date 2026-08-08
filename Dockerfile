@@ -8,19 +8,19 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && printf 'fn main() {}\n' > src/main.rs \
     && cargo build --release \
-    && rm -rf src target/release/deps/pg_backup_tg*
+    && rm -rf src
 
 COPY src ./src
 RUN cargo build --release
 
 FROM postgres:17-bookworm
 
-COPY --from=builder /build/target/release/pg-backup-tg /usr/local/bin/pg-backup-tg
+COPY --from=builder /build/target/release/crab-dump /usr/local/bin/crab-dump
 
 USER postgres
 
-LABEL org.opencontainers.image.title="pg-backup-tg" \
+LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
-      org.opencontainers.image.source="https://github.com/ashkan/pg-backup-tg"
+      org.opencontainers.image.source="https://github.com/ashkan/crab-dump"
 
-ENTRYPOINT ["/usr/local/bin/pg-backup-tg"]
+ENTRYPOINT ["/usr/local/bin/crab-dump"]

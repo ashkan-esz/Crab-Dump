@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a single-binary Rust project (`pg-backup-tg`) with a flat `src/` layout — no crates or submodules:
+This is a single-binary Rust project (`crab-dump`) with a flat `src/` layout — no crates or submodules:
 
 | Path | Purpose |
 |---|---|
@@ -20,7 +20,7 @@ Other roots: `Cargo.toml` (dependencies), `Dockerfile` (multi-stage build), `doc
 
 | Command | What it does |
 |---|---|
-| `cargo build --release` | Compile the binary to `target/release/pg-backup-tg` |
+| `cargo build --release` | Compile the binary to `target/release/crab-dump` |
 | `cargo test` | Run unit tests (chunk rolling / reassembly) |
 | `cargo run --release -- --dry-run` | Validate config + `pg_dump` availability without running a backup |
 

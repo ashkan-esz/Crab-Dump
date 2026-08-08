@@ -637,6 +637,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-dump"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "age",
+ "anyhow",
+ "chrono",
+ "clap",
+ "dotenv",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shell-words",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1688,30 +1712,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "pg-backup-tg"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "age",
- "anyhow",
- "chrono",
- "clap",
- "dotenv",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shell-words",
- "thiserror 2.0.19",
- "tokio",
- "toml 1.1.4+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "zstd",
-]
 
 [[package]]
 name = "pin-project"
