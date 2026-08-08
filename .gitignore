@@ -1,3 +1,56 @@
-/target
-/.idea
+# Rust build output
+target/
+
+# Environment & config (keep .env.example, .env has secrets)
 .env
+!/.env.example
+
+# Local config overrides
+config.toml
+!config.toml.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Rust artifacts
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & backups
+*.log
+*.log.*
+*.bak
+*.old
+
+# Temp
+tmp/
+temp/
+*.tmp
+**/*.tmp
+
+# Archive & compressed
+*.tar
+*.tar.gz
+*.zip
+*.7z
+
+# Database dumps (just in case)
+*.sql
+*.sql.gz
+*.dump
+
+# Python
+__pycache__/
+*.pyc
+
+# Docker / containers
+docker-compose.override.yml
+**/docker-compose.override.yml
+docker-compose.*.override.yml

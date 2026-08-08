@@ -1,12 +1,40 @@
-# Dependencies from target folder (including debug/release artifacts) are unnecessary in image context:
-/target/debug/deps/*
-/target/release/deps/*
-/target/wheels/*.whl
+# Rust workspace
+target/
+Cargo.lock
 
-# VS Code extension dependencies, etc.:
-.vscode/extensions.json
-vsix-install-state.json
+# Environment secrets
+.env
 
-# Local .git directory is not needed since it's already on host machine or git history will be preserved in repo anyway:
-.git/HEAD.lock*
+# IDE
+.idea/
+.vscode/
 
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config overrides
+config.toml
+
+# Logs
+*.log
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+
+# Docker overrides
+docker-compose.override.yml
+**/docker-compose.override.yml
+docker-compose.*.override.yml
+
+# Misc
+*.bak
+*.old
+*~
