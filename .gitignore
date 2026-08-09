@@ -16,6 +16,11 @@ config.toml
 *.swo
 *~
 
+# AI
+.claude
+.agents
+.gapcode
+
 # Rust artifacts
 **/*.rs.bk
 

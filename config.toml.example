@@ -33,3 +33,24 @@ tg_chat_id = "-1001234567890"
 
 # Directory for temporary chunk files (default: OS temp dir).
 # work_dir = "/var/tmp/crab-dump"
+
+# Multi-server configuration (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+# Instead of the single `database_url` above, you can declare multiple servers
+# using a TOML array. Each server gets its own connection string and optional
+# overrides. Servers are backed up in parallel during a single run.
+#
+# This section takes priority over the single-database fields above.
+# When both are present, only [[databases]] is used.
+#
+# See docs/ADR-0001-multi-database-support.md for design details.
+
+# [[databases]]
+# url = "postgresql://user:pass@host1:5432/production_db"
+# name = "myapp-prod"
+# pg_dump_extra_args = "--exclude-table=sessions --exclude-table=temp_logs"
+
+# [[databases]]
+# url = "postgresql://user:pass@host2:5432/analytics"
+# name = "analytics-db"
+# # Inherits the shared pg_dump_extra_args from above when omitted.
