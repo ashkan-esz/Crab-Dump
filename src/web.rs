@@ -416,6 +416,9 @@ pub async fn start_server(port: u16) -> std::io::Result<()> {
             .route("/index.html", web::get().to(serve_dashboard))
     })
     .bind(format!("127.0.0.1:{port}"))?
+    // Dashboard runs on a background thread; actix's own SIGINT handler would
+    // swallow Ctrl+C and leave the main thread hanging forever.
+    .disable_signals()
     .run()
     .await
 }
