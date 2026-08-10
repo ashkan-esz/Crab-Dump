@@ -126,15 +126,22 @@ pub fn send_document(client: &Client, bot_token: &str, chat_id: &str, path: &Pat
                     );
                 }
                 web::set_telegram_status(1);
-                // Telegram knows how long the limit actually runs; its hint beats
-                // a guess. Fall back to exponential backoff (2^attempt, cap 32s).
-                let secs = match retry_after {
-                    Some(n) => n.min(MAX_RETRY_AFTER_SECS),
-                    None => 1u64 << attempt.saturating_sub(1).min(5),
-                };
-                std::thread::sleep(Duration::from_secs(secs));
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
             }
         }
+    }
+}
+
+/// How long to wait before retrying attempt `attempt`.
+///
+/// Telegram knows how long the limit actually runs, so its `retry_after` hint
+/// beats a guess — clamped by [`MAX_RETRY_AFTER_SECS`] so a bad value can't
+/// park the backup for hours. Without a hint, back off exponentially: 1, 2, 4,
+/// 8s over the four sleeps `MAX_ATTEMPTS` allows.
+fn backoff_secs(attempt: u32, retry_after: Option<u64>) -> u64 {
+    match retry_after {
+        Some(n) => n.min(MAX_RETRY_AFTER_SECS),
+        None => 1u64 << attempt.saturating_sub(1).min(5),
     }
 }
 
@@ -155,4 +162,38 @@ fn is_transient(http_status: u16, tg_code: Option<i64>) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D8: Telegram's own hint beats the computed backoff, but a hostile or
+    /// buggy value must not park the backup for hours.
+    #[test]
+    fn retry_after_hint_wins_and_is_clamped() {
+        assert_eq!(backoff_secs(1, Some(45)), 45);
+        assert_eq!(
+            backoff_secs(4, Some(7)),
+            7,
+            "hint wins over a larger backoff"
+        );
+        assert_eq!(backoff_secs(1, Some(86_400)), MAX_RETRY_AFTER_SECS);
+    }
+
+    #[test]
+    fn backoff_doubles_without_a_hint() {
+        let sleeps: Vec<u64> = (1..MAX_ATTEMPTS).map(|a| backoff_secs(a, None)).collect();
+        assert_eq!(sleeps, vec![1, 2, 4, 8]);
+    }
+
+    #[test]
+    fn transient_covers_rate_limits_and_transport_errors() {
+        assert!(is_transient(0, None), "transport error");
+        assert!(is_transient(429, None));
+        assert!(is_transient(503, None));
+        assert!(is_transient(200, Some(429)), "code in the JSON body");
+        assert!(!is_transient(400, None), "bad request is permanent");
+        assert!(!is_transient(401, None), "bad token is permanent");
+    }
 }

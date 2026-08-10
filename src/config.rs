@@ -189,7 +189,7 @@ impl Config {
             .map(|db| {
                 let effective_extra =
                     match (db.pg_dump_extra_args.as_deref(), shared_extra.as_deref()) {
-                        (Some(ov), _) if !ov.is_empty() => Some(ov.to_string()),
+                        (Some(ov), _) if !ov.trim().is_empty() => Some(ov.to_string()),
                         (_, Some(sh)) => Some(sh.to_string()),
                         _ => None,
                     };
@@ -450,10 +450,12 @@ fn load_toml_databases(
             .as_ref()
             .ok_or_else(|| anyhow!("TOML database #{}: missing required `url` field", idx))?;
 
+        // Blank counts as absent, so the entry still inherits `shared_extra`
+        // rather than silently dumping with no extra args at all.
         let effective_extra = entry
             .pg_dump_extra_args
             .clone()
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.trim().is_empty())
             .or_else(|| shared_extra.map(str::to_string));
 
         databases.push(DatabaseConfig {
@@ -736,8 +738,48 @@ mod tests {
         assert_eq!(merged.tg_chat_id.as_deref(), Some("file-chat"));
     }
 
-    // -- Duplicate display names (D3) --
+    // -- Shared pg_dump_extra_args inheritance (D4) --
 
+    /// `config.toml.example` promises a `[[databases]]` entry inherits the
+    /// top-level `pg_dump_extra_args` when it omits its own. Blank counts as
+    /// omitted, otherwise a stray `""` silently drops the operator's filters.
+    #[test]
+    fn toml_entries_inherit_shared_extra_args() {
+        let raw = RawConfigFile {
+            databases: Some(vec![
+                TomlDatabase {
+                    url: Some("postgresql://host:5432/app".into()),
+                    name: None,
+                    pg_dump_extra_args: None,
+                },
+                TomlDatabase {
+                    url: Some("postgresql://host:5432/analytics".into()),
+                    name: None,
+                    pg_dump_extra_args: Some("   ".into()),
+                },
+                TomlDatabase {
+                    url: Some("postgresql://host:5432/logs".into()),
+                    name: None,
+                    pg_dump_extra_args: Some("--schema-only".into()),
+                },
+            ]),
+            ..Default::default()
+        };
+        let dbs = load_toml_databases(&raw, Some("--exclude-table=sessions")).unwrap();
+
+        assert_eq!(
+            dbs[0].pg_dump_extra_args.as_deref(),
+            Some("--exclude-table=sessions")
+        );
+        assert_eq!(
+            dbs[1].pg_dump_extra_args.as_deref(),
+            Some("--exclude-table=sessions")
+        );
+        // An entry that declares its own args keeps them.
+        assert_eq!(dbs[2].pg_dump_extra_args.as_deref(), Some("--schema-only"));
+    }
+
+    // -- Duplicate display names (D3) --
     fn db(url: &str, name: Option<&str>) -> DatabaseConfig {
         DatabaseConfig {
             url: url.into(),
