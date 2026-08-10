@@ -30,9 +30,16 @@ pub const DEFAULT_CHUNK_SIZE_MB: u64 = 49;
 const MAX_CHUNK_SIZE_MB: u64 = 49;
 const MIN_CHUNK_SIZE_MB: u64 = 1;
 
-/// Maximum number of concurrent database backups. Prevents resource exhaustion
+/// Maximum number of configured databases. Prevents resource exhaustion
 /// when operators accidentally configure hundreds of databases.
 const DEFAULT_MAX_DATABASES: usize = 10;
+
+/// How many database backups run at the same time by default.
+///
+/// Each in-flight pipeline holds a `pg_dump` process, a zstd compressor and a
+/// full compressed dump in `work_dir`, so peak disk and CPU scale with this
+/// number — not with the total database count.
+pub const DEFAULT_MAX_PARALLEL_DATABASES: usize = 4;
 
 /// Default config file name searched in the current directory.
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
@@ -59,6 +66,9 @@ pub struct SharedConfig {
     pub api_port: u16,
     /// Optional SOCKS5 proxy URL (`socks5://` or `socks5h://`).
     pub socks_proxy: Option<String>,
+    /// How many database backups may run at the same time (≥ 1). Databases
+    /// beyond this many wait for a free slot.
+    pub max_parallel_databases: usize,
 }
 
 impl SharedConfig {
@@ -148,7 +158,7 @@ impl Config {
         // ── Step 4: Pick source and merge ───────────────────────────────────
         let databases = pick_database_source(toml_dbs, indexed_dbs, &raw, shared_extra.as_deref())?;
 
-        // ── Step 5: Enforce concurrency cap ─────────────────────────────────
+        // ── Step 5: Enforce database count cap ──────────────────────────────
         let max_databases = env::var("CRAB_MAX_DATABASES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -288,6 +298,7 @@ struct RawConfigFile {
     work_dir: Option<String>,
     api_port: Option<u16>,
     socks_proxy: Option<String>,
+    max_parallel_databases: Option<usize>,
     // Populated only when [[databases]] exists in the TOML file.
     databases: Option<Vec<TomlDatabase>>,
 }
@@ -403,6 +414,14 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         None => None,
     };
 
+    // 0 would mean "back up nothing"; reject it instead of silently hanging or
+    // silently running everything at once.
+    let max_parallel_databases = match raw.max_parallel_databases {
+        Some(0) => bail!("MAX_PARALLEL_DATABASES must be at least 1"),
+        Some(n) => n,
+        None => DEFAULT_MAX_PARALLEL_DATABASES,
+    };
+
     Ok(SharedConfig {
         tg_bot_token,
         tg_chat_id,
@@ -411,6 +430,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         work_dir,
         api_port: raw.api_port.unwrap_or(8080),
         socks_proxy,
+        max_parallel_databases,
     })
 }
 
@@ -435,6 +455,9 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
             .and_then(|v| v.parse().ok())
             .or(raw.api_port),
         socks_proxy: env("SOCKS_PROXY").or(raw.socks_proxy),
+        max_parallel_databases: env("MAX_PARALLEL_DATABASES")
+            .and_then(|v| v.parse().ok())
+            .or(raw.max_parallel_databases),
         databases: raw.databases, // TOML-only; never merged with env.
     }
 }
@@ -683,8 +706,55 @@ mod tests {
             work_dir: std::env::temp_dir(),
             api_port: 8080,
             socks_proxy: None,
+            max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
+    }
+
+    // -- Parallelism limit --
+
+    fn shared_raw() -> RawConfigFile {
+        RawConfigFile {
+            tg_bot_token: Some("t".into()),
+            tg_chat_id: Some("c".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn max_parallel_defaults_and_reads_config() {
+        assert_eq!(
+            build_shared_config(&shared_raw())
+                .unwrap()
+                .max_parallel_databases,
+            DEFAULT_MAX_PARALLEL_DATABASES,
+        );
+        let raw = RawConfigFile {
+            max_parallel_databases: Some(2),
+            ..shared_raw()
+        };
+        assert_eq!(build_shared_config(&raw).unwrap().max_parallel_databases, 2);
+    }
+
+    /// Zero would stall the run instead of limiting it — reject at startup.
+    #[test]
+    fn max_parallel_zero_is_rejected() {
+        let raw = RawConfigFile {
+            max_parallel_databases: Some(0),
+            ..shared_raw()
+        };
+        let err = build_shared_config(&raw).unwrap_err().to_string();
+        assert!(err.contains("at least 1"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn max_parallel_env_shadows_file() {
+        let raw = RawConfigFile {
+            max_parallel_databases: Some(2),
+            ..Default::default()
+        };
+        let env = |k: &str| (k == "MAX_PARALLEL_DATABASES").then(|| "7".to_string());
+        assert_eq!(merge_raw_with_env(raw, env).max_parallel_databases, Some(7));
     }
 
     // -- Single-database fallback (D1, D4) --

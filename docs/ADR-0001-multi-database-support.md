@@ -118,9 +118,13 @@ A new per-database endpoint exposes individual states:
   Operators who need per-DB encryption toggles must fork or request v2.
 - **Shared chat constraint**: All uploads go to the same Telegram chat.  Future
   versions may index `TG_CHAT_ID_N` per server to decouple this.
-- **Concurrency cap**: Hard limit of 10 concurrent servers (`CRAB_MAX_DATABASES`)
-  prevents runaway resource usage; operators with many small databases will need
+- **Concurrency cap**: Hard limit of 10 configured servers (`CRAB_MAX_DATABASES`)
+  prevents runaway configuration; operators with many small databases will need
   batching.
+- **Parallelism throttle**: `MAX_PARALLEL_DATABASES` (default 4) caps how many
+  of those servers back up at the same time, bounding peak disk/CPU to the
+  limit's worth of pipelines. Lower it when disk or database load is the
+  constraint; 1 runs backups strictly sequentially.
 
 ### Open questions
 
@@ -130,3 +134,4 @@ A new per-database endpoint exposes individual states:
 | What default `CRAB_MAX_DATABASES` is safe? | 10 (configurable via env).       |
 | Should we support per-server TG chat IDs? | Out of scope; deferred to v2.       |
 | Is there a preferred concurrency library? | None — the pipeline is blocking, so one `std::thread` per database is enough. |
+| What is the right `MAX_PARALLEL_DATABASES` default? | 4 — a bounded worker pool, no external dependency. |

@@ -121,6 +121,7 @@ removed automatically, so sweep `WORK_DIR` after investigating a failed run.
 | `DB_NAME_N`          | no       | from URL path  | display name for database `N`; must be unique      |
 | `PG_DUMP_EXTRA_ARGS_N` | no     | shared value   | per-database override of `PG_DUMP_EXTRA_ARGS`      |
 | `CRAB_MAX_DATABASES` | no       | `10`           | refuses to start above this count                  |
+| `MAX_PARALLEL_DATABASES` | no   | `4`            | how many databases back up at the same time (≥ 1)  |
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
 | `TG_CHAT_ID`         | yes      |                | numeric id or `@channelusername`                   |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
@@ -167,16 +168,21 @@ dashboard cards, so crab-dump refuses to start on a collision. Set `DB_NAME_N`
 (or `name`) when two servers host a database of the same name.
 
 Each database dumps and packages on its own thread; one failure does not stop
-the others, but any failure makes the run exit non-zero. Uploads are
-serialized process-wide because all databases share one `TG_CHAT_ID` and
-Telegram rate-limits per chat.
+the others, but any failure makes the run exit non-zero. At most
+`MAX_PARALLEL_DATABASES` (default `4`) run at a time — a database waits for a
+free slot, and a worker takes the next queued database as soon as it finishes,
+so a slow dump never idles the others. Set it to `1` for strictly sequential
+backups. Uploads are serialized process-wide because all databases share one
+`TG_CHAT_ID` and Telegram rate-limits per chat.
 
 > **Disk:** each pipeline writes its entire compressed dump to `WORK_DIR`
-> before uploading its first chunk, so peak disk usage is the sum across all
-> databases running concurrently — up to `CRAB_MAX_DATABASES` × the
+> before uploading its first chunk, so peak disk usage is the sum across the
+> databases running concurrently — up to `MAX_PARALLEL_DATABASES` × the
 > single-database figure. Nothing pre-checks free space; exhaustion surfaces as
 > an I/O error mid-dump, after the dump time has been spent. Size `WORK_DIR`
-> accordingly, or lower `CRAB_MAX_DATABASES`.
+> accordingly, or lower `MAX_PARALLEL_DATABASES`.
+
+The dashboard shows the active limit in its info bar ("Parallel limit").
 
 ## Running in Docker
 

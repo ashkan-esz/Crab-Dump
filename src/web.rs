@@ -1,7 +1,7 @@
 //! HTTP status dashboard server.
 //!
 //! Serves `index.html` as a static page and provides API endpoints:
-//! - `GET /api/config` — returns `{ "port": <port> }` so the JS can discover the port
+//! - `GET /api/config` — returns `{ "port", "uptime_seconds", "hostname", "max_parallel_databases" }`
 //! - `GET /api/status/service` — Telegram API connection status
 //! - `GET /api/status/process` — aggregated PostgreSQL dump status (max across DBs)
 //! - `GET /api/status/database/{name}` — per-database dump status
@@ -27,6 +27,11 @@ static TELEGRAM_STATUS: AtomicU8 = AtomicU8::new(0);
 /// Set lazily on the first `api_config` call to avoid static initialization
 /// with non-const expressions (which Rust forbids).
 static START_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Configured cap on concurrent database backups, published to the dashboard.
+/// Set once at startup by [`set_max_parallel_databases`]; 0 means "not yet
+/// reported", which the dashboard renders as unknown.
+static MAX_PARALLEL_DATABASES: AtomicU64 = AtomicU64::new(0);
 
 // ===========================================================================
 // Per-database dump statuses (HashMap keyed by display name)
@@ -199,6 +204,11 @@ pub fn get_aggregated_dump_status() -> u8 {
     statuses.values().map(|s| s.code).max().unwrap_or(0)
 }
 
+/// Publish the configured concurrency limit so `/api/config` can report it.
+pub fn set_max_parallel_databases(limit: usize) {
+    MAX_PARALLEL_DATABASES.store(limit as u64, Ordering::SeqCst);
+}
+
 /// Response shape for the `/api/config` endpoint (includes uptime and server details).
 #[derive(Serialize, Deserialize)]
 pub struct ConfigResponse {
@@ -208,6 +218,8 @@ pub struct ConfigResponse {
     pub uptime_seconds: u64,
     /// Hostname the server is running on.
     pub hostname: String,
+    /// How many database backups may run at the same time.
+    pub max_parallel_databases: u64,
 }
 
 /// GET /api/config — returns the current dashboard port.
@@ -237,6 +249,7 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
         port: **cfg,
         uptime_seconds,
         hostname,
+        max_parallel_databases: MAX_PARALLEL_DATABASES.load(Ordering::SeqCst),
     })
 }
 
@@ -391,7 +404,7 @@ async fn serve_dashboard() -> impl Responder {
 /// Serves:
 /// - `/` — the dashboard HTML
 /// - `/index.html` — same dashboard HTML
-/// - `/api/config` — returns `{ "port": <port>, "uptime_seconds": ..., "hostname": ... }`
+/// - `/api/config` — returns `{ "port": <port>, "uptime_seconds": ..., "hostname": ..., "max_parallel_databases": ... }`
 /// - `/api/status/service` — returns Telegram API connection status
 /// - `/api/status/process` — returns aggregated PostgreSQL dump status
 /// - `/api/status/database/{name}` — returns per-database dump status

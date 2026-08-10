@@ -34,11 +34,17 @@ tg_chat_id = "-1001234567890"
 # Directory for temporary chunk files (default: OS temp dir).
 # work_dir = "/var/tmp/crab-dump"
 
+# How many databases back up at the same time (default: 4, minimum 1).
+# Peak work_dir usage is this many compressed dumps at once; lower it when
+# disk, CPU or database load is the constraint. 1 = fully sequential.
+# max_parallel_databases = 4
+
 # Multi-server configuration (optional)
 # ─────────────────────────────────────────────────────────────────────────────
 # Instead of the single `database_url` above, you can declare multiple servers
 # using a TOML array. Each server gets its own connection string and optional
-# overrides. Servers are backed up in parallel during a single run.
+# overrides. Servers are backed up in parallel during a single run, up to
+# `max_parallel_databases` at a time.
 #
 # This section takes priority over the single-database fields above.
 # When both are present, only [[databases]] is used.

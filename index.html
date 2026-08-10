@@ -529,6 +529,7 @@
         <span class="info-chip"><span class="icon">&#x1f310;</span> Host: <strong id="infoHost">—</strong></span>
         <span class="info-chip"><span class="icon">&#x1f3e2;</span> Port: <strong id="infoPort">—</strong></span>
         <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">—</strong></span>
+        <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">—</strong></span>
     </div>
 
     <!-- Main status grid (Telegram + aggregated dump) -->
@@ -638,6 +639,13 @@
             config = await res.json();
             document.getElementById('infoHost').textContent = config.hostname;
             document.getElementById('infoPort').textContent = config.port;
+            // How many databases may dump at once — 0 means the backend has not
+            // reported a limit yet, so leave the placeholder in place.
+            const limit = config.max_parallel_databases;
+            if (limit > 0) {
+                document.getElementById('infoParallel').textContent =
+                    `${limit} database${limit === 1 ? '' : 's'} at once`;
+            }
             uptimeSecs = config.uptime_seconds;
             document.getElementById('infoUptime').textContent = formatUptime(uptimeSecs);
             startUptimeTimer();

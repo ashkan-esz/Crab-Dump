@@ -1,10 +1,13 @@
 //! crab-dump: stream compressed, optionally encrypted Postgres dumps to Telegram.
 //!
 //! Multi-database aware: spawns independent pipelines per configured server,
-//! each running `pg_dump → zstd → age? → chunk → upload` concurrently.
+//! each running `pg_dump → zstd → age? → chunk → upload`, at most
+//! `MAX_PARALLEL_DATABASES` of them at a time.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -76,6 +79,7 @@ fn main() -> Result<()> {
     // The dashboard runs in a dedicated thread with its own tokio runtime
     // because actix_web::HttpServer is not Send.
     let dashboard_port = shared_cfg.api_port;
+    web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     tracing::info!(port = dashboard_port, "spawning status dashboard server");
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -99,6 +103,7 @@ fn main() -> Result<()> {
         count = databases.len(),
         work_dir = %shared_cfg.work_dir.display(),
         chunk_mb = shared_cfg.chunk_size_mb,
+        max_parallel = shared_cfg.max_parallel_databases,
         "configuration resolved",
     );
 
@@ -419,9 +424,9 @@ fn rate(bytes: u64, since: &SystemTime) -> f64 {
 
 /// Execute backups for all configured databases.
 ///
-/// Runs each database backup as a separate OS thread via `std::thread::spawn`.
-/// Individual failures do not cancel other databases (failure policy: continue).
-/// The operation fails only when ALL databases fail.
+/// Runs at most `cfg.max_parallel_databases` pipelines at the same time; the
+/// rest wait for a free slot. Individual failures do not cancel other databases
+/// (failure policy: continue). The operation fails only when ALL databases fail.
 ///
 /// Returns the successes and the per-database failures; the caller reports both
 /// and sets the exit code.
@@ -438,30 +443,32 @@ fn execute_all_databases(
         return Ok((vec![result], Vec::new()));
     }
 
+    // Never start more workers than there is work for them.
+    let workers = cfg.max_parallel_databases.min(databases.len()).max(1);
     tracing::info!(
         count = databases.len(),
+        max_parallel = cfg.max_parallel_databases,
+        workers,
         "spawning parallel database backups"
     );
 
-    // One thread per database — each runs the full blocking pipeline.
-    let handles: Vec<_> = databases
-        .iter()
-        .enumerate()
-        .map(|(i, db)| {
-            let db = db.clone();
-            let cfg = cfg.clone();
-            let no_enc = no_encryption;
-            std::thread::spawn(move || run_database(&cfg, &db, i, no_enc))
-        })
-        .collect();
+    // Each worker runs the full blocking pipeline for one database at a time,
+    // taking the next queued database as soon as it frees up. A panic inside a
+    // pipeline is caught here so the remaining databases keep going and the
+    // failure is still attributed to the database that caused it.
+    let outcomes = run_bounded(databases, workers, |i, db| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_database(cfg, db, i, no_encryption)
+        }))
+    });
 
     // Collect results, tracking successes and failures independently.
     let mut results = Vec::new();
     let mut errors: Vec<DatabaseFailure> = Vec::new();
 
-    for (i, handle) in handles.into_iter().enumerate() {
+    for (i, outcome) in outcomes.into_iter().enumerate() {
         let db_name = databases[i].display_name();
-        match handle.join() {
+        match outcome {
             Ok(Ok(result)) => {
                 tracing::info!(db_index = i, db_name = %db_name, "database backup succeeded");
                 results.push(result);
@@ -524,6 +531,41 @@ fn execute_all_databases(
     }
 
     Ok((results, errors))
+}
+
+/// Run `f` over every item with at most `workers` running at the same time.
+///
+/// A shared cursor hands out the next index, so a worker that finishes early
+/// picks up the next database immediately instead of waiting for its peers —
+/// what a fixed batch-per-round split would do. Results come back in input
+/// order regardless of completion order, which keeps the manifest deterministic.
+///
+/// Scoped threads let the workers borrow the config and database list, so
+/// nothing has to be cloned per database.
+fn run_bounded<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    f: impl Fn(usize, &T) -> R + Sync,
+) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                // `fetch_add` is the whole queue: each worker claims exactly one
+                // index, and the first claim past the end ends that worker.
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { return };
+                let result = f(i, item);
+                out.lock().expect("result lock poisoned").push((i, result));
+            });
+        }
+    });
+
+    let mut collected = out.into_inner().expect("result lock poisoned");
+    collected.sort_by_key(|(i, _)| *i);
+    collected.into_iter().map(|(_, r)| r).collect()
 }
 
 /// Build an HTTP client configured for Telegram Bot API uploads.
@@ -739,5 +781,52 @@ mod tests {
     fn restore_line_decrypts_only_when_encrypted() {
         assert!(restore_line(&result_with("db0-x-1", true)).contains("age -d | zstd -d"));
         assert!(!restore_line(&result_with("db0-x-1", false)).contains("age -d"));
+    }
+
+    /// The concurrency limit is the whole point of the parameter: never more
+    /// than `workers` pipelines in flight, every database still processed, and
+    /// results in input order so the manifest does not depend on timing.
+    #[test]
+    fn bounded_runner_caps_concurrency_and_keeps_input_order() {
+        let items: Vec<usize> = (0..20).collect();
+        let live = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        let out = run_bounded(&items, 3, |i, item| {
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            // Hold the slot long enough that an unbounded implementation would
+            // overlap all 20 items and blow past the cap.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            live.fetch_sub(1, Ordering::SeqCst);
+            i * 10 + item
+        });
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "concurrency exceeded the cap: {}",
+            peak.load(Ordering::SeqCst),
+        );
+        assert_eq!(out, items.iter().map(|v| v * 11).collect::<Vec<_>>());
+    }
+
+    /// A panicking pipeline must not take its peers down: the panic is caught
+    /// per item, so later databases still run and the failure stays attributed.
+    #[test]
+    fn bounded_runner_isolates_panics() {
+        let items = vec![0usize, 1, 2];
+        let out = run_bounded(&items, 2, |_, item| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_ne!(*item, 1, "boom");
+                *item
+            }))
+        });
+
+        assert!(out[0].is_ok());
+        assert!(
+            out[1].is_err(),
+            "the panicking item must be reported as such"
+        );
+        assert!(out[2].is_ok(), "a peer panic must not skip later items");
     }
 }
