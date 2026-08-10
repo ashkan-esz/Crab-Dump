@@ -129,7 +129,7 @@ impl Config {
         // ── Step 1: Parse config.toml once, merged with the environment ─────
         // Every step below reads from this single view, so a setting works
         // identically whether it came from the file or from an env var.
-        let raw = merge_raw_with_env(load_config_raw());
+        let raw = merge_raw_with_env(load_config_raw(), get_env);
         let shared = build_shared_config(&raw)?;
 
         // Shared pg_dump args, from either source — the default each database
@@ -213,7 +213,11 @@ impl Config {
 /// Reads `database_url` from the merged view, so `config.toml` and
 /// `DATABASE_URL` work identically. Returns `None` when neither set it.
 fn single_db_fallback(raw: &RawConfigFile, shared_extra: Option<&str>) -> Option<DatabaseConfig> {
-    let url = raw.database_url.as_deref().map(str::trim).filter(|v| !v.is_empty())?;
+    let url = raw
+        .database_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
     Some(DatabaseConfig {
         url: url.to_string(),
         name: None,
@@ -401,25 +405,25 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
 
 /// Merge a raw TOML-parsed config with environment variables.
 ///
-/// Environment values shadow file values for every scalar field. The TOML
-/// `databases` array is never merged with env vars (it is inherently file-bound).
-fn merge_raw_with_env(raw: RawConfigFile) -> RawConfigFile {
+/// Environment values shadow file values for every scalar field — the order
+/// the module doc, the README and `config.toml.example` all promise. The TOML
+/// `databases` array is never merged with env vars (it is inherently
+/// file-bound).
+fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) -> RawConfigFile {
     RawConfigFile {
-        database_url: raw.database_url.or(get_env("DATABASE_URL")),
-        pg_dump_extra_args: raw
-            .pg_dump_extra_args
-            .or_else(|| get_env("PG_DUMP_EXTRA_ARGS")),
-        tg_bot_token: raw.tg_bot_token.or_else(|| get_env("TG_BOT_TOKEN")),
-        tg_chat_id: raw.tg_chat_id.or_else(|| get_env("TG_CHAT_ID")),
-        age_recipient: raw.age_recipient.or_else(|| get_env("AGE_RECIPIENT")),
-        chunk_size_mb: raw
-            .chunk_size_mb
-            .or_else(|| get_env("CHUNK_SIZE_MB").and_then(|v| v.parse().ok())),
-        work_dir: raw.work_dir.or_else(|| get_env("WORK_DIR")),
-        api_port: raw
-            .api_port
-            .or_else(|| get_env("API_PORT").and_then(|v| v.parse().ok())),
-        socks_proxy: raw.socks_proxy.or_else(|| get_env("SOCKS_PROXY")),
+        database_url: env("DATABASE_URL").or(raw.database_url),
+        pg_dump_extra_args: env("PG_DUMP_EXTRA_ARGS").or(raw.pg_dump_extra_args),
+        tg_bot_token: env("TG_BOT_TOKEN").or(raw.tg_bot_token),
+        tg_chat_id: env("TG_CHAT_ID").or(raw.tg_chat_id),
+        age_recipient: env("AGE_RECIPIENT").or(raw.age_recipient),
+        chunk_size_mb: env("CHUNK_SIZE_MB")
+            .and_then(|v| v.parse().ok())
+            .or(raw.chunk_size_mb),
+        work_dir: env("WORK_DIR").or(raw.work_dir),
+        api_port: env("API_PORT")
+            .and_then(|v| v.parse().ok())
+            .or(raw.api_port),
+        socks_proxy: env("SOCKS_PROXY").or(raw.socks_proxy),
         databases: raw.databases, // TOML-only; never merged with env.
     }
 }
@@ -690,7 +694,10 @@ mod tests {
             ..Default::default()
         };
         let db = single_db_fallback(&raw, Some("--exclude-table=logs")).unwrap();
-        assert_eq!(db.pg_dump_extra_args.as_deref(), Some("--exclude-table=logs"));
+        assert_eq!(
+            db.pg_dump_extra_args.as_deref(),
+            Some("--exclude-table=logs")
+        );
     }
 
     #[test]
@@ -700,6 +707,33 @@ mod tests {
             ..Default::default()
         };
         assert!(single_db_fallback(&raw, None).is_none());
+    }
+
+    /// The module doc, README and `config.toml.example` all promise the
+    /// environment shadows `config.toml`. D1 routed `database_url` through
+    /// this merge, so the fallback inherits whatever order it uses.
+    #[test]
+    fn env_shadows_file_for_every_scalar() {
+        let raw = RawConfigFile {
+            database_url: Some("postgresql://file:5432/app".into()),
+            tg_chat_id: Some("file-chat".into()),
+            chunk_size_mb: Some(10),
+            ..Default::default()
+        };
+        let env = |k: &str| match k {
+            "DATABASE_URL" => Some("postgresql://env:5432/app".to_string()),
+            "CHUNK_SIZE_MB" => Some("20".to_string()),
+            _ => None,
+        };
+        let merged = merge_raw_with_env(raw, env);
+
+        assert_eq!(
+            merged.database_url.as_deref(),
+            Some("postgresql://env:5432/app")
+        );
+        assert_eq!(merged.chunk_size_mb, Some(20));
+        // Unset in the environment — the file value survives.
+        assert_eq!(merged.tg_chat_id.as_deref(), Some("file-chat"));
     }
 
     // -- Duplicate display names (D3) --
@@ -759,7 +793,10 @@ mod tests {
         };
         let dbs = scan_indexed_databases(Some("--exclude-table=logs"), env);
         assert_eq!(dbs.len(), 2);
-        assert_eq!(dbs[0].pg_dump_extra_args.as_deref(), Some("--exclude-table=logs"));
+        assert_eq!(
+            dbs[0].pg_dump_extra_args.as_deref(),
+            Some("--exclude-table=logs")
+        );
         assert_eq!(dbs[1].pg_dump_extra_args.as_deref(), Some("--schema-only"));
     }
 
