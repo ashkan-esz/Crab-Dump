@@ -15,7 +15,7 @@
 //! shared defaults for their respective server.
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
@@ -107,32 +107,14 @@ impl DatabaseConfig {
 }
 
 // ===========================================================================
-// Legacy single-database config (kept for backward compatibility)
+// Configuration entry-point
 // ===========================================================================
 
-#[allow(dead_code)]
-#[allow(missing_docs)]
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub database_url: String,
-    pub pg_dump_extra_args: Option<String>,
-    pub tg_bot_token: String,
-    pub tg_chat_id: String,
-    pub age_recipient: Option<String>,
-    pub chunk_size_mb: u64,
-    pub work_dir: PathBuf,
-    pub api_port: u16,
-    pub socks_proxy: Option<String>,
-}
+/// Namespace for configuration resolution. Carries no state — see
+/// [`SharedConfig`] and [`DatabaseConfig`] for the resolved values.
+pub struct Config;
 
-// Legacy config impl — fields accessed only from external crates via the public API.
-#[allow(dead_code)]
 impl Config {
-    /// Shorthand for chunk size in bytes.
-    pub fn chunk_size_bytes(&self) -> u64 {
-        self.chunk_size_mb * 1024 * 1024
-    }
-
     /// Primary entry-point: resolve all database configurations.
     ///
     /// Tries three sources in descending priority:
@@ -144,32 +126,34 @@ impl Config {
     ///
     /// See ADR-0001 for the full design rationale.
     pub fn resolve_databases() -> Result<(SharedConfig, Vec<DatabaseConfig>)> {
-        // ── Step 1: Load shared configuration ───────────────────────────────
-        let shared = load_shared_config()?;
+        // ── Step 1: Parse config.toml once, merged with the environment ─────
+        // Every step below reads from this single view, so a setting works
+        // identically whether it came from the file or from an env var.
+        let raw = merge_raw_with_env(load_config_raw());
+        let shared = build_shared_config(&raw)?;
+
+        // Shared pg_dump args, from either source — the default each database
+        // inherits unless it declares its own.
+        let shared_extra = raw
+            .pg_dump_extra_args
+            .clone()
+            .filter(|v| !v.trim().is_empty());
 
         // ── Step 2: Load TOML [[databases]] arrays ──────────────────────────
-        let toml_dbs = load_toml_databases()?;
+        let toml_dbs = load_toml_databases(&raw, shared_extra.as_deref())?;
 
         // ── Step 3: Scan indexed environment variables ──────────────────────
-        let indexed_dbs = load_indexed_databases()?;
+        let indexed_dbs = scan_indexed_databases(shared_extra.as_deref(), get_env);
 
         // ── Step 4: Pick source and merge ───────────────────────────────────
         let databases: Vec<DatabaseConfig> = match (toml_dbs.is_empty(), indexed_dbs.is_empty()) {
             // TOML wins — more expressive, supports extra args inline.
             (false, _) => toml_dbs,
             (_, false) => indexed_dbs,
-            // Neither source → fall back to legacy single DATABASE_URL.
-            (true, true) => match env::var("DATABASE_URL")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-            {
-                Some(url) => vec![DatabaseConfig {
-                    url: url.trim().to_string(),
-                    name: None,
-                    pg_dump_extra_args: env::var("PG_DUMP_EXTRA_ARGS")
-                        .ok()
-                        .filter(|v| !v.is_empty()),
-                }],
+            // Neither source → fall back to the single `database_url`, which
+            // may come from config.toml or from `DATABASE_URL`.
+            (true, true) => match single_db_fallback(&raw, shared_extra.as_deref()) {
+                Some(db) => vec![db],
                 None => bail!(
                     "No databases configured. Set `DATABASE_URL` for a single database,\n\
                      use `DATABASE_URL_0` / `DATABASE_URL_1` for indexed config, or\n\
@@ -191,7 +175,7 @@ impl Config {
 
         if databases.len() > max_databases {
             bail!(
-                "Too many databases: {} exceeds the maximum of {}\
+                "Too many databases: {} exceeds the maximum of {} \
                  (raise with `CRAB_MAX_DATABASES`)",
                 databases.len(),
                 max_databases,
@@ -199,12 +183,7 @@ impl Config {
         }
 
         // ── Step 6: Resolve per-database extra args ─────────────────────────
-        // Every database inherits the shared PG_DUMP_EXTRA_ARGS unless it
-        // specifies its own override.
-        let shared_extra = env::var("PG_DUMP_EXTRA_ARGS")
-            .ok()
-            .filter(|v| !v.is_empty());
-
+        // Every database inherits `shared_extra` unless it set its own override.
         let final_dbs: Vec<DatabaseConfig> = databases
             .into_iter()
             .map(|db| {
@@ -223,58 +202,58 @@ impl Config {
             .collect();
 
         // ── Step 7: Validate ────────────────────────────────────────────────
-        for (idx, db) in final_dbs.iter().enumerate() {
-            validate_database_url(idx, &db.url)?;
-            if let Some(ref nm) = db.name {
-                if !nm
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
-                    bail!(
-                        "Database {}: invalid name '{}' (only letters, digits, `-`, `_)`",
-                        idx,
-                        nm,
-                    );
-                }
-            }
-        }
+        validate_databases(&final_dbs)?;
 
         Ok((shared, final_dbs))
     }
+}
 
-    /// Legacy single-database entry-point.
-    ///
-    /// Delegates to [`Self::resolve_databases`] internally. Errors if more
-    /// than one database is configured, enforcing strict backward compat.
-    pub fn from_env() -> Result<Self> {
-        let (shared, dbs) = Self::resolve_databases()?;
-        if dbs.len() != 1 {
+/// Build the single-database fallback from the merged config.
+///
+/// Reads `database_url` from the merged view, so `config.toml` and
+/// `DATABASE_URL` work identically. Returns `None` when neither set it.
+fn single_db_fallback(raw: &RawConfigFile, shared_extra: Option<&str>) -> Option<DatabaseConfig> {
+    let url = raw.database_url.as_deref().map(str::trim).filter(|v| !v.is_empty())?;
+    Some(DatabaseConfig {
+        url: url.to_string(),
+        name: None,
+        pg_dump_extra_args: shared_extra.map(str::to_string),
+    })
+}
+
+/// Validate a fully-resolved database list: URLs, name charset, and uniqueness
+/// of display names.
+///
+/// Display names must be unique: they key the chunk-file prefix and the
+/// dashboard, so a collision means two dumps interleaving into the same
+/// `.partNNNN` files.
+fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
+    let mut seen_names: std::collections::HashMap<String, usize> = Default::default();
+    for (idx, db) in dbs.iter().enumerate() {
+        validate_database_url(idx, &db.url)?;
+        if let Some(ref nm) = db.name {
+            if !nm
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                bail!(
+                    "Database {}: invalid name '{}' (only letters, digits, `-`, `_)`",
+                    idx,
+                    nm,
+                );
+            }
+        }
+        let display = db.display_name();
+        if let Some(first) = seen_names.insert(display.clone(), idx) {
             bail!(
-                "`from_env()` expects exactly one database but found {}. \
-                 Use `resolve_databases()` for multi-database backups.",
-                dbs.len(),
+                "Databases {first} and {idx} both resolve to the display name \
+                 '{display}'. Names key the chunk filenames and the dashboard, \
+                 so they must be unique — set `DB_NAME_{idx}` (indexed env) or \
+                 `name` (config.toml [[databases]]) to distinguish them.",
             );
         }
-        let db = dbs.into_iter().next().unwrap();
-        Ok(Config {
-            database_url: db.url,
-            pg_dump_extra_args: db.pg_dump_extra_args,
-            tg_bot_token: shared.tg_bot_token,
-            tg_chat_id: shared.tg_chat_id,
-            age_recipient: shared.age_recipient,
-            chunk_size_mb: shared.chunk_size_mb,
-            work_dir: shared.work_dir,
-            api_port: shared.api_port,
-            socks_proxy: shared.socks_proxy,
-        })
     }
-
-    /// Like `from_env` but accepts an explicit config file path.
-    pub fn with_config_path(_config_path: Option<&Path>) -> Result<Self> {
-        // Deprecated in multi-db era; delegate to from_env() which always
-        // resolves from CWD + env. Custom paths are no longer supported.
-        Self::from_env()
-    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -348,29 +327,31 @@ fn get_env(k: &str) -> Option<String> {
     env::var(k).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// Load shared (non-database-specific) configuration by merging the TOML file
-/// with environment variables.
+/// Build shared (non-database-specific) configuration from an already-merged
+/// raw config.
 ///
-/// Merges in priority order: hardcoded defaults < file < environment.
-fn load_shared_config() -> Result<SharedConfig> {
-    let raw = load_config_raw();
-    let raw = merge_raw_with_env(raw);
-
+/// The caller merges file and environment values (defaults < file < env), so
+/// this function only validates and applies fallbacks.
+fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
     let tg_bot_token = raw
         .tg_bot_token
+        .clone()
         .ok_or_else(|| anyhow!("TG_BOT_TOKEN is required (set in config.toml or environment)"))?;
 
     let tg_chat_id = raw
         .tg_chat_id
+        .clone()
         .ok_or_else(|| anyhow!("TG_CHAT_ID is required (set in config.toml or environment)"))?;
 
-    let age_recipient = match raw.age_recipient {
+    let age_recipient = match raw.age_recipient.clone() {
         Some(s) => {
             if !s.starts_with("age1") {
+                // Truncate by characters, not bytes — a byte slice panics when
+                // the cut lands inside a multi-byte character.
                 bail!(
                     "AGE_RECIPIENT looks invalid: expected an X25519 recipient \
                      starting with `age1`, got `{}`",
-                    &s[..s.len().min(12)],
+                    s.chars().take(12).collect::<String>(),
                 );
             }
             Some(s)
@@ -392,12 +373,12 @@ fn load_shared_config() -> Result<SharedConfig> {
         None => DEFAULT_CHUNK_SIZE_MB,
     };
 
-    let work_dir = match raw.work_dir {
+    let work_dir = match raw.work_dir.clone() {
         Some(p) => PathBuf::from(p),
         None => env::temp_dir(),
     };
 
-    let socks_proxy = match raw.socks_proxy {
+    let socks_proxy = match raw.socks_proxy.clone() {
         Some(s) => {
             if !(s.starts_with("socks5://") || s.starts_with("socks5h://")) {
                 bail!("SOCKS_PROXY must start with `socks5://` or `socks5h://`, got `{s}`");
@@ -445,17 +426,18 @@ fn merge_raw_with_env(raw: RawConfigFile) -> RawConfigFile {
 
 /// Extract database configurations from TOML `[[databases]]` entries.
 ///
-/// Scans the `config.toml` file for a `databases` array and converts each
-/// entry into a [`DatabaseConfig`]. Returns an empty vec when no section
-/// exists.
-fn load_toml_databases() -> Result<Vec<DatabaseConfig>> {
-    let raw = load_config_raw();
-    let entries = raw.databases.unwrap_or_default();
+/// `shared_extra` is the already-merged shared `pg_dump_extra_args` (file or
+/// environment); an entry inherits it unless it sets its own.
+/// Returns an empty vec when no `[[databases]]` section exists.
+fn load_toml_databases(
+    raw: &RawConfigFile,
+    shared_extra: Option<&str>,
+) -> Result<Vec<DatabaseConfig>> {
+    let entries = raw.databases.clone().unwrap_or_default();
     if entries.is_empty() {
         return Ok(Vec::new());
     }
 
-    let shared_extra = get_env("PG_DUMP_EXTRA_ARGS");
     let mut databases = Vec::with_capacity(entries.len());
 
     for (idx, entry) in entries.iter().enumerate() {
@@ -468,7 +450,7 @@ fn load_toml_databases() -> Result<Vec<DatabaseConfig>> {
             .pg_dump_extra_args
             .clone()
             .filter(|v| !v.is_empty())
-            .or_else(|| shared_extra.clone());
+            .or_else(|| shared_extra.map(str::to_string));
 
         databases.push(DatabaseConfig {
             url: url.clone(),
@@ -494,24 +476,27 @@ fn load_toml_databases() -> Result<Vec<DatabaseConfig>> {
 /// DATABASE_URL_1=postgresql://...
 /// PG_DUMP_EXTRA_ARGS_0=--exclude-table=logs
 /// ```
-/// Scan indexed environment variables starting from 0, stopping at the first
-/// gap (missing `DATABASE_URL_N`). Each index can declare:
-///   DATABASE_URL_N, DB_NAME_N, PG_DUMP_EXTRA_ARGS_N.
-/// Index-specific `PG_DUMP_EXTRA_ARGS_N` shadows the global default.
-fn load_indexed_databases() -> Result<Vec<DatabaseConfig>> {
-    let shared_extra = get_env("PG_DUMP_EXTRA_ARGS");
+///
+/// Index-specific `PG_DUMP_EXTRA_ARGS_N` shadows `shared_extra`, the merged
+/// shared default supplied by the caller. `lookup` is the variable source —
+/// [`get_env`] in production, a fixture map in tests, since the real
+/// environment is process-global and unusable from parallel tests.
+fn scan_indexed_databases(
+    shared_extra: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<DatabaseConfig> {
     let mut databases = Vec::new();
     let mut i = 0usize;
 
     // Walk upward until we hit a gap — that determines the total count.
     loop {
         let url_key = format!("DATABASE_URL_{i}");
-        match get_env(&url_key) {
+        match lookup(&url_key) {
             Some(url) => {
-                let name = get_env(&format!("DB_NAME_{i}"));
-                // Index-specific extra args override the global default.
-                let extra_args =
-                    get_env(&format!("PG_DUMP_EXTRA_ARGS_{i}")).or_else(|| shared_extra.clone());
+                let name = lookup(&format!("DB_NAME_{i}"));
+                // Index-specific extra args override the shared default.
+                let extra_args = lookup(&format!("PG_DUMP_EXTRA_ARGS_{i}"))
+                    .or_else(|| shared_extra.map(str::to_string));
 
                 databases.push(DatabaseConfig {
                     url,
@@ -524,7 +509,23 @@ fn load_indexed_databases() -> Result<Vec<DatabaseConfig>> {
         }
     }
 
-    Ok(databases)
+    // A gap silently truncates the list, so `DATABASE_URL_0` + `DATABASE_URL_2`
+    // would back up one database without a word. Peek a few indices past the
+    // stop point and say so.
+    for probe in i + 1..i + 5 {
+        if lookup(&format!("DATABASE_URL_{probe}")).is_some() {
+            tracing::warn!(
+                gap = i,
+                found = probe,
+                "DATABASE_URL_{i} is unset, so the indexed scan stopped there — \
+                 DATABASE_URL_{probe} and any later index are ignored. Renumber \
+                 the indices to be contiguous from 0.",
+            );
+            break;
+        }
+    }
+
+    databases
 }
 
 // ===========================================================================
@@ -669,18 +670,112 @@ mod tests {
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
     }
 
-    // -- Merge raw with env (unit-level, without env pollution) --
+    // -- Single-database fallback (D1, D4) --
 
     #[test]
-    fn merge_preserves_env_overrides() {
-        // Can't easily mutate real env in a unit test, but we can test the
-        // merge function directly with known inputs.
+    fn fallback_reads_database_url_from_merged_config() {
+        // A config.toml-only deployment: `database_url` present, no env vars.
         let raw = RawConfigFile {
-            database_url: Some("file_val".into()),
+            database_url: Some("postgresql://host:5432/app".into()),
             ..Default::default()
         };
-        // merge_raw_with_env would read actual env vars; in CI this is clean.
-        // The merge itself is exercised indirectly through integration.
-        drop(raw); // placeholder — true env-merge tests are fragile in isolation.
+        let db = single_db_fallback(&raw, None).expect("file database_url must resolve");
+        assert_eq!(db.url, "postgresql://host:5432/app");
+    }
+
+    #[test]
+    fn fallback_inherits_shared_extra_args() {
+        let raw = RawConfigFile {
+            database_url: Some("postgresql://host:5432/app".into()),
+            ..Default::default()
+        };
+        let db = single_db_fallback(&raw, Some("--exclude-table=logs")).unwrap();
+        assert_eq!(db.pg_dump_extra_args.as_deref(), Some("--exclude-table=logs"));
+    }
+
+    #[test]
+    fn fallback_ignores_blank_database_url() {
+        let raw = RawConfigFile {
+            database_url: Some("   ".into()),
+            ..Default::default()
+        };
+        assert!(single_db_fallback(&raw, None).is_none());
+    }
+
+    // -- Duplicate display names (D3) --
+
+    fn db(url: &str, name: Option<&str>) -> DatabaseConfig {
+        DatabaseConfig {
+            url: url.into(),
+            name: name.map(str::to_string),
+            pg_dump_extra_args: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_display_names() {
+        // Same database name on two different hosts — the collision that made
+        // both dumps interleave into one set of .partNNNN files.
+        let dbs = vec![
+            db("postgresql://host-a:5432/alpha", None),
+            db("postgresql://host-b:5432/alpha", None),
+        ];
+        let err = validate_databases(&dbs).unwrap_err().to_string();
+        assert!(err.contains("display name"), "unexpected error: {err}");
+        assert!(err.contains("DB_NAME_1"), "error must name the fix: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_duplicate_names_disambiguated_by_override() {
+        let dbs = vec![
+            db("postgresql://host-a:5432/alpha", Some("alpha-a")),
+            db("postgresql://host-b:5432/alpha", Some("alpha-b")),
+        ];
+        assert!(validate_databases(&dbs).is_ok());
+    }
+
+    // -- Indexed scan (I3) --
+
+    #[test]
+    fn indexed_scan_stops_at_first_gap() {
+        // 0 and 2 set, 1 missing: the scan takes only index 0.
+        let env = |k: &str| match k {
+            "DATABASE_URL_0" => Some("postgresql://host:5432/a".to_string()),
+            "DATABASE_URL_2" => Some("postgresql://host:5432/c".to_string()),
+            _ => None,
+        };
+        let dbs = scan_indexed_databases(None, env);
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].url, "postgresql://host:5432/a");
+    }
+
+    #[test]
+    fn indexed_scan_per_index_args_shadow_shared() {
+        let env = |k: &str| match k {
+            "DATABASE_URL_0" => Some("postgresql://host:5432/a".to_string()),
+            "DATABASE_URL_1" => Some("postgresql://host:5432/b".to_string()),
+            "PG_DUMP_EXTRA_ARGS_1" => Some("--schema-only".to_string()),
+            _ => None,
+        };
+        let dbs = scan_indexed_databases(Some("--exclude-table=logs"), env);
+        assert_eq!(dbs.len(), 2);
+        assert_eq!(dbs[0].pg_dump_extra_args.as_deref(), Some("--exclude-table=logs"));
+        assert_eq!(dbs[1].pg_dump_extra_args.as_deref(), Some("--schema-only"));
+    }
+
+    // -- Non-ASCII recipient (D2) --
+
+    #[test]
+    fn non_ascii_age_recipient_errors_without_panic() {
+        let raw = RawConfigFile {
+            tg_bot_token: Some("t".into()),
+            tg_chat_id: Some("c".into()),
+            // Byte index 12 lands inside a multi-byte char — the old byte-slice
+            // excerpt panicked here instead of reporting the bad value.
+            age_recipient: Some("a密码密码密码".into()),
+            ..Default::default()
+        };
+        let err = build_shared_config(&raw).unwrap_err().to_string();
+        assert!(err.contains("age1"), "unexpected error: {err}");
     }
 }

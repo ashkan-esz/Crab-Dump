@@ -11,7 +11,7 @@ This is a single-binary Rust project (`crab-dump`) with a flat `src/` layout —
 | `src/dump.rs` | Spawns `pg_dump`, reads stdout |
 | `src/compress.rs` | Wraps a writer in a `zstd` encoder |
 | `src/encrypt.rs` | Wraps a writer in an `age` (X25519) encryptor |
-| `src/chunk.rs` | Rolling `ChunkWriter` — splits streams into ≤49 MiB `.partNN` files |
+| `src/chunk.rs` | Rolling `ChunkWriter` — splits streams into ≤49 MiB `.partNNNN` files |
 | `src/telegram.rs` | Sends documents to Telegram Bot API (with retries) |
 
 Other roots: `Cargo.toml` (dependencies), `Dockerfile` (multi-stage build), `docker-compose.yml`, `.env.example` (config template).

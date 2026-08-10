@@ -70,7 +70,6 @@ static DUMP_STATUSES: LazyLock<RwLock<HashMap<String, DbStatus>>> =
 // ===========================================================================
 
 /// Set the Telegram service status. 0=UP, 1=DEGRADED, 2=DOWN.
-#[allow(dead_code)]
 pub fn set_telegram_status(state: u8) {
     TELEGRAM_STATUS.store(state, Ordering::SeqCst);
 }
@@ -228,7 +227,7 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
         Ordering::Relaxed,
         Ordering::Relaxed,
     ) {
-        Ok(_) => now_secs,       // this request set the start time
+        Ok(_) => now_secs,         // this request set the start time
         Err(existing) => existing, // another request already set it
     };
 

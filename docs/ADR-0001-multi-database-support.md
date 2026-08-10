@@ -68,12 +68,16 @@ global — they apply uniformly across all servers.
 
 - **Parallelism**: One `tokio::task::spawn` per server, each running its own
   `pg_dump → zstd → age? → ChunkWriter → Telegram upload` pipeline.
-- **Chunk namespacing**: File prefix becomes `"db-{name}-{timestamp}"` to
-  prevent collisions in the shared work directory.
-- **Failure policy**: Non-blocking per-server failures. The orchestrator uses
-  `JoinSet` to collect results; failed databases log errors but do not cancel
-  remaining ones. The process exits success if at least one succeeded, error only
-  if all fail.
+- **Chunk namespacing**: File prefix becomes `"db{index}-{name}-{timestamp}"` to
+  prevent collisions in the shared work directory. (The index was added by
+  ADR-0002, D3; this ADR originally specified `"db-{name}-{timestamp}"`, which
+  collided when two servers hosted a database of the same name.)
+- **Failure policy**: Non-blocking per-server failures. The orchestrator spawns
+  one `std::thread` per database and collects results with `join()`; failed
+  databases log errors but do not cancel remaining ones. Every failure is
+  reported in the manifest and the process exits non-zero if any database
+  failed (ADR-0002, I7 — this ADR originally specified `JoinSet` and an exit
+  code that only turned non-zero when every database failed).
 - **Manifest output**: Per-database summary lines followed by aggregate totals:
 
   ```
@@ -114,14 +118,15 @@ A new per-database endpoint exposes individual states:
   Operators who need per-DB encryption toggles must fork or request v2.
 - **Shared chat constraint**: All uploads go to the same Telegram chat.  Future
   versions may index `TG_CHAT_ID_N` per server to decouple this.
-- **Concurrency cap**: Hard limit of 10 concurrent servers (`MAX_SERVERS`) prevents
-  runaway resource usage; operators with many small databases will need batching.
+- **Concurrency cap**: Hard limit of 10 concurrent servers (`CRAB_MAX_DATABASES`)
+  prevents runaway resource usage; operators with many small databases will need
+  batching.
 
 ### Open questions
 
 | Question                               | Tentative answer                    |
 |----------------------------------------|-------------------------------------|
 | Should per-DB encryption be added in v1? | No — scope creep risk; deferred to v2. |
-| What default `MAX_SERVERS` is safe?     | 10 (configurable via env).           |
+| What default `CRAB_MAX_DATABASES` is safe? | 10 (configurable via env).       |
 | Should we support per-server TG chat IDs? | Out of scope; deferred to v2.       |
-| Is there a preferred concurrency library? | `tokio::task::JoinSet` — already available. |
+| Is there a preferred concurrency library? | None — the pipeline is blocking, so one `std::thread` per database is enough. |

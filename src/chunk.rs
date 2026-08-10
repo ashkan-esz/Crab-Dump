@@ -9,9 +9,15 @@ use sha2::{Digest, Sha256};
 
 /// A writer that rotates a new file every `max_bytes` bytes.
 ///
-/// Files are created in `work_dir` and named `prefix.partNN`, where `NN`
-/// is zero-padded and starts at `00`. The rolling is transparent to the
+/// Files are created in `work_dir` and named `prefix.partNNNN`, where `NNNN`
+/// is zero-padded and starts at `0000`. The rolling is transparent to the
 /// caller: just [`Write::write`] the stream and call [`ChunkWriter::finish`].
+///
+/// The pad width matters: the documented restore path is a shell glob
+/// (`cat prefix.part* | …`), which orders lexically. A width narrower than the
+/// part count sorts `part100` before `part99` and silently reassembles the
+/// stream out of order. Four digits covers 10000 parts — ~478 GiB at the
+/// default 49 MiB chunk size; widen it before that ceiling, not after.
 pub struct ChunkWriter {
     work_dir: PathBuf,
     prefix: String,
@@ -26,7 +32,7 @@ pub struct ChunkWriter {
 }
 
 impl ChunkWriter {
-    /// `prefix` should not include an extension; parts get `.partNN` appended.
+    /// `prefix` should not include an extension; parts get `.partNNNN` appended.
     pub fn new(work_dir: impl Into<PathBuf>, prefix: impl Into<String>, max_bytes: u64) -> Self {
         ChunkWriter {
             work_dir: work_dir.into(),
@@ -43,7 +49,7 @@ impl ChunkWriter {
 
     fn next_path(&self, index: usize) -> PathBuf {
         self.work_dir
-            .join(format!("{}.part{:02}", self.prefix, index))
+            .join(format!("{}.part{:04}", self.prefix, index))
     }
 
     fn roll_if_needed(&mut self) -> io::Result<()> {
@@ -246,6 +252,26 @@ mod tests {
         want.copy_from_slice(&Sha256::digest(b""));
         assert_eq!(hash, want);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The documented restore path is a shell glob, which sorts lexically, so
+    /// generation order and lexical order must agree past the 100th part.
+    #[test]
+    fn part_names_sort_lexically_past_100() {
+        let w = ChunkWriter::new("/tmp", "blob", 1);
+        let names: Vec<String> = (0..1000)
+            .map(|i| {
+                w.next_path(i)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "part names must sort in generation order");
     }
 
     #[test]

@@ -114,34 +114,45 @@ fn main() -> Result<()> {
     }
 
     // ── Dry-run mode ────────────────────────────────────────────────────────
+    // Config validation only: everything above already ran (config resolution,
+    // pg_dump lookup), so reaching here means the config is good. Exit rather
+    // than idling — `docker compose run --rm crab-dump --dry-run` must return.
     if cli.dry_run {
         let suffix = if databases.len() == 1 { "" } else { "s" };
         println!(
-            "dry-run OK — {} database{} configured, dashboard on http://127.0.0.1:{dashboard_port}",
+            "dry-run OK — {} database{} configured",
             databases.len(),
             suffix,
         );
-
-        // Keep the main thread alive so the web server stays responsive.
-        // The web server runs in a background thread with its own runtime.
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
+        return Ok(());
     }
 
     // ── Execute backups ─────────────────────────────────────────────────────
-    let results = execute_all_databases(&shared_cfg, &databases, cli.no_encryption)
+    let (results, failures) = execute_all_databases(&shared_cfg, &databases, cli.no_encryption)
         .context("running database backups")?;
 
     // ── Print consolidated manifest ─────────────────────────────────────────
-    print_manifest(&results);
+    print_manifest(&results, &failures);
 
     // ── Cleanup temp chunks on success ──────────────────────────────────────
     for r in &results {
         chunk::cleanup(&r.chunk_paths);
     }
 
-    tracing::info!(successes = results.len(), "backup complete");
+    tracing::info!(
+        successes = results.len(),
+        failures = failures.len(),
+        "backup complete",
+    );
+
+    // A partial run must not look like a clean one to cron/systemd.
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} of {} database backups failed (see the manifest above)",
+            failures.len(),
+            results.len() + failures.len(),
+        );
+    }
     Ok(())
 }
 
@@ -151,6 +162,9 @@ fn main() -> Result<()> {
 struct BackupResult {
     /// Human-readable display name of the database.
     db_name: String,
+    /// Chunk filename prefix (`db-{name}-{stamp}`) — the glob stem operators
+    /// need for reassembly, which `db_name` alone does not reconstruct.
+    base_name: String,
     /// Paths to the temporary chunk files written to disk.
     chunk_paths: Vec<PathBuf>,
     /// Total number of bytes streamed through the pipeline.
@@ -165,11 +179,24 @@ struct BackupResult {
     chunks_count: usize,
 }
 
+/// A database whose backup did not complete.
+///
+/// Recorded so the manifest reports failures explicitly instead of only
+/// listing what happened to succeed.
+struct DatabaseFailure {
+    /// Position of the database in the resolved configuration.
+    index: usize,
+    /// Human-readable display name of the database.
+    db_name: String,
+    /// The failure, formatted with its full context chain.
+    error: String,
+}
+
 /// Execute the full backup pipeline for a single database.
 ///
 /// Steps:
 /// 1. Spawn `pg_dump` for this database with configured extra args.
-/// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing `.partNN` files.
+/// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing `.partNNNN` files.
 /// 3. Upload each chunk to Telegram (with retries).
 /// 4. Return a [`BackupResult`] with metadata.
 ///
@@ -177,15 +204,19 @@ struct BackupResult {
 fn run_database(
     cfg: &SharedConfig,
     db: &DatabaseConfig,
+    db_index: usize,
     no_encryption: bool,
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
 
     // Namespaced prefix prevents collisions when multiple databases share
-    // the same working directory.  Format: `db-{name}-{YYYYMMDD-HHMMSS}`.
+    // the same working directory. Format: `db{index}-{name}-{YYYYMMDD-HHMMSS}`.
+    // Duplicate display names are rejected at config time; the index is belt
+    // and braces, so a future resolution path cannot make two pipelines write
+    // the same `.partNNNN` files.
     let stamp = ymdhms(started)?;
-    let base_name = format!("db-{db_name}-{stamp}");
+    let base_name = format!("db{db_index}-{db_name}-{stamp}");
 
     // Report "running" status to the dashboard before starting heavy work.
     web::set_db_status(&db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
@@ -363,6 +394,7 @@ fn run_database(
 
     Ok(BackupResult {
         db_name,
+        base_name,
         chunk_paths: chunks,
         total_bytes,
         encrypted,
@@ -389,17 +421,20 @@ fn rate(bytes: u64, since: &SystemTime) -> f64 {
 /// Runs each database backup as a separate OS thread via `std::thread::spawn`.
 /// Individual failures do not cancel other databases (failure policy: continue).
 /// The operation fails only when ALL databases fail.
+///
+/// Returns the successes and the per-database failures; the caller reports both
+/// and sets the exit code.
 fn execute_all_databases(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     no_encryption: bool,
-) -> Result<Vec<BackupResult>> {
+) -> Result<(Vec<BackupResult>, Vec<DatabaseFailure>)> {
     // Fast path: single database skips threading overhead.
     if databases.len() == 1 {
         let db_name = databases[0].display_name();
-        let result = run_database(cfg, &databases[0], no_encryption)
+        let result = run_database(cfg, &databases[0], 0, no_encryption)
             .inspect_err(|e| web::fail_db(&db_name, e.to_string()))?;
-        return Ok(vec![result]);
+        return Ok((vec![result], Vec::new()));
     }
 
     tracing::info!(
@@ -410,17 +445,18 @@ fn execute_all_databases(
     // One thread per database — each runs the full blocking pipeline.
     let handles: Vec<_> = databases
         .iter()
-        .map(|db| {
+        .enumerate()
+        .map(|(i, db)| {
             let db = db.clone();
             let cfg = cfg.clone();
             let no_enc = no_encryption;
-            std::thread::spawn(move || run_database(&cfg, &db, no_enc))
+            std::thread::spawn(move || run_database(&cfg, &db, i, no_enc))
         })
         .collect();
 
     // Collect results, tracking successes and failures independently.
     let mut results = Vec::new();
-    let mut errors: Vec<(usize, String, anyhow::Error)> = Vec::new();
+    let mut errors: Vec<DatabaseFailure> = Vec::new();
 
     for (i, handle) in handles.into_iter().enumerate() {
         let db_name = databases[i].display_name();
@@ -437,7 +473,11 @@ fn execute_all_databases(
                     "database backup failed",
                 );
                 web::fail_db(&db_name, e.to_string()); // keeps the failed stage
-                errors.push((i, db_name, e));
+                errors.push(DatabaseFailure {
+                    index: i,
+                    db_name,
+                    error: format!("{e:#}"),
+                });
             }
             Err(payload) => {
                 // Attempt to extract a human-readable panic message.
@@ -455,7 +495,11 @@ fn execute_all_databases(
                     "backup thread panicked",
                 );
                 web::fail_db(&db_name, format!("panicked: {panic_msg}"));
-                errors.push((i, db_name, anyhow::anyhow!("panicked: {panic_msg}")));
+                errors.push(DatabaseFailure {
+                    index: i,
+                    db_name,
+                    error: format!("panicked: {panic_msg}"),
+                });
             }
         }
     }
@@ -464,7 +508,7 @@ fn execute_all_databases(
     if results.is_empty() && !errors.is_empty() {
         let details = errors
             .iter()
-            .map(|(idx, name, e)| format!("  [{idx}] {name}: {e}"))
+            .map(|f| format!("  [{}] {}: {}", f.index, f.db_name, f.error))
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::bail!("All {} database backups failed:\n{details}", errors.len());
@@ -478,7 +522,7 @@ fn execute_all_databases(
         );
     }
 
-    Ok(results)
+    Ok((results, errors))
 }
 
 /// Build an HTTP client configured for Telegram Bot API uploads.
@@ -496,11 +540,17 @@ fn build_http_client(cfg: &SharedConfig) -> Result<Client> {
 
 /// Print the consolidated manifest to stdout for downstream consumers.
 ///
-/// Produces a structured block containing per-database summaries and restore
-/// command templates. Designed for machine-parsable consumption by operators.
-fn print_manifest(results: &[BackupResult]) {
+/// Produces a structured block containing per-database summaries, any
+/// failures, and restore command templates. Designed for machine-parsable
+/// consumption by operators.
+fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
     println!("# crab-dump manifest");
-    println!("servers: {}", results.len());
+    println!(
+        "servers: {} ({} ok, {} failed)",
+        results.len() + failures.len(),
+        results.len(),
+        failures.len(),
+    );
 
     for (i, r) in results.iter().enumerate() {
         println!(
@@ -515,19 +565,26 @@ fn print_manifest(results: &[BackupResult]) {
         );
     }
 
+    // Failures are part of the manifest: a reader that sees only successes
+    // cannot tell a complete run from a partial one.
+    for f in failures {
+        println!("FAILED [{}] {}: {}", f.index, f.db_name, f.error);
+    }
+
     println!();
 
-    // Produce a restore command template for each database.
+    // Produce a restore command template for each database. The glob is on
+    // `base_name`, the real chunk prefix — `db_name` alone matches nothing.
     for r in results {
         let cmd = if r.encrypted {
             format!(
-                "# restore [{}]: cat {}*.part* | age -d | zstd -d | pg_restore --dbname=...",
-                r.db_name, r.db_name
+                "# restore [{}]: cat {}.part* | age -d | zstd -d | pg_restore --dbname=...",
+                r.db_name, r.base_name
             )
         } else {
             format!(
-                "# restore [{}]: cat {}*.part* | zstd -d | pg_restore --dbname=...",
-                r.db_name, r.db_name
+                "# restore [{}]: cat {}.part* | zstd -d | pg_restore --dbname=...",
+                r.db_name, r.base_name
             )
         };
         println!("{cmd}");
