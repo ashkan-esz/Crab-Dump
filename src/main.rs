@@ -162,8 +162,9 @@ fn main() -> Result<()> {
 struct BackupResult {
     /// Human-readable display name of the database.
     db_name: String,
-    /// Chunk filename prefix (`db-{name}-{stamp}`) — the glob stem operators
-    /// need for reassembly, which `db_name` alone does not reconstruct.
+    /// Chunk filename prefix (`db{index}-{name}-{stamp}`) — the glob stem
+    /// operators need for reassembly, which `db_name` alone does not
+    /// reconstruct.
     base_name: String,
     /// Paths to the temporary chunk files written to disk.
     chunk_paths: Vec<PathBuf>,
@@ -576,19 +577,21 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
     // Produce a restore command template for each database. The glob is on
     // `base_name`, the real chunk prefix — `db_name` alone matches nothing.
     for r in results {
-        let cmd = if r.encrypted {
-            format!(
-                "# restore [{}]: cat {}.part* | age -d | zstd -d | pg_restore --dbname=...",
-                r.db_name, r.base_name
-            )
-        } else {
-            format!(
-                "# restore [{}]: cat {}.part* | zstd -d | pg_restore --dbname=...",
-                r.db_name, r.base_name
-            )
-        };
-        println!("{cmd}");
+        println!("{}", restore_line(r));
     }
+}
+
+/// Restore command template for one database.
+///
+/// The glob stem must be `base_name`: it is the exact prefix
+/// [`ChunkWriter`] gives the `.partNNNN` files, and nothing else on
+/// [`BackupResult`] reconstructs it.
+fn restore_line(r: &BackupResult) -> String {
+    let decrypt = if r.encrypted { "age -d | " } else { "" };
+    format!(
+        "# restore [{}]: cat {}.part* | {decrypt}zstd -d | pg_restore --dbname=...",
+        r.db_name, r.base_name
+    )
 }
 
 // =============================================================================
@@ -687,4 +690,54 @@ fn ymdhms(t: SystemTime) -> Result<String> {
     let year = if month <= 2 { y + 1 } else { y };
 
     Ok(format!("{year:04}{month:02}{d:02}-{h:02}{m:02}{s:02}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result_with(base_name: &str, encrypted: bool) -> BackupResult {
+        BackupResult {
+            db_name: "mvpcore".into(),
+            base_name: base_name.into(),
+            chunk_paths: Vec::new(),
+            total_bytes: 0,
+            encrypted,
+            sha256: [0u8; 32],
+            elapsed_secs: 0.0,
+            chunks_count: 0,
+        }
+    }
+
+    /// D5: the manifest glob must match the files `ChunkWriter` actually
+    /// wrote. Globbing the bare `db_name` expanded to nothing.
+    #[test]
+    fn restore_glob_matches_real_chunk_files() {
+        let dir = std::env::temp_dir().join(format!("crab-dump-d5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base_name = "db0-mvpcore-20260810-004521";
+
+        let mut w = ChunkWriter::new(&dir, base_name, 8);
+        w.write_all(&[b'x'; 20]).unwrap();
+        let (paths, _, _) = w.finish().unwrap();
+
+        let line = restore_line(&result_with(base_name, false));
+        let (_, glob) = line.split_once("cat ").unwrap();
+        let stem = glob.split(".part*").next().unwrap();
+
+        for p in &paths {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with(stem),
+                "manifest glob `{stem}.part*` does not match chunk `{name}`"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_line_decrypts_only_when_encrypted() {
+        assert!(restore_line(&result_with("db0-x-1", true)).contains("age -d | zstd -d"));
+        assert!(!restore_line(&result_with("db0-x-1", false)).contains("age -d"));
+    }
 }
