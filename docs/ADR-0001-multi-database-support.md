@@ -2,7 +2,7 @@
 
 | Field       | Value                                       |
 |-------------|---------------------------------------------|
-| **Status**  | Proposed                                    |
+| **Status**  | Accepted — implemented in `71b09ad`         |
 | **Date**    | 2026-08-08                                  |
 | **Authors** | crab-dump maintainers                       |
 | **Supersedes** | N/A                                      |

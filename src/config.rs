@@ -146,26 +146,7 @@ impl Config {
         let indexed_dbs = scan_indexed_databases(shared_extra.as_deref(), get_env);
 
         // ── Step 4: Pick source and merge ───────────────────────────────────
-        let databases: Vec<DatabaseConfig> = match (toml_dbs.is_empty(), indexed_dbs.is_empty()) {
-            // TOML wins — more expressive, supports extra args inline.
-            (false, _) => toml_dbs,
-            (_, false) => indexed_dbs,
-            // Neither source → fall back to the single `database_url`, which
-            // may come from config.toml or from `DATABASE_URL`.
-            (true, true) => match single_db_fallback(&raw, shared_extra.as_deref()) {
-                Some(db) => vec![db],
-                None => bail!(
-                    "No databases configured. Set `DATABASE_URL` for a single database,\n\
-                     use `DATABASE_URL_0` / `DATABASE_URL_1` for indexed config, or\n\
-                     add `[[databases]]` sections to `{}`.",
-                    DEFAULT_CONFIG_FILE,
-                ),
-            },
-        };
-
-        if databases.is_empty() {
-            bail!("No databases configured after resolution.");
-        }
+        let databases = pick_database_source(toml_dbs, indexed_dbs, &raw, shared_extra.as_deref())?;
 
         // ── Step 5: Enforce concurrency cap ─────────────────────────────────
         let max_databases = env::var("CRAB_MAX_DATABASES")
@@ -205,6 +186,36 @@ impl Config {
         validate_databases(&final_dbs)?;
 
         Ok((shared, final_dbs))
+    }
+}
+
+/// Pick which of the three configuration sources wins, in descending
+/// priority: TOML `[[databases]]`, indexed env vars, single `database_url`.
+///
+/// Split out of [`Config::resolve_databases`] so the priority order is
+/// testable: `resolve_databases` itself reads the process-global environment
+/// and cannot be exercised from parallel tests.
+fn pick_database_source(
+    toml_dbs: Vec<DatabaseConfig>,
+    indexed_dbs: Vec<DatabaseConfig>,
+    raw: &RawConfigFile,
+    shared_extra: Option<&str>,
+) -> Result<Vec<DatabaseConfig>> {
+    match (toml_dbs.is_empty(), indexed_dbs.is_empty()) {
+        // TOML wins — more expressive, supports extra args inline.
+        (false, _) => Ok(toml_dbs),
+        (_, false) => Ok(indexed_dbs),
+        // Neither source → fall back to the single `database_url`, which
+        // may come from config.toml or from `DATABASE_URL`.
+        (true, true) => match single_db_fallback(raw, shared_extra) {
+            Some(db) => Ok(vec![db]),
+            None => bail!(
+                "No databases configured. Set `DATABASE_URL` for a single database,\n\
+                 use `DATABASE_URL_0` / `DATABASE_URL_1` for indexed config, or\n\
+                 add `[[databases]]` sections to `{}`.",
+                DEFAULT_CONFIG_FILE,
+            ),
+        },
     }
 }
 
@@ -840,6 +851,67 @@ mod tests {
             Some("--exclude-table=logs")
         );
         assert_eq!(dbs[1].pg_dump_extra_args.as_deref(), Some("--schema-only"));
+    }
+
+    // -- Source priority (I10) --
+
+    /// TOML `[[databases]]` outranks the indexed env scan, which outranks the
+    /// single `database_url`. Priority is documented in three places and
+    /// enforced in exactly one — this pins that one.
+    #[test]
+    fn toml_databases_outrank_indexed_env() {
+        let raw = RawConfigFile {
+            database_url: Some("postgresql://host:5432/single".into()),
+            ..Default::default()
+        };
+        let dbs = pick_database_source(
+            vec![db("postgresql://host:5432/from-toml", None)],
+            vec![db("postgresql://host:5432/from-env", None)],
+            &raw,
+            None,
+        )
+        .unwrap();
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].url, "postgresql://host:5432/from-toml");
+    }
+
+    #[test]
+    fn indexed_env_outranks_single_database_url() {
+        let raw = RawConfigFile {
+            database_url: Some("postgresql://host:5432/single".into()),
+            ..Default::default()
+        };
+        let dbs = pick_database_source(
+            vec![],
+            vec![db("postgresql://host:5432/from-env", None)],
+            &raw,
+            None,
+        )
+        .unwrap();
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].url, "postgresql://host:5432/from-env");
+    }
+
+    #[test]
+    fn single_database_url_used_when_no_other_source() {
+        let raw = RawConfigFile {
+            database_url: Some("postgresql://host:5432/single".into()),
+            ..Default::default()
+        };
+        let dbs = pick_database_source(vec![], vec![], &raw, None).unwrap();
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].url, "postgresql://host:5432/single");
+    }
+
+    /// No source at all is a startup error naming all three ways to fix it.
+    #[test]
+    fn no_source_at_all_errors_with_all_three_remedies() {
+        let err = pick_database_source(vec![], vec![], &RawConfigFile::default(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DATABASE_URL"), "must name the env var: {err}");
+        assert!(err.contains("DATABASE_URL_0"), "must name indexed: {err}");
+        assert!(err.contains("[[databases]]"), "must name TOML: {err}");
     }
 
     // -- Non-ASCII recipient (D2) --
