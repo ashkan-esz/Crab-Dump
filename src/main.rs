@@ -506,10 +506,6 @@ fn run_cycle(
 struct BackupResult {
     /// Human-readable display name of the database.
     db_name: String,
-    /// Chunk filename prefix (`db{index}-{name}-{stamp}`) — the glob stem
-    /// operators need for reassembly, which `db_name` alone does not
-    /// reconstruct.
-    base_name: String,
     /// Total number of bytes streamed through the pipeline.
     total_bytes: u64,
     /// Whether age encryption was applied to the stream.
@@ -876,7 +872,6 @@ fn backup_pipeline(
 
     Ok(BackupResult {
         db_name: db_name.to_string(),
-        base_name: base_name.to_string(),
         total_bytes,
         encrypted,
         sha256: hash,
@@ -1094,8 +1089,7 @@ fn build_http_client_for_proxy(socks_proxy: Option<&str>) -> Result<Client> {
 /// Print the consolidated manifest to stdout for downstream consumers.
 ///
 /// Produces a structured block containing per-database summaries, any
-/// failures, and restore command templates. Designed for machine-parsable
-/// consumption by operators.
+/// failures. Designed for machine-parsable consumption by operators.
 fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
     println!("# crab-dump manifest");
     println!(
@@ -1123,31 +1117,6 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
     for f in failures {
         println!("FAILED [{}] {}: {}", f.index, f.db_name, f.error);
     }
-
-    println!();
-
-    // Produce a restore command template for each database. The glob is on
-    // `base_name`, the real chunk prefix — `db_name` alone matches nothing.
-    for r in results {
-        println!("{}", restore_line(r));
-    }
-}
-
-/// Restore command template for one database.
-///
-/// A single packaged chunk is the bare `base_name`; multi-part output uses
-/// the `.partNNNN` glob. The chunk count is known from the finished stream.
-fn restore_line(r: &BackupResult) -> String {
-    let decrypt = if r.encrypted { "age -d | " } else { "" };
-    let input = if r.chunks_count <= 1 {
-        r.base_name.clone()
-    } else {
-        format!("{}.part*", r.base_name)
-    };
-    format!(
-        "# restore [{}]: cat {input} | {decrypt}zstd -d | pg_restore --dbname=...",
-        r.db_name
-    )
 }
 
 // =============================================================================
@@ -1251,55 +1220,6 @@ fn ymdhms(t: SystemTime) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn result_with(base_name: &str, encrypted: bool, chunks_count: usize) -> BackupResult {
-        BackupResult {
-            db_name: "mvpcore".into(),
-            base_name: base_name.into(),
-            total_bytes: 0,
-            encrypted,
-            sha256: [0u8; 32],
-            elapsed_secs: 0.0,
-            chunks_count,
-        }
-    }
-
-    #[test]
-    fn restore_line_uses_bare_file_for_single_chunk() {
-        let line = restore_line(&result_with("db0-mvpcore-20260810-004521", false, 1));
-        assert!(line.contains("cat db0-mvpcore-20260810-004521 | "));
-        assert!(!line.contains(".part*"));
-    }
-
-    #[test]
-    fn restore_line_uses_part_glob_for_multi_part_backup() {
-        let dir = std::env::temp_dir().join(format!("crab-dump-d5-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let base_name = "db0-mvpcore-20260810-004521";
-
-        let mut w = ChunkWriter::new(&dir, base_name, 8);
-        w.write_all(&[b'x'; 20]).unwrap();
-        let (paths, _, _) = w.finish().unwrap();
-
-        let line = restore_line(&result_with(base_name, false, paths.len()));
-        let (_, glob) = line.split_once("cat ").unwrap();
-        let stem = glob.split(".part*").next().unwrap();
-
-        for p in &paths {
-            let name = p.file_name().unwrap().to_str().unwrap();
-            assert!(
-                name.starts_with(stem),
-                "manifest glob `{stem}.part*` does not match chunk `{name}`"
-            );
-        }
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn restore_line_decrypts_only_when_encrypted() {
-        assert!(restore_line(&result_with("db0-x-1", true, 1)).contains("age -d | zstd -d"));
-        assert!(!restore_line(&result_with("db0-x-1", false, 1)).contains("age -d"));
-    }
 
     #[test]
     fn history_snapshot_chunks_reassemble_in_order_and_cleanly() {

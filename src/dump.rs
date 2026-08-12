@@ -44,8 +44,6 @@ pub fn spawn_pg_dump(database_url: &str, extra_args: Option<&str>) -> Result<Dum
     args.push("--dbname".to_string());
     args.push(database_url.to_string());
 
-    tracing::info!(args = ?args, "spawning pg_dump");
-
     let mut child = Command::new("pg_dump")
         .args(&args)
         .stdin(Stdio::null())
