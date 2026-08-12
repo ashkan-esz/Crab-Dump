@@ -300,7 +300,7 @@ fn single_db_fallback(raw: &RawConfigFile, shared_extra: Option<&str>) -> Option
 ///
 /// Display names must be unique: they key the chunk-file prefix and the
 /// dashboard, so a collision means two dumps interleaving into the same
-/// `.partNNNN` files.
+/// bare or `.partNNNN` chunk files.
 fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
     let mut seen_names: std::collections::HashMap<String, usize> = Default::default();
     for (idx, db) in dbs.iter().enumerate() {
@@ -1244,7 +1244,7 @@ mod tests {
     #[test]
     fn validate_rejects_duplicate_display_names() {
         // Same database name on two different hosts — the collision that made
-        // both dumps interleave into one set of .partNNNN files.
+        // both dumps interleave into one set of chunk files.
         let dbs = vec![
             db("postgresql://host-a:5432/alpha", None),
             db("postgresql://host-b:5432/alpha", None),

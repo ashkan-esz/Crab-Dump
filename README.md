@@ -19,10 +19,11 @@ scheduled from cron or a systemd timer.
 | Upload  | `reqwest`      | Direct Bot API calls; no bot-framework overhead for a one-shot job.|
 
 **Chunking** is used instead of a self-hosted Telegram Bot API server: the
-cloud Bot API caps `sendDocument` at 50 MiB, so this tool splits the archive
-into ≤49 MiB parts (`name.part0000`, `name.part0001`, …) and uploads each. The
-receiving side reassembles with plain `cat` (the zero-padded names make the
-shell glob `cat name.part*` order lexically).
+cloud Bot API caps `sendDocument` at 50 MiB, so this tool packages the archive
+into ≤49 MiB uploads. A stream that fits in one chunk is uploaded as the bare
+`name`; larger streams use `name.part0000`, `name.part0001`, … . The receiving
+side reassembles multi-part backups with plain `cat` (the zero-padded names
+make the shell glob `cat name.part*` order lexically).
 
 ## Setup
 
@@ -101,11 +102,12 @@ server 1: analytics (bytes=8815104, chunks=1, encrypted=false, sha256=9f2b1c0e5d
 FAILED [2] archive: dumping database 'archive': pg_dump exited with status 1
 
 # restore [app]: cat db0-app-20260704-205532.part* | zstd -d | pg_restore --dbname=...
-# restore [analytics]: cat db1-analytics-20260704-205532.part* | zstd -d | pg_restore --dbname=...
+# restore [analytics]: cat db1-analytics-20260704-205532 | zstd -d | pg_restore --dbname=...
 ```
 
-Chunk files are named `db{index}-{name}-{YYYYmmdd-HHMMSS}.partNNNN`. A database
-that fails does not stop the others — every remaining database is still dumped
+Chunk files use the prefix `db{index}-{name}-{YYYYmmdd-HHMMSS}`. A one-chunk
+backup uses that prefix as its bare filename; multi-part backups append
+`.partNNNN`. A database that fails does not stop the others — every remaining database is still dumped
 and uploaded — it gets a `FAILED` line in the manifest with its error. A
 one-shot run then exits non-zero; a scheduled run (`BACKUP_INTERVAL`) logs it
 and retries that database on the next cycle.
@@ -383,13 +385,24 @@ On a machine with the `identity.txt` (private key) and the downloaded parts.
 ```bash
 BASE=db0-app-20260704-205532
 
-# Encrypted dump:
+# Encrypted, single-chunk dump (manifest says chunks=1):
+cat "$BASE" \
+  | rage -d -i identity.txt \
+  | zstd -d \
+  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
+
+# Encrypted, multi-part dump (manifest says chunks>1):
 cat "$BASE".part* \
   | rage -d -i identity.txt \
   | zstd -d \
   | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
 
-# Plain (unencrypted) dump:
+# Plain (unencrypted), single-chunk dump:
+cat "$BASE" \
+  | zstd -d \
+  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
+
+# Plain (unencrypted), multi-part dump:
 cat "$BASE".part* \
   | zstd -d \
   | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
@@ -402,10 +415,16 @@ For a **plain-text** dump (if you set `PG_DUMP_EXTRA_ARGS=--format=plain`),
 swap `pg_restore` for `psql`:
 
 ```bash
-# Encrypted plain dump:
+# Encrypted plain dump, single chunk:
+cat "$BASE" | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
+
+# Encrypted plain dump, multiple chunks:
 cat "$BASE".part* | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
 
-# Plain plain dump:
+# Plain plain dump, single chunk:
+cat "$BASE" | zstd -d | psql "$DATABASE_URL"
+
+# Plain plain dump, multiple chunks:
 cat "$BASE".part* | zstd -d | psql "$DATABASE_URL"
 ```
 
@@ -413,7 +432,7 @@ cat "$BASE".part* | zstd -d | psql "$DATABASE_URL"
 > the parts (encrypted if AGE_RECIPIENT was set, otherwise the
 > compressed stream before uploading). Verify before decrypting:
 > ```bash
-> cat "$BASE".part* | sha256sum
+> Use `cat "$BASE"` for `chunks=1`, or `cat "$BASE".part*` for `chunks>1`.
 > ```
 
 > Backups taken before the part suffix widened to four digits use two-digit

@@ -551,7 +551,8 @@ struct DatabaseFailure {
 ///
 /// Steps:
 /// 1. Spawn `pg_dump` for this database with configured extra args.
-/// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing `.partNNNN` files.
+/// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing a bare
+///    file when it fits, otherwise `.partNNNN` files.
 /// 3. Upload each chunk to Telegram (with retries), deleting it right after.
 /// 4. Return a [`BackupResult`] with metadata.
 ///
@@ -1134,14 +1135,18 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
 
 /// Restore command template for one database.
 ///
-/// The glob stem must be `base_name`: it is the exact prefix
-/// [`ChunkWriter`] gives the `.partNNNN` files, and nothing else on
-/// [`BackupResult`] reconstructs it.
+/// A single packaged chunk is the bare `base_name`; multi-part output uses
+/// the `.partNNNN` glob. The chunk count is known from the finished stream.
 fn restore_line(r: &BackupResult) -> String {
     let decrypt = if r.encrypted { "age -d | " } else { "" };
+    let input = if r.chunks_count <= 1 {
+        r.base_name.clone()
+    } else {
+        format!("{}.part*", r.base_name)
+    };
     format!(
-        "# restore [{}]: cat {}.part* | {decrypt}zstd -d | pg_restore --dbname=...",
-        r.db_name, r.base_name
+        "# restore [{}]: cat {input} | {decrypt}zstd -d | pg_restore --dbname=...",
+        r.db_name
     )
 }
 
@@ -1247,7 +1252,7 @@ fn ymdhms(t: SystemTime) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn result_with(base_name: &str, encrypted: bool) -> BackupResult {
+    fn result_with(base_name: &str, encrypted: bool, chunks_count: usize) -> BackupResult {
         BackupResult {
             db_name: "mvpcore".into(),
             base_name: base_name.into(),
@@ -1255,14 +1260,19 @@ mod tests {
             encrypted,
             sha256: [0u8; 32],
             elapsed_secs: 0.0,
-            chunks_count: 0,
+            chunks_count,
         }
     }
 
-    /// D5: the manifest glob must match the files `ChunkWriter` actually
-    /// wrote. Globbing the bare `db_name` expanded to nothing.
     #[test]
-    fn restore_glob_matches_real_chunk_files() {
+    fn restore_line_uses_bare_file_for_single_chunk() {
+        let line = restore_line(&result_with("db0-mvpcore-20260810-004521", false, 1));
+        assert!(line.contains("cat db0-mvpcore-20260810-004521 | "));
+        assert!(!line.contains(".part*"));
+    }
+
+    #[test]
+    fn restore_line_uses_part_glob_for_multi_part_backup() {
         let dir = std::env::temp_dir().join(format!("crab-dump-d5-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let base_name = "db0-mvpcore-20260810-004521";
@@ -1271,7 +1281,7 @@ mod tests {
         w.write_all(&[b'x'; 20]).unwrap();
         let (paths, _, _) = w.finish().unwrap();
 
-        let line = restore_line(&result_with(base_name, false));
+        let line = restore_line(&result_with(base_name, false, paths.len()));
         let (_, glob) = line.split_once("cat ").unwrap();
         let stem = glob.split(".part*").next().unwrap();
 
@@ -1287,8 +1297,8 @@ mod tests {
 
     #[test]
     fn restore_line_decrypts_only_when_encrypted() {
-        assert!(restore_line(&result_with("db0-x-1", true)).contains("age -d | zstd -d"));
-        assert!(!restore_line(&result_with("db0-x-1", false)).contains("age -d"));
+        assert!(restore_line(&result_with("db0-x-1", true, 1)).contains("age -d | zstd -d"));
+        assert!(!restore_line(&result_with("db0-x-1", false, 1)).contains("age -d"));
     }
 
     #[test]
@@ -1315,6 +1325,28 @@ mod tests {
         assert_eq!(reassembled, original);
         chunk::cleanup_prefix(&root, "history-2026-08-123456");
         assert!(parts.iter().all(|part| !part.exists()));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn small_history_snapshot_uses_bare_file() {
+        let root =
+            std::env::temp_dir().join(format!("crab-dump-history-small-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let snapshot = root.join("snapshot.jsonl");
+        let original = b"{\"status\":\"success\"}\n";
+        std::fs::write(&snapshot, original).unwrap();
+
+        let (paths, _, total) =
+            chunk_history_snapshot(&snapshot, &root, "history-2026-08-123456", 1024).unwrap();
+
+        assert_eq!(total, original.len() as u64);
+        assert_eq!(paths, vec![root.join("history-2026-08-123456")]);
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), original);
+        assert!(!root.join("history-2026-08-123456.part0000").exists());
+        chunk::cleanup_prefix(&root, "history-2026-08-123456");
+        assert!(!paths[0].exists());
         std::fs::remove_dir_all(&root).ok();
     }
 

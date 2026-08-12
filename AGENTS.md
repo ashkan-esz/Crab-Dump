@@ -7,7 +7,7 @@ Single-binary Rust project (`crab-dump`), flat `src/`:
 - `dump.rs` — spawns `pg_dump`, reads stdout
 - `compress.rs` — wraps writer in `zstd` encoder
 - `encrypt.rs` — wraps writer in `age` (X25519) encryptor
-- `chunk.rs` — rolling `ChunkWriter`, splits into ≤49 MiB `.partNNNN`
+- `chunk.rs` — rolling `ChunkWriter`, emits one bare file or ≤49 MiB `.partNNNN` parts
 - `telegram.rs` — Bot API document upload with retries
 
 Roots: `Cargo.toml`, `Dockerfile` (multi-stage), `docker-compose.yml`, `.env.example`.
@@ -48,9 +48,11 @@ If a task appears to require breaking one, stop and say so instead.
 2. **Secrets never surface.** `TG_BOT_TOKEN`, `DATABASE_URL` passwords, and
    chat IDs are redacted in logs, `Debug`/`Display` impls, `anyhow` context
    strings, and `--dry-run` output.
-3. **Chunk naming is a wire contract.** `{db}_{utc_ts}.sql.zst[.age].part0001`
-   — 4-digit zero-padded. Lexicographic order == concatenation order; parts
-   must reassemble with `cat parts*`. Changing this is a breaking change.
+3. **Chunk naming is a wire contract.** A packaged stream at or below the
+   limit is `{db}_{utc_ts}.sql.zst[.age]`; larger streams use that prefix plus
+   `.partNNNN` (4-digit zero-padded). Lexicographic order == concatenation
+   order; multi-part outputs must reassemble with `cat parts*`. Changing this
+   is a breaking change.
 4. **Pipeline order is fixed.** dump → compress → encrypt → chunk → upload.
    Encryption is always after compression, never before.
 5. **Fail-soft across databases.** One database's failure must not abort its
@@ -96,9 +98,13 @@ A backup is valid only if it restores with shell primitives and no custom
 tooling. This is the observable consequence of Invariants 3 and 4, and should
 be covered by an integration test rather than trusted by inspection.
 
-Encrypted:
+Encrypted, one chunk:
+cat mydb_20260812T031500Z.sql.zst.age | age -d -i key.txt | zstd -d | psql
+Encrypted, multiple chunks:
 cat mydb_20260812T031500Z.sql.zst.age.part* | age -d -i key.txt | zstd -d | psql
-Unencrypted:
+Unencrypted, one chunk:
+cat mydb_20260812T031500Z.sql.zst | zstd -d | psql
+Unencrypted, multiple chunks:
 cat mydb_20260812T031500Z.sql.zst.part* | zstd -d | psql
 
 ## Done

@@ -10,8 +10,9 @@ use sha2::{Digest, Sha256};
 /// A writer that rotates a new file every `max_bytes` bytes.
 ///
 /// Files are created in `work_dir` and named `prefix.partNNNN`, where `NNNN`
-/// is zero-padded and starts at `0000`. The rolling is transparent to the
-/// caller: just [`Write::write`] the stream and call [`ChunkWriter::finish`].
+/// is zero-padded and starts at `0000`. When the stream fits in one chunk,
+/// [`ChunkWriter::finish`] renames that sole part to the bare `prefix`.
+/// Multi-part streams retain their `.partNNNN` names.
 ///
 /// The pad width matters: the documented restore path is a shell glob
 /// (`cat prefix.part* | …`), which orders lexically. A width narrower than the
@@ -32,7 +33,8 @@ pub struct ChunkWriter {
 }
 
 impl ChunkWriter {
-    /// `prefix` should not include an extension; parts get `.partNNNN` appended.
+    /// `prefix` should not include an extension; parts get `.partNNNN`
+    /// appended while the stream is being written.
     pub fn new(work_dir: impl Into<PathBuf>, prefix: impl Into<String>, max_bytes: u64) -> Self {
         ChunkWriter {
             work_dir: work_dir.into(),
@@ -79,8 +81,12 @@ impl ChunkWriter {
     /// Always produces at least one chunk file (possibly empty) so that an
     /// empty stream still has a representable artifact to upload.
     pub fn finish(mut self) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
-        // Ensure at least one file exists even if nothing was written.
-        self.roll_if_needed().map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Ensure at least one file exists even if nothing was written. Do not
+        // call `roll_if_needed` for a full current file: an exact-boundary
+        // stream is still one chunk and must not gain an empty successor.
+        if self.current.is_none() {
+            self.roll_if_needed().map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
         if let Some(f) = self.current.take() {
             f.sync_all().context("syncing final chunk")?;
             drop(f);
@@ -89,7 +95,19 @@ impl ChunkWriter {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&digest);
         // `ChunkWriter: Drop`, so we can't move `paths` out; take it instead.
-        let paths = std::mem::take(&mut self.paths);
+        let mut paths = std::mem::take(&mut self.paths);
+        if paths.len() == 1 {
+            let part = paths.remove(0);
+            let bare = self.work_dir.join(&self.prefix);
+            std::fs::rename(&part, &bare).with_context(|| {
+                format!(
+                    "renaming single chunk {} to {}",
+                    part.display(),
+                    bare.display()
+                )
+            })?;
+            paths.push(bare);
+        }
         Ok((paths, hash, self.total_written))
     }
 }
@@ -147,7 +165,8 @@ pub fn remove(path: &Path) {
     }
 }
 
-/// Best-effort removal of every `{prefix}.partNNNN` file in `work_dir`.
+/// Best-effort removal of the bare `{prefix}` file and every
+/// `{prefix}.partNNNN` file in `work_dir`.
 ///
 /// Sweeps by prefix rather than by a collected path list because a failure can
 /// happen before [`ChunkWriter::finish`] hands the list back — the partial
@@ -164,7 +183,7 @@ pub fn cleanup_prefix(work_dir: &Path, prefix: &str) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.starts_with(&part_prefix) {
+        if name == prefix || name.starts_with(&part_prefix) {
             remove(&entry.path());
         }
     }
@@ -264,17 +283,50 @@ mod tests {
     }
 
     #[test]
-    fn empty_stream_produces_single_empty_chunk() {
+    fn empty_stream_produces_single_bare_file() {
         let dir = tmpdir();
         let w = ChunkWriter::new(&dir, "empty", 1024);
         let (paths, hash, total) = w.finish().unwrap();
         assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], dir.join("empty"));
+        assert!(!dir.join("empty.part0000").exists());
         assert_eq!(std::fs::metadata(&paths[0]).unwrap().len(), 0);
         assert_eq!(total, 0);
         // SHA-256 of empty input is a fixed, non-zero constant.
         let mut want = [0u8; 32];
         want.copy_from_slice(&Sha256::digest(b""));
         assert_eq!(hash, want);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn small_stream_produces_single_bare_file() {
+        let dir = tmpdir();
+        let mut w = ChunkWriter::new(&dir, "small", 1024);
+        write_all(&mut w, b"small stream");
+
+        let (paths, _, total) = w.finish().unwrap();
+
+        assert_eq!(paths, vec![dir.join("small")]);
+        assert_eq!(total, 12);
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"small stream");
+        assert!(!dir.join("small.part0000").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exact_boundary_single_chunk_is_bare_file() {
+        let dir = tmpdir();
+        let max = 16u64;
+        let mut w = ChunkWriter::new(&dir, "boundary", max);
+        write_all(&mut w, &[0xAA; 16]);
+
+        let (paths, _, total) = w.finish().unwrap();
+
+        assert_eq!(paths, vec![dir.join("boundary")]);
+        assert_eq!(total, max);
+        assert_eq!(std::fs::metadata(&paths[0]).unwrap().len(), max);
+        assert!(!dir.join("boundary.part0000").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -310,6 +362,8 @@ mod tests {
         write_all(&mut w, &[0xBB]);
         let (paths, _, _) = w.finish().unwrap();
         assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], dir.join("boundary.part0000"));
+        assert_eq!(paths[1], dir.join("boundary.part0001"));
         assert_eq!(std::fs::metadata(&paths[0]).unwrap().len(), max);
         assert_eq!(std::fs::metadata(&paths[1]).unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
@@ -327,6 +381,7 @@ mod tests {
         let mut theirs = ChunkWriter::new(&dir, "db1-other-1", 8);
         write_all(&mut theirs, &[b'y'; 20]);
         theirs.flush().unwrap();
+        std::fs::write(dir.join("db0-app-1"), b"bare").unwrap();
 
         // No finish() call: exactly the mid-dump failure case.
         cleanup_prefix(&dir, "db0-app-1");
@@ -336,6 +391,10 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
+        assert!(
+            !left.iter().any(|n| n == "db0-app-1"),
+            "bare file must be gone: {left:?}"
+        );
         assert!(
             !left.iter().any(|n| n.starts_with("db0-app-1.part")),
             "own chunks must be gone: {left:?}"
