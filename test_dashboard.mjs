@@ -18,9 +18,9 @@ const stubs = {
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, STAGES };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, historyValue, historyMarkup, expandedDatabases, STAGES };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, STAGES } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, historyValue, historyMarkup, expandedDatabases, STAGES } = load(...Object.values(stubs));
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 
@@ -70,4 +70,16 @@ assert.equal(sizeLine({ dump_bytes: 4 * 1024 ** 3, bytes_total: 0 }),
 assert.equal(sizeLine({ dump_bytes: 4 * 1024 ** 3, bytes_total: 1024 ** 3 }),
     'dump <strong>4.0 GiB</strong> &nbsp;·&nbsp; compressed 4.0x');
 
-console.log('dashboard timeline mapping OK');
+assert.equal(historyValue(18.456), '18.5');
+assert.match(historyMarkup({
+    stats: { attempts: 2, successes: 1, success_rate: 50, last_run: null, last_success: null,
+        average_duration_secs: 2, average_dump_bytes: 1024, average_packaged_bytes: 512,
+        average_upload_retries: .5 },
+    records: [],
+}), /No backup history yet\./);
+expandedDatabases.add('app');
+assert.equal(expandedDatabases.has('app'), true);
+expandedDatabases.delete('app');
+assert.equal(expandedDatabases.has('app'), false);
+
+console.log('dashboard timeline, history formatting, and expansion state OK');

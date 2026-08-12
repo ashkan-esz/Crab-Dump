@@ -1,7 +1,7 @@
 //! Monthly JSONL history for database backup attempts.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -30,6 +30,27 @@ pub struct HistoryRecord {
     pub upload_duration_secs: f64,
     pub upload_attempts: u64,
     pub upload_retries: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryStats {
+    pub attempts: usize,
+    pub successes: usize,
+    pub failures: usize,
+    pub success_rate: f64,
+    pub last_run: Option<String>,
+    pub last_success: Option<String>,
+    pub average_duration_secs: f64,
+    pub average_dump_bytes: f64,
+    pub average_packaged_bytes: f64,
+    pub average_upload_retries: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistorySummary {
+    pub database: String,
+    pub stats: HistoryStats,
+    pub records: Vec<HistoryRecord>,
 }
 
 /// Process-wide serialized history appender.
@@ -79,6 +100,65 @@ impl HistoryStore {
         self.directory.display().to_string()
     }
 
+    /// Read retained history for one database without loading the history
+    /// corpus into memory. Malformed JSONL lines are ignored so one truncated
+    /// record cannot hide the rest of the dashboard history.
+    pub fn summary(&self, database_name: &str, limit: usize) -> Result<HistorySummary> {
+        let mut all = Vec::new();
+        let mut stats = HistoryStatsBuilder::default();
+        let entries = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HistorySummary {
+                    database: database_name.to_string(),
+                    stats: stats.finish(),
+                    records: Vec::new(),
+                });
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("scanning history directory {}", self.directory.display())
+                });
+            }
+        };
+
+        let mut paths = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(parse_month_filename)
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        for path in paths {
+            let file = fs::File::open(&path)
+                .with_context(|| format!("opening history file {}", path.display()))?;
+            for line in BufReader::new(file).lines() {
+                let line =
+                    line.with_context(|| format!("reading history file {}", path.display()))?;
+                let Ok(record) = serde_json::from_str::<HistoryRecord>(&line) else {
+                    continue;
+                };
+                if record.database_name != database_name {
+                    continue;
+                }
+                stats.add(&record);
+                all.push(record);
+            }
+        }
+
+        all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        all.truncate(limit);
+        Ok(HistorySummary {
+            database: database_name.to_string(),
+            stats: stats.finish(),
+            records: all,
+        })
+    }
+
     fn remove_old_files(&self, current: DateTime<Utc>) -> Result<()> {
         let current_month = month_number(current.year(), current.month());
         let oldest = current_month - i64::from(self.retention_months - 1);
@@ -98,6 +178,81 @@ impl HistoryStore {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct HistoryStatsBuilder {
+    attempts: usize,
+    successes: usize,
+    duration: f64,
+    dump_bytes: f64,
+    packaged_bytes: f64,
+    upload_retries: f64,
+    last_run: Option<String>,
+    last_success: Option<String>,
+}
+
+impl HistoryStatsBuilder {
+    fn add(&mut self, record: &HistoryRecord) {
+        self.attempts += 1;
+        if record.status == "success" {
+            self.successes += 1;
+            if self
+                .last_success
+                .as_ref()
+                .is_none_or(|last| record.started_at > *last)
+            {
+                self.last_success = Some(record.started_at.clone());
+            }
+        }
+        if self
+            .last_run
+            .as_ref()
+            .is_none_or(|last| record.started_at > *last)
+        {
+            self.last_run = Some(record.started_at.clone());
+        }
+        self.duration += record.duration_secs;
+        self.dump_bytes += record.dump_bytes as f64;
+        self.packaged_bytes += record.packaged_bytes as f64;
+        self.upload_retries += record.upload_retries as f64;
+    }
+
+    fn finish(self) -> HistoryStats {
+        let attempts = self.attempts as f64;
+        HistoryStats {
+            attempts: self.attempts,
+            successes: self.successes,
+            failures: self.attempts.saturating_sub(self.successes),
+            success_rate: if self.attempts == 0 {
+                0.0
+            } else {
+                self.successes as f64 / self.attempts as f64 * 100.0
+            },
+            last_run: self.last_run,
+            last_success: self.last_success,
+            average_duration_secs: if attempts > 0.0 {
+                self.duration / attempts
+            } else {
+                0.0
+            },
+            average_dump_bytes: if attempts > 0.0 {
+                self.dump_bytes / attempts
+            } else {
+                0.0
+            },
+            average_packaged_bytes: if attempts > 0.0 {
+                self.packaged_bytes / attempts
+            } else {
+                0.0
+            },
+            average_upload_retries: if attempts > 0.0 {
+                self.upload_retries / attempts
+            } else {
+                0.0
+            },
+        }
     }
 }
 
@@ -281,5 +436,72 @@ mod tests {
         assert!(!out.contains("secret"));
         assert!(!out.contains("tok"));
         assert!(!out.contains("chat"));
+    }
+
+    #[test]
+    fn summary_is_bounded_newest_first_and_aggregates_all_records() {
+        let dir = temp_dir("summary");
+        let store = HistoryStore::new(&dir, 12);
+        for ordinal in 1..=35 {
+            let timestamp = if ordinal <= 28 {
+                format!("2026-08-{ordinal:02}T00:00:00Z")
+            } else {
+                format!("2026-09-{:02}T00:00:00Z", ordinal - 28)
+            };
+            let mut item = record(&timestamp);
+            item.status = if ordinal % 5 == 0 {
+                "failure"
+            } else {
+                "success"
+            }
+            .into();
+            item.duration_secs = ordinal as f64;
+            item.dump_bytes = ordinal;
+            item.packaged_bytes = ordinal * 2;
+            item.upload_retries = (ordinal % 3) as u64;
+            store.append(&item).unwrap();
+        }
+
+        let summary = store.summary("app", 30).unwrap();
+        assert_eq!(summary.records.len(), 30);
+        assert_eq!(summary.records[0].started_at, "2026-09-07T00:00:00Z");
+        assert_eq!(summary.records[29].started_at, "2026-08-06T00:00:00Z");
+        assert_eq!(summary.stats.attempts, 35);
+        assert_eq!(summary.stats.successes, 28);
+        assert_eq!(summary.stats.failures, 7);
+        assert!((summary.stats.success_rate - 80.0).abs() < f64::EPSILON);
+        assert_eq!(
+            summary.stats.last_success.as_deref(),
+            Some("2026-09-06T00:00:00Z")
+        );
+        assert!((summary.stats.average_duration_secs - 18.0).abs() < f64::EPSILON);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn summary_skips_malformed_lines_and_handles_missing_databases() {
+        let dir = temp_dir("summary-malformed");
+        fs::create_dir_all(&dir).unwrap();
+        let item = record("2026-08-01T00:00:00Z");
+        fs::write(
+            dir.join("2026-08.jsonl"),
+            format!("not json\n{}\n", serde_json::to_string(&item).unwrap()),
+        )
+        .unwrap();
+        let store = HistoryStore::new(&dir, 12);
+        assert_eq!(store.summary("app", 30).unwrap().stats.attempts, 1);
+        assert!(store.summary("missing", 30).unwrap().records.is_empty());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn summary_of_empty_or_absent_history_is_zeroed() {
+        let dir = temp_dir("summary-empty");
+        let store = HistoryStore::new(&dir, 12);
+        let summary = store.summary("app", 30).unwrap();
+        assert_eq!(summary.stats.attempts, 0);
+        assert_eq!(summary.stats.success_rate, 0.0);
+        assert!(summary.stats.last_run.is_none());
+        assert!(summary.records.is_empty());
     }
 }

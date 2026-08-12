@@ -87,6 +87,7 @@ fn main() -> Result<()> {
     // The dashboard runs in a dedicated thread with its own tokio runtime
     // because actix_web::HttpServer is not Send.
     let dashboard_port = shared_cfg.api_port;
+    let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     tracing::info!(port = dashboard_port, "spawning status dashboard server");
     std::thread::spawn(move || {
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
             .build()
             .expect("create tokio runtime for web server");
         rt.block_on(async move {
-            if let Err(e) = web::start_server(dashboard_port).await {
+            if let Err(e) = web::start_server(dashboard_port, dashboard_history).await {
                 eprintln!("web server error: {e}");
             }
         });

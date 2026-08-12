@@ -203,6 +203,24 @@ Retention defaults to the current month plus the previous 11 months. In
 containers, mount `HISTORY_DIR` as persistent storage; the example
 `docker-compose.yml` provides a named volume.
 
+The dashboard keeps the live pipeline view separate from historical data.
+Expand a database row to load its retained history on demand; the expanded
+view shows the newest 30 attempts and aggregate statistics across all retained
+monthly files. It includes success/failure counts and rate, last run and last
+successful run, average duration, dump and packaged sizes, upload retries, and
+sanitized failure messages.
+
+The read-only endpoint is:
+
+```text
+GET /api/history/{database_name}
+```
+
+It returns `{ "database", "stats", "records" }`. Missing or empty history
+returns a successful response with zero-valued statistics and an empty
+`records` array. The dashboard caches an expanded result until the user
+presses Refresh.
+
 ## Running in Docker
 
 The image runs as the `postgres` user and ships `pg_dump` 17, so the only

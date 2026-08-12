@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
 
+use crate::history::HistoryStore;
+
 // ===========================================================================
 // Global status atoms (Telegram service — single value)
 // ===========================================================================
@@ -455,6 +457,23 @@ async fn api_databases_list() -> impl Responder {
     entries.sort_by_key(|e| e.name.to_lowercase());
     HttpResponse::Ok().json(entries)
 }
+
+/// GET /api/history/{database_name} — retained attempts and aggregate stats.
+async fn api_history(
+    path: web::Path<String>,
+    history: web::Data<std::sync::Arc<HistoryStore>>,
+) -> impl Responder {
+    let database_name = path.into_inner();
+    match history.summary(&database_name, 30) {
+        Ok(summary) => HttpResponse::Ok().json(summary),
+        Err(error) => {
+            tracing::warn!(database = %database_name, error = %error, "failed to read database history");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "history is temporarily unavailable"
+            }))
+        }
+    }
+}
 /// Resolve the local hostname; fall back to "unknown" on failure.
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
@@ -483,18 +502,20 @@ async fn serve_dashboard() -> impl Responder {
 /// - `/api/status/databases` — returns all tracked database statuses as an array
 ///
 /// All status endpoints return JSON with `state`, `message`, and `timestamp` fields.
-pub async fn start_server(port: u16) -> std::io::Result<()> {
+pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
 
     HttpServer::new(move || {
         App::new()
             .app_data(port_data.clone())
+            .app_data(web::Data::new(history.clone()))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
             .route("/api/status/process", web::get().to(api_process_status))
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
+            .route("/api/history/{database_name}", web::get().to(api_history))
             .route("/api/info", web::get().to(api_config))
             .route("/", web::get().to(serve_dashboard))
             .route("/index.html", web::get().to(serve_dashboard))

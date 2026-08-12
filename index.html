@@ -246,12 +246,9 @@
         .db-grid {
             width: 100%;
             max-width: 920px;
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 1rem;
-        }
-        @media (max-width: 720px) {
-            .db-grid { grid-template-columns: 1fr; }
+            display: flex;
+            flex-direction: column;
+            gap: .65rem;
         }
 
         /* Individual database card */
@@ -259,11 +256,11 @@
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-left: 3px solid var(--idle);
-            border-radius: var(--radius);
-            padding: 1.05rem 1.15rem;
+            border-radius: 10px;
+            padding: 0;
             display: flex;
             flex-direction: column;
-            gap: .8rem;
+            gap: 0;
             transition: border-color .3s, box-shadow .3s, transform .15s;
             position: relative;
             overflow: hidden;
@@ -280,6 +277,31 @@
         }
         .db-card:hover::before { opacity: 1; }
         .db-card:hover { transform: translateY(-2px); }
+        .db-summary {
+            width: 100%; border: 0; background: transparent; color: inherit;
+            padding: 1.05rem 1.15rem; display: flex; flex-direction: column;
+            gap: .8rem; text-align: left; font: inherit; cursor: pointer;
+        }
+        .db-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+        .db-history { border-top: 1px solid var(--border); padding: 1rem 1.15rem 1.15rem; }
+        .db-history[hidden] { display: none; }
+        .history-heading { display: flex; justify-content: space-between; gap: .75rem; align-items: baseline; margin-bottom: .8rem; }
+        .history-heading h3 { font-size: .82rem; font-weight: 650; }
+        .history-refresh { color: var(--accent); font-size: .7rem; background: none; border: 0; cursor: pointer; }
+        .history-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin-bottom: .85rem; }
+        .history-stat { border: 1px solid var(--border); border-radius: 7px; padding: .5rem .6rem; min-width: 0; }
+        .history-stat span { display: block; color: var(--text-muted); font-size: .61rem; text-transform: uppercase; letter-spacing: .04em; }
+        .history-stat strong { display: block; margin-top: .2rem; font-family: var(--mono); font-size: .75rem; color: var(--text); font-variant-numeric: tabular-nums; }
+        .history-table-wrap { overflow-x: auto; }
+        .history-table { width: 100%; border-collapse: collapse; font-size: .7rem; white-space: nowrap; }
+        .history-table th { color: var(--text-muted); font-weight: 600; text-align: left; padding: .4rem .45rem; border-bottom: 1px solid var(--border); }
+        .history-table td { padding: .48rem .45rem; border-bottom: 1px solid rgba(30,41,59,.65); font-family: var(--mono); vertical-align: top; }
+        .history-table .success { color: var(--up); } .history-table .failure { color: var(--err); }
+        .history-error { color: var(--err); white-space: normal; min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
+        .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
+        .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
+        .history-skeleton { display: grid; gap: .55rem; }
+        @media (max-width: 720px) { .history-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
         /* State accents — border-color first, then the left edge overrides it */
         .db-card.running { border-color: var(--warn-border); border-left-color: var(--warn); box-shadow: 0 0 16px rgba(245,158,11,.06); }
@@ -584,7 +606,7 @@
 
     <!-- Controls -->
     <div class="controls">
-        <button class="btn primary" id="refreshBtn" onclick="refreshDashboard()">
+        <button class="btn primary" id="refreshBtn" onclick="refreshDashboard(true)">
             <span id="refreshIcon">&#x1f504;</span> Refresh
         </button>
     </div>
@@ -729,6 +751,8 @@
 
     /** Card elements keyed by database name, so polling updates them in place. */
     const dbCards = new Map();
+    const historyCache = new Map();
+    const expandedDatabases = new Set();
 
     /**
      * Derive display state from the backend's (state, stage) pair.
@@ -763,34 +787,26 @@
         const el = document.createElement('article');
         el.className = 'db-card';
         el.innerHTML = `
-            <div class="db-top">
-                <span class="db-dot"></span>
-                <span class="db-name"></span>
-                <span class="db-badge"></span>
-            </div>
-            <div class="db-step">
-                <span class="step-icon"></span>
-                <span class="step-text"></span>
-            </div>
-            <div class="db-transfer" hidden>
-                <div class="tr-bar"><span></span></div>
-                <div class="tr-meta">
-                    <span class="tr-size"></span>
-                    <span class="tr-speed"></span>
+            <button class="db-summary" type="button" aria-expanded="false">
+                <div class="db-top">
+                    <span class="db-dot"></span>
+                    <span class="db-name"></span>
+                    <span class="db-badge"></span>
                 </div>
-            </div>
-            <div class="db-size" hidden></div>
-            <div class="db-timeline">
-                ${STAGES.map((s, i) => `${i ? '<span class="tl-bar"></span>' : ''}
-                <span class="tl-stage">
-                    <span class="tl-node"></span>
-                    <span class="tl-label">${s}</span>
-                </span>`).join('')}
-            </div>
-            <div class="db-foot">
-                <span class="db-stage"></span>
-                <span class="db-updated"></span>
-            </div>`;
+                <div class="db-step"><span class="step-icon"></span><span class="step-text"></span></div>
+                <div class="db-transfer" hidden>
+                    <div class="tr-bar"><span></span></div>
+                    <div class="tr-meta"><span class="tr-size"></span><span class="tr-speed"></span></div>
+                </div>
+                <div class="db-size" hidden></div>
+                <div class="db-timeline">
+                    ${STAGES.map((s, i) => `${i ? '<span class="tl-bar"></span>' : ''}
+                    <span class="tl-stage"><span class="tl-node"></span><span class="tl-label">${s}</span></span>`).join('')}
+                </div>
+                <div class="db-foot"><span class="db-stage"></span><span class="db-updated"></span></div>
+            </button>
+            <section class="db-history" hidden aria-live="polite"></section>`;
+        el.querySelector('.db-summary').addEventListener('click', () => toggleHistory(el));
         return el;
     }
 
@@ -882,6 +898,94 @@
         return v;
     }
 
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+        }[ch]));
+    }
+
+    function historyValue(value, digits = 1) {
+        return Number(value || 0).toFixed(digits);
+    }
+
+    function historyMarkup(data) {
+        const s = data.stats || {};
+        const stats = [
+            ['Attempts', `${s.successes || 0}/${s.attempts || 0} success`],
+            ['Success rate', `${historyValue(s.success_rate)}%`],
+            ['Last run', s.last_run ? new Date(s.last_run).toLocaleString() : '—'],
+            ['Last success', s.last_success ? new Date(s.last_success).toLocaleString() : '—'],
+            ['Avg duration', `${historyValue(s.average_duration_secs)}s`],
+            ['Avg dump', fmtBytes(s.average_dump_bytes)],
+            ['Avg packaged', fmtBytes(s.average_packaged_bytes)],
+            ['Avg retries', historyValue(s.average_upload_retries)],
+        ].map(([label, value]) =>
+            `<div class="history-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
+        ).join('');
+        const rows = (data.records || []).map(record => `
+            <tr>
+                <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
+                <td class="${record.status === 'success' ? 'success' : 'failure'}">${escapeHtml(record.status)}</td>
+                <td>${historyValue(record.duration_secs)}s</td>
+                <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
+                <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
+                <td>${record.chunk_count || 0}</td>
+                <td>${record.upload_retries || 0}</td>
+                <td class="history-error">${escapeHtml(record.error || '—')}</td>
+            </tr>`).join('');
+        return `
+            <div class="history-heading">
+                <h3>Backup history</h3>
+                <button type="button" class="history-refresh">Reload history</button>
+            </div>
+            <div class="history-stats">${stats}</div>
+            ${rows ? `<div class="history-table-wrap"><table class="history-table">
+                <thead><tr><th>Started</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>` : '<div class="history-muted">No backup history yet.</div>'}`;
+    }
+
+    function renderHistory(el, data) {
+        const panel = el.querySelector('.db-history');
+        panel.innerHTML = historyMarkup(data);
+        panel.querySelector('.history-refresh').addEventListener('click', event => {
+            event.stopPropagation();
+            loadHistory(el, true);
+        });
+    }
+
+    async function loadHistory(el, force = false) {
+        const name = el.querySelector('.db-name').textContent;
+        if (!force && historyCache.has(name)) {
+            renderHistory(el, historyCache.get(name));
+            return;
+        }
+        const panel = el.querySelector('.db-history');
+        panel.hidden = false;
+        panel.innerHTML = `<div class="history-skeleton"><div class="skeleton" style="width:35%"></div><div class="skeleton" style="width:100%"></div><div class="skeleton" style="width:90%"></div></div>`;
+        try {
+            const data = await fetchStatus(`/api/history/${encodeURIComponent(name)}`);
+            historyCache.set(name, data);
+            renderHistory(el, data);
+        } catch (error) {
+            panel.innerHTML = `<div class="history-error-state"><span>Could not load backup history.</span><button type="button" class="history-refresh">Retry</button></div>`;
+            panel.querySelector('.history-refresh').addEventListener('click', event => {
+                event.stopPropagation();
+                loadHistory(el, true);
+            });
+        }
+    }
+
+    function toggleHistory(el) {
+        const name = el.querySelector('.db-name').textContent;
+        const open = !expandedDatabases.has(name);
+        if (open) expandedDatabases.add(name);
+        else expandedDatabases.delete(name);
+        el.querySelector('.db-summary').setAttribute('aria-expanded', String(open));
+        el.querySelector('.db-history').hidden = !open;
+        if (open) loadHistory(el);
+    }
+
     /**
      * Render the database section: summary pills + one card per database.
      * Auto-hides the section when there are zero databases.
@@ -908,6 +1012,10 @@
                 el = buildDbCard();
                 dbCards.set(db.name, el);
                 grid.appendChild(el);
+            }
+            if (expandedDatabases.has(db.name)) {
+                el.querySelector('.db-summary').setAttribute('aria-expanded', 'true');
+                el.querySelector('.db-history').hidden = false;
             }
             count[updateDbCard(el, db).cls]++;
             bytesDone  += db.bytes_done  || 0;
@@ -946,13 +1054,20 @@
         return res.json();
     }
 
-    async function refreshDashboard() {
+    async function refreshDashboard(forceHistory = false) {
         const btn = document.getElementById('refreshBtn');
         const icon = document.getElementById('refreshIcon');
         btn.disabled = true;
         icon.innerHTML = '<span class="spinner"></span>';
 
         try {
+            if (forceHistory) {
+                historyCache.clear();
+                for (const name of expandedDatabases) {
+                    const el = dbCards.get(name);
+                    if (el) loadHistory(el, true);
+                }
+            }
             await Promise.all([
                 // Re-read the config each poll: the schedule is static, but the
                 // phase and countdown are not.
@@ -992,7 +1107,7 @@
     async function init() {
         // refreshDashboard() loads the config too, so one call covers both.
         await refreshDashboard();
-        setInterval(refreshDashboard, 2000);
+        setInterval(() => refreshDashboard(), 2000);
     }
     window.addEventListener('DOMContentLoaded', init);
 </script>
