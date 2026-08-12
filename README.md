@@ -136,6 +136,7 @@ directory yourself).
 | `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
 | `HISTORY_DIR`        | no       | `./history`    | monthly JSONL backup-attempt history               |
 | `HISTORY_RETENTION_MONTHS` | no | `12`       | current month plus this many total monthly files   |
+| `HISTORY_UPLOAD_SCHEDULE` | no | `59 23 * * *` | upload active monthly history in scheduled mode; `0`/blank disables |
 | `KEEP_FAILED_DUMPS`  | no       | `0`            | keep a failed backup's chunks in `WORK_DIR` for debugging |
 | `BACKUP_INTERVAL`    | no       | *(one-shot)*   | repeat instead of exiting: an interval like `6h` (min `60s`), or a crontab expression like `0 */4 * * *` |
 | `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
@@ -329,6 +330,15 @@ cycle starts immediately.
 Failures never stop the loop: a database that fails is reported in that cycle's
 manifest and retried on the next one. Unset `BACKUP_INTERVAL` (or set it to
 `0`) for the one-shot behaviour below.
+
+### Daily history upload (`HISTORY_UPLOAD_SCHEDULE`)
+
+In scheduled mode, crab-dump independently uploads the current
+`HISTORY_DIR/YYYY-MM.jsonl` file once per matching local calendar date. The
+default is `59 23 * * *` (23:59 in the local container timezone). It uses the
+same five-field cron syntax as `BACKUP_INTERVAL`; set it to `0` or blank to
+disable. Large snapshots are sent as ordered ≤49 MiB parts, and one-shot mode
+never uploads history.
 
 ### External timer (one-shot)
 

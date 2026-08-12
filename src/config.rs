@@ -107,6 +107,9 @@ pub struct SharedConfig {
     /// and exits, which is what an external cron or systemd timer wants.
     /// `Some(_)` keeps the process alive and backs up on that schedule.
     pub backup_schedule: Option<Schedule>,
+    /// When to upload the active monthly history file. Defaults to 23:59
+    /// local time; `None` disables history uploads.
+    pub history_upload_schedule: Option<Schedule>,
     /// Monthly JSONL attempt history.
     pub history: Arc<HistoryStore>,
 }
@@ -179,7 +182,13 @@ impl Config {
         // ── Step 1: Parse config.toml once, merged with the environment ─────
         // Every step below reads from this single view, so a setting works
         // identically whether it came from the file or from an env var.
-        let raw = merge_raw_with_env(load_config_raw(), get_env);
+        let raw = merge_raw_with_env(load_config_raw(), |key| {
+            if key == "HISTORY_UPLOAD_SCHEDULE" {
+                env::var(key).ok()
+            } else {
+                get_env(key)
+            }
+        });
         let shared = build_shared_config(&raw)?;
 
         // Shared pg_dump args, from either source — the default each database
@@ -346,6 +355,8 @@ struct RawConfigFile {
     /// (`"0 */4 * * *"`), parsed by [`parse_schedule`]. Kept as a string so the
     /// file and the environment accept exactly the same spellings.
     backup_interval: Option<String>,
+    /// Five-field crontab expression for uploading the active monthly history.
+    history_upload_schedule: Option<String>,
     // Populated only when [[databases]] exists in the TOML file.
     databases: Option<Vec<TomlDatabase>>,
 }
@@ -485,6 +496,11 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         None | Some("") | Some("0") => None,
         Some(s) => Some(parse_schedule(s)?),
     };
+    let history_upload_schedule = match raw.history_upload_schedule.as_deref().map(str::trim) {
+        None => Some(parse_history_schedule("59 23 * * *")?),
+        Some("") | Some("0") => None,
+        Some(s) => Some(parse_history_schedule(s)?),
+    };
 
     Ok(SharedConfig {
         tg_bot_token,
@@ -497,6 +513,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
         backup_schedule,
+        history_upload_schedule,
         history: Arc::new(HistoryStore::new(history_dir, history_retention_months)),
     })
 }
@@ -515,6 +532,18 @@ fn parse_schedule(s: &str) -> Result<Schedule> {
         )?)));
     }
     Ok(Schedule::Every(parse_duration(s)?))
+}
+
+fn parse_history_schedule(s: &str) -> Result<Schedule> {
+    if s.split_whitespace().count() != 5 {
+        bail!(
+            "HISTORY_UPLOAD_SCHEDULE must use the five-field cron syntax \
+             (for example `59 23 * * *`)"
+        );
+    }
+    Ok(Schedule::Cron(Box::new(Cron::parse(s).with_context(
+        || format!("HISTORY_UPLOAD_SCHEDULE `{s}` is not a valid cron expression"),
+    )?)))
 }
 
 /// Parse a backup interval: a bare number of seconds, or a number with a
@@ -587,6 +616,7 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
             .map(|v| parse_bool(&v))
             .or(raw.keep_failed_dumps),
         backup_interval: env("BACKUP_INTERVAL").or(raw.backup_interval),
+        history_upload_schedule: env("HISTORY_UPLOAD_SCHEDULE").or(raw.history_upload_schedule),
         databases: raw.databases, // TOML-only; never merged with env.
     }
 }
@@ -847,6 +877,7 @@ mod tests {
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,
             backup_schedule: None,
+            history_upload_schedule: Some(parse_schedule("59 23 * * *").unwrap()),
             history: Arc::new(HistoryStore::new("./history", 12)),
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
@@ -1040,6 +1071,62 @@ mod tests {
             ),
             Duration::from_secs(1800),
         );
+    }
+
+    #[test]
+    fn history_upload_schedule_defaults_to_daily_at_2359() {
+        let schedule = build_shared_config(&shared_raw())
+            .unwrap()
+            .history_upload_schedule
+            .unwrap();
+        assert_eq!(schedule_label_for_test(&schedule), "cron 59 23 * * *");
+    }
+
+    #[test]
+    fn history_upload_schedule_accepts_override_and_disable_values() {
+        let raw = RawConfigFile {
+            history_upload_schedule: Some("15 4 * * *".into()),
+            ..shared_raw()
+        };
+        assert_eq!(
+            schedule_label_for_test(
+                &build_shared_config(&raw)
+                    .unwrap()
+                    .history_upload_schedule
+                    .unwrap()
+            ),
+            "cron 15 4 * * *"
+        );
+        for disabled in ["0", "", "   "] {
+            let raw = RawConfigFile {
+                history_upload_schedule: Some(disabled.into()),
+                ..shared_raw()
+            };
+            assert!(build_shared_config(&raw)
+                .unwrap()
+                .history_upload_schedule
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_history_upload_schedule_is_rejected() {
+        let raw = RawConfigFile {
+            history_upload_schedule: Some("61 23 * * *".into()),
+            ..shared_raw()
+        };
+        let error = format!("{:#}", build_shared_config(&raw).unwrap_err());
+        assert!(
+            error.contains("hour") || error.contains("minute"),
+            "{error}"
+        );
+    }
+
+    fn schedule_label_for_test(schedule: &Schedule) -> String {
+        match schedule {
+            Schedule::Every(duration) => format!("every {}", duration.as_secs()),
+            Schedule::Cron(expr) => format!("cron {expr}"),
+        }
     }
 
     // -- Single-database fallback (D1, D4) --

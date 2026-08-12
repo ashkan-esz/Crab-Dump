@@ -8,10 +8,10 @@
 //! Runs once and exits by default (for cron / systemd timers). Set
 //! `BACKUP_INTERVAL` to keep the process alive and repeat the cycle itself.
 
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -142,13 +142,28 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let telegram_client = Arc::new(build_http_client(&shared_cfg)?);
+
     // ── Scheduled mode ──────────────────────────────────────────────────────
     // With BACKUP_INTERVAL set the process stays alive and repeats the cycle
     // itself, so no external cron/systemd timer is needed (and the dashboard
     // keeps serving between runs). Failures never end the loop — a database
     // that is down now may well be up at the next cycle.
     if let Some(schedule) = &shared_cfg.backup_schedule {
-        run_scheduled(&shared_cfg, &databases, cli.no_encryption, schedule);
+        if let Some(history_schedule) = &shared_cfg.history_upload_schedule {
+            spawn_history_upload_worker(
+                &shared_cfg,
+                history_schedule,
+                Arc::clone(&telegram_client),
+            );
+        }
+        run_scheduled(
+            &shared_cfg,
+            &databases,
+            cli.no_encryption,
+            schedule,
+            &telegram_client,
+        );
         // `run_scheduled` only returns if the loop is ever made to terminate;
         // today it runs until the process is signalled.
         return Ok(());
@@ -156,7 +171,8 @@ fn main() -> Result<()> {
 
     // ── One-shot mode ───────────────────────────────────────────────────────
     web::set_cycle_running(true);
-    let (results, failures) = run_cycle(&shared_cfg, &databases, cli.no_encryption);
+    let (results, failures) =
+        run_cycle(&shared_cfg, &databases, cli.no_encryption, &telegram_client);
     web::set_cycle_running(false);
 
     // A partial run must not look like a clean one to cron/systemd, but the
@@ -180,6 +196,102 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Start the independent history uploader alongside the backup scheduler.
+///
+/// The worker has its own wall-clock loop, but shares the process-wide
+/// Telegram upload lock used by database backups. It intentionally is not
+/// started in one-shot mode.
+fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: Arc<Client>) {
+    let Schedule::Cron(cron) = schedule else {
+        tracing::error!("history upload schedule must be a five-field cron expression");
+        return;
+    };
+    let history = Arc::clone(&cfg.history);
+    let work_dir = cfg.work_dir.clone();
+    let chunk_size = cfg.chunk_size_bytes();
+    let bot_token = cfg.tg_bot_token.clone();
+    let chat_id = cfg.tg_chat_id.clone();
+    let cron = cron.clone();
+    std::thread::spawn(move || {
+        tracing::info!(cron = %cron, "history upload worker started");
+        for occurrence in 1u64.. {
+            sleep_until_cron(&cron, occurrence);
+            if let Err(error) = upload_active_history(
+                &history, &work_dir, chunk_size, &client, &bot_token, &chat_id,
+            ) {
+                tracing::error!(error = %error, "scheduled history upload failed");
+            }
+        }
+    });
+}
+
+fn upload_active_history(
+    history: &HistoryStore,
+    work_dir: &std::path::Path,
+    chunk_size: u64,
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+) -> Result<()> {
+    let Some(snapshot) = history.snapshot_active(work_dir)? else {
+        tracing::info!("history upload skipped — active monthly history is empty");
+        return Ok(());
+    };
+    let stamp = match ymdhms(SystemTime::now()) {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            let _ = std::fs::remove_file(&snapshot.path);
+            return Err(error).context("naming history upload parts");
+        }
+    };
+    let prefix = format!("history-{}-{}", snapshot.month, stamp);
+    let result = (|| -> Result<()> {
+        let (parts, _, total_bytes) =
+            chunk_history_snapshot(&snapshot.path, work_dir, &prefix, chunk_size)?;
+        tracing::info!(
+            month = %snapshot.month,
+            parts = parts.len(),
+            total_bytes,
+            "uploading monthly history snapshot",
+        );
+        for (index, part) in parts.iter().enumerate() {
+            let mut stats = telegram::UploadStats::default();
+            telegram::send_document(client, bot_token, chat_id, part, &mut stats)
+                .with_context(|| format!("uploading history part {}", index + 1))?;
+            chunk::remove(part);
+        }
+        Ok(())
+    })();
+    chunk::cleanup_prefix(work_dir, &prefix);
+    let _ = std::fs::remove_file(&snapshot.path);
+    result
+}
+
+fn chunk_history_snapshot(
+    snapshot: &std::path::Path,
+    work_dir: &std::path::Path,
+    prefix: &str,
+    chunk_size: u64,
+) -> Result<(Vec<std::path::PathBuf>, [u8; 32], u64)> {
+    let input = std::fs::File::open(snapshot)
+        .with_context(|| format!("opening history snapshot {}", snapshot.display()))?;
+    let mut reader = BufReader::new(input);
+    let mut chunker = ChunkWriter::new(work_dir, prefix, chunk_size);
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| "reading history snapshot")?;
+        if read == 0 {
+            break;
+        }
+        chunker
+            .write_all(&buffer[..read])
+            .with_context(|| "splitting history snapshot into Telegram parts")?;
+    }
+    chunker.finish().context("finalizing history chunks")
+}
+
 /// Run backup cycles on `schedule`, forever, and never stop on failure.
 ///
 /// The two schedule forms differ only in when the next cycle starts:
@@ -200,6 +312,7 @@ fn run_scheduled(
     databases: &[DatabaseConfig],
     no_encryption: bool,
     schedule: &Schedule,
+    client: &Arc<Client>,
 ) {
     match schedule {
         Schedule::Every(interval) => tracing::info!(
@@ -232,7 +345,7 @@ fn run_scheduled(
             web::register_database(&db.display_name());
         }
 
-        let (results, failures) = run_cycle(cfg, databases, no_encryption);
+        let (results, failures) = run_cycle(cfg, databases, no_encryption, client);
         web::set_cycle_running(false);
 
         // A failing database is reported and then forgotten: the next cycle
@@ -372,8 +485,9 @@ fn run_cycle(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     no_encryption: bool,
+    client: &Arc<Client>,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
-    let (results, failures) = execute_all_databases(cfg, databases, no_encryption);
+    let (results, failures) = execute_all_databases(cfg, databases, no_encryption, client);
 
     print_manifest(&results, &failures);
 
@@ -450,6 +564,7 @@ fn run_database(
     db: &DatabaseConfig,
     db_index: usize,
     no_encryption: bool,
+    client: &Client,
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
@@ -473,6 +588,7 @@ fn run_database(
         &base_name,
         started,
         no_encryption,
+        client,
         &mut metrics,
     );
 
@@ -553,6 +669,7 @@ fn run_database(
 
 /// The pipeline itself, split out so [`run_database`] can clean up after it on
 /// every failure path with a single check.
+#[allow(clippy::too_many_arguments)]
 fn backup_pipeline(
     cfg: &SharedConfig,
     db: &DatabaseConfig,
@@ -560,6 +677,7 @@ fn backup_pipeline(
     base_name: &str,
     started: SystemTime,
     no_encryption: bool,
+    client: &Client,
     metrics: &mut AttemptMetrics,
 ) -> Result<BackupResult> {
     // Report "running" status to the dashboard before starting heavy work.
@@ -697,7 +815,6 @@ fn backup_pipeline(
     // ── Upload chunks to Telegram ──────────────────────────────────────────
     // Each chunk is deleted the moment Telegram has it, so `work_dir` peaks at
     // the chunks still pending instead of the whole compressed dump.
-    let client = build_http_client(cfg)?;
     let upload_started = SystemTime::now();
     let mut sent_bytes: u64 = 0;
     for (i, p) in chunks.iter().enumerate() {
@@ -705,7 +822,7 @@ fn backup_pipeline(
         let chunk_bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         let mut upload_stats = telegram::UploadStats::default();
         let upload_result = telegram::send_document(
-            &client,
+            client,
             &cfg.tg_bot_token,
             &cfg.tg_chat_id,
             p,
@@ -809,6 +926,7 @@ fn execute_all_databases(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     no_encryption: bool,
+    client: &Arc<Client>,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
     // Never start more workers than there is work for them. With a single
     // database this is one worker, which is the sequential path — no special
@@ -827,7 +945,7 @@ fn execute_all_databases(
     // failure is still attributed to the database that caused it.
     let outcomes = run_bounded(databases, workers, |i, db| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_database(cfg, db, i, no_encryption)
+            run_database(cfg, db, i, no_encryption, client)
         }))
     });
 
@@ -960,8 +1078,12 @@ fn run_bounded<T: Sync, R: Send>(
 /// Applies the optional SOCKS5 proxy setting and a 5-minute request timeout
 /// to accommodate large document uploads over unreliable connections.
 fn build_http_client(cfg: &SharedConfig) -> Result<Client> {
+    build_http_client_for_proxy(cfg.socks_proxy.as_deref())
+}
+
+fn build_http_client_for_proxy(socks_proxy: Option<&str>) -> Result<Client> {
     let mut builder = Client::builder().timeout(std::time::Duration::from_secs(300));
-    if let Some(proxy) = &cfg.socks_proxy {
+    if let Some(proxy) = socks_proxy {
         tracing::info!(proxy = %proxy, "routing Telegram traffic through SOCKS5 proxy");
         builder = builder.proxy(reqwest::Proxy::all(proxy).context("parsing SOCKS_PROXY URL")?);
     }
@@ -1167,6 +1289,33 @@ mod tests {
     fn restore_line_decrypts_only_when_encrypted() {
         assert!(restore_line(&result_with("db0-x-1", true)).contains("age -d | zstd -d"));
         assert!(!restore_line(&result_with("db0-x-1", false)).contains("age -d"));
+    }
+
+    #[test]
+    fn history_snapshot_chunks_reassemble_in_order_and_cleanly() {
+        let root =
+            std::env::temp_dir().join(format!("crab-dump-history-chunks-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let snapshot = root.join("snapshot.jsonl");
+        let original: Vec<u8> = (0..100_000).map(|n| (n % 251) as u8).collect();
+        std::fs::write(&snapshot, &original).unwrap();
+
+        let (parts, _, total) =
+            chunk_history_snapshot(&snapshot, &root, "history-2026-08-123456", 1024).unwrap();
+        assert_eq!(total, original.len() as u64);
+        assert!(parts.len() > 90);
+        assert!(parts
+            .iter()
+            .all(|part| { std::fs::metadata(part).unwrap().len() <= 1024 }));
+        let mut reassembled = Vec::new();
+        for part in &parts {
+            reassembled.extend(std::fs::read(part).unwrap());
+        }
+        assert_eq!(reassembled, original);
+        chunk::cleanup_prefix(&root, "history-2026-08-123456");
+        assert!(parts.iter().all(|part| !part.exists()));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The concurrency limit is the whole point of the parameter: never more

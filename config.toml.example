@@ -55,6 +55,11 @@ tg_chat_id = "-1001234567890"
 # backup_interval = "6h"
 # backup_interval = "0 */4 * * *"   # 00:00, 04:00, 08:00, …
 
+# Upload the active monthly JSONL history file once per matching local date
+# while BACKUP_INTERVAL scheduled mode is running. Defaults to 23:59.
+# Set to "0" or "" to disable.
+# history_upload_schedule = "59 23 * * *"
+
 # Multi-server configuration (optional)
 # ─────────────────────────────────────────────────────────────────────────────
 # Instead of the single `database_url` above, you can declare multiple servers

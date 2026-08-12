@@ -1,7 +1,7 @@
 //! Monthly JSONL history for database backup attempts.
 
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -11,6 +11,12 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 
 const HISTORY_FILE_SUFFIX: &str = ".jsonl";
+
+#[derive(Debug)]
+pub struct HistorySnapshot {
+    pub month: String,
+    pub path: PathBuf,
+}
 
 /// One complete database backup attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +104,58 @@ impl HistoryStore {
 
     pub fn directory_display(&self) -> String {
         self.directory.display().to_string()
+    }
+
+    /// Copy the active monthly JSONL file while holding the append lock.
+    ///
+    /// The returned file is a private work-dir artifact owned by the caller;
+    /// it is deliberately not retained in the history directory. A missing
+    /// or empty active file returns `None`, so the scheduler never uploads a
+    /// bogus empty history document.
+    pub fn snapshot_active(&self, work_dir: &std::path::Path) -> Result<Option<HistorySnapshot>> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Utc::now();
+        let month = format!("{:04}-{:02}", now.year(), now.month());
+        let source = self.directory.join(format!("{month}{HISTORY_FILE_SUFFIX}"));
+        let metadata = match fs::metadata(&source) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => metadata,
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("statting active history file {}", source.display()))
+            }
+        };
+
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("creating work directory {}", work_dir.display()))?;
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let destination = work_dir.join(format!(".history-{month}-{unique}.jsonl"));
+        let mut input = fs::File::open(&source)
+            .with_context(|| format!("opening active history file {}", source.display()))?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .with_context(|| format!("creating history snapshot {}", destination.display()))?;
+        if let Err(error) = io::copy(&mut input, &mut output).and_then(|copied| {
+            if copied == metadata.len() {
+                output.sync_all()
+            } else {
+                Err(io::Error::other("history snapshot length changed"))
+            }
+        }) {
+            let _ = fs::remove_file(&destination);
+            return Err(error)
+                .with_context(|| format!("copying history snapshot {}", source.display()));
+        }
+        Ok(Some(HistorySnapshot {
+            month,
+            path: destination,
+        }))
     }
 
     /// Read retained history for one database without loading the history
@@ -503,5 +561,40 @@ mod tests {
         assert_eq!(summary.stats.success_rate, 0.0);
         assert!(summary.stats.last_run.is_none());
         assert!(summary.records.is_empty());
+    }
+
+    #[test]
+    fn snapshot_selects_active_month_and_is_not_empty() {
+        let dir = temp_dir("snapshot");
+        let work = temp_dir("snapshot-work");
+        fs::create_dir_all(&dir).unwrap();
+        let month = Utc::now().format("%Y-%m").to_string();
+        fs::write(
+            dir.join(format!("{month}.jsonl")),
+            b"{\"database_name\":\"app\"}\n",
+        )
+        .unwrap();
+        let store = HistoryStore::new(&dir, 12);
+        let snapshot = store.snapshot_active(&work).unwrap().unwrap();
+        assert_eq!(snapshot.month, month);
+        assert_eq!(
+            fs::read_to_string(snapshot.path).unwrap(),
+            "{\"database_name\":\"app\"}\n"
+        );
+        fs::remove_dir_all(dir).ok();
+        fs::remove_dir_all(work).ok();
+    }
+
+    #[test]
+    fn snapshot_skips_missing_and_empty_active_history() {
+        let dir = temp_dir("snapshot-empty");
+        let work = temp_dir("snapshot-empty-work");
+        fs::create_dir_all(&dir).unwrap();
+        let month = Utc::now().format("%Y-%m").to_string();
+        fs::write(dir.join(format!("{month}.jsonl")), b"").unwrap();
+        let store = HistoryStore::new(&dir, 12);
+        assert!(store.snapshot_active(&work).unwrap().is_none());
+        fs::remove_dir_all(dir).ok();
+        fs::remove_dir_all(work).ok();
     }
 }
