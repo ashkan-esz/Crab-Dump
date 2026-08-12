@@ -25,6 +25,12 @@ const MAX_RETRY_AFTER_SECS: u64 = 300;
 /// packaging stages parallel.
 static UPLOAD_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UploadStats {
+    pub attempts: u64,
+    pub retries: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     ok: bool,
@@ -44,7 +50,13 @@ struct ResponseParameters {
 /// Retries with exponential backoff on transient failures (network errors,
 /// 429, 5xx), preferring Telegram's own `retry_after` hint when it sends one.
 /// Uploads are serialized process-wide via [`UPLOAD_LOCK`].
-pub fn send_document(client: &Client, bot_token: &str, chat_id: &str, path: &Path) -> Result<()> {
+pub fn send_document(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    path: &Path,
+    stats: &mut UploadStats,
+) -> Result<()> {
     // The guard protects no data, so a poisoned lock is safe to adopt.
     let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -58,6 +70,7 @@ pub fn send_document(client: &Client, bot_token: &str, chat_id: &str, path: &Pat
     let mut attempt = 0u32;
     loop {
         attempt += 1;
+        stats.attempts += 1;
         let part = multipart::Part::file(path)
             .with_context(|| format!("opening chunk {}", path.display()))?
             .file_name(file_name.clone())
@@ -126,6 +139,7 @@ pub fn send_document(client: &Client, bot_token: &str, chat_id: &str, path: &Pat
                     );
                 }
                 web::set_telegram_status(1);
+                stats.retries += 1;
                 std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
             }
         }

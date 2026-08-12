@@ -25,11 +25,13 @@ mod config;
 mod cron;
 mod dump;
 mod encrypt;
+mod history;
 mod telegram;
 mod web;
 
 use chunk::ChunkWriter;
 use config::{Config, DatabaseConfig, Schedule, SharedConfig};
+use history::{HistoryRecord, HistoryStore};
 
 /// Load `.env` / `.env.local` before config resolution so environment-based
 /// config loading picks up credentials without manual export.
@@ -108,6 +110,7 @@ fn main() -> Result<()> {
     tracing::info!(
         count = databases.len(),
         work_dir = %shared_cfg.work_dir.display(),
+        history_dir = %shared_cfg.history.directory_display(),
         chunk_mb = shared_cfg.chunk_size_mb,
         max_parallel = shared_cfg.max_parallel_databases,
         "configuration resolved",
@@ -404,6 +407,18 @@ struct BackupResult {
     chunks_count: usize,
 }
 
+#[derive(Debug, Default)]
+struct AttemptMetrics {
+    dump_bytes: u64,
+    packaged_bytes: u64,
+    chunks_count: usize,
+    sha256: Option<[u8; 32]>,
+    encrypted: bool,
+    upload_duration_secs: f64,
+    upload_attempts: u64,
+    upload_retries: u64,
+}
+
 /// A database whose backup did not complete.
 ///
 /// Recorded so the manifest reports failures explicitly instead of only
@@ -437,6 +452,10 @@ fn run_database(
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
+    let mut metrics = AttemptMetrics {
+        encrypted: !no_encryption && cfg.age_recipient.is_some(),
+        ..Default::default()
+    };
 
     // Namespaced prefix prevents collisions when multiple databases share
     // the same working directory. Format: `db{index}-{name}-{YYYYMMDD-HHMMSS}`.
@@ -446,7 +465,72 @@ fn run_database(
     let stamp = ymdhms(started)?;
     let base_name = format!("db{db_index}-{db_name}-{stamp}");
 
-    let result = backup_pipeline(cfg, db, &db_name, &base_name, started, no_encryption);
+    let result = backup_pipeline(
+        cfg,
+        db,
+        &db_name,
+        &base_name,
+        started,
+        no_encryption,
+        &mut metrics,
+    );
+
+    let ended = SystemTime::now();
+    let duration_secs = ended
+        .duration_since(started)
+        .unwrap_or_default()
+        .as_secs_f64();
+    match &result {
+        Ok(success) => record_history(
+            &cfg.history,
+            HistoryRecord {
+                started_at: history::timestamp(started),
+                ended_at: history::timestamp(ended),
+                database_index: db_index,
+                database_name: db_name.clone(),
+                status: "success".into(),
+                error: None,
+                dump_bytes: metrics.dump_bytes,
+                packaged_bytes: success.total_bytes,
+                chunk_count: success.chunks_count,
+                sha256: Some(hex::encode(success.sha256)),
+                encrypted: success.encrypted,
+                duration_secs,
+                upload_duration_secs: metrics.upload_duration_secs,
+                upload_attempts: metrics.upload_attempts,
+                upload_retries: metrics.upload_retries,
+            },
+            &db.url,
+            cfg,
+        ),
+        Err(error) => record_history(
+            &cfg.history,
+            HistoryRecord {
+                started_at: history::timestamp(started),
+                ended_at: history::timestamp(ended),
+                database_index: db_index,
+                database_name: db_name.clone(),
+                status: "failure".into(),
+                error: Some(history::sanitize_error(
+                    &format!("{error:#}"),
+                    &db.url,
+                    &cfg.tg_bot_token,
+                    &cfg.tg_chat_id,
+                )),
+                dump_bytes: metrics.dump_bytes,
+                packaged_bytes: metrics.packaged_bytes,
+                chunk_count: metrics.chunks_count,
+                sha256: metrics.sha256.map(hex::encode),
+                encrypted: metrics.encrypted,
+                duration_secs,
+                upload_duration_secs: metrics.upload_duration_secs,
+                upload_attempts: metrics.upload_attempts,
+                upload_retries: metrics.upload_retries,
+            },
+            &db.url,
+            cfg,
+        ),
+    }
 
     // A failure can happen anywhere — mid-dump, mid-upload — so sweep by
     // prefix: the chunk path list only exists once the pipeline finished.
@@ -475,6 +559,7 @@ fn backup_pipeline(
     base_name: &str,
     started: SystemTime,
     no_encryption: bool,
+    metrics: &mut AttemptMetrics,
 ) -> Result<BackupResult> {
     // Report "running" status to the dashboard before starting heavy work.
     web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
@@ -556,6 +641,7 @@ fn backup_pipeline(
     }
     // Exact total, including the tail below the reporting threshold.
     web::set_db_dump_bytes(db_name, raw_bytes);
+    metrics.dump_bytes = raw_bytes;
 
     // ── Finalize pipeline stages ───────────────────────────────────────────
     // Unwind the writer stack in reverse order:
@@ -582,6 +668,9 @@ fn backup_pipeline(
 
     let elapsed = started.elapsed().unwrap_or_default();
     let chunks_count = chunks.len();
+    metrics.packaged_bytes = total_bytes;
+    metrics.chunks_count = chunks_count;
+    metrics.sha256 = Some(hash);
 
     // Dump + packaging done; the upload stage starts next. `total_bytes` is
     // the post-compression (and post-encryption) size — i.e. exactly what
@@ -613,16 +702,26 @@ fn backup_pipeline(
     for (i, p) in chunks.iter().enumerate() {
         // Read the size before uploading — the file is gone right after.
         let chunk_bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        telegram::send_document(&client, &cfg.tg_bot_token, &cfg.tg_chat_id, p).with_context(
-            || {
-                format!(
-                    "uploading chunk {}/{} (db={})",
-                    i + 1,
-                    chunks_count,
-                    db_name
-                )
-            },
-        )?;
+        let mut upload_stats = telegram::UploadStats::default();
+        let upload_result = telegram::send_document(
+            &client,
+            &cfg.tg_bot_token,
+            &cfg.tg_chat_id,
+            p,
+            &mut upload_stats,
+        )
+        .with_context(|| {
+            format!(
+                "uploading chunk {}/{} (db={})",
+                i + 1,
+                chunks_count,
+                db_name
+            )
+        });
+        metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
+        metrics.upload_attempts += upload_stats.attempts;
+        metrics.upload_retries += upload_stats.retries;
+        upload_result?;
         chunk::remove(p);
         // Report progress from the chunk sizes actually on disk; throughput is
         // wall-clock over the upload stage, so retries and stalls show up in it.
@@ -640,6 +739,7 @@ fn backup_pipeline(
             rate(sent_bytes, &upload_started),
         );
     }
+    metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
 
     // Mark database as done in the dashboard.
     web::set_db_status(
@@ -664,6 +764,23 @@ fn backup_pipeline(
         elapsed_secs: elapsed.as_secs_f64(),
         chunks_count,
     })
+}
+
+fn record_history(
+    store: &HistoryStore,
+    record: HistoryRecord,
+    database_url: &str,
+    cfg: &SharedConfig,
+) {
+    if let Err(error) = store.append(&record) {
+        let sanitized = history::sanitize_error(
+            &error.to_string(),
+            database_url,
+            &cfg.tg_bot_token,
+            &cfg.tg_chat_id,
+        );
+        tracing::warn!(error = %sanitized, "failed to write backup history; continuing");
+    }
 }
 
 /// Average throughput in bytes/second for `bytes` transferred since `since`.
@@ -759,6 +876,34 @@ fn execute_all_databases(
                     db_name,
                     error: format!("panicked: {panic_msg}"),
                 });
+                let now = SystemTime::now();
+                record_history(
+                    &cfg.history,
+                    HistoryRecord {
+                        started_at: history::timestamp(now),
+                        ended_at: history::timestamp(now),
+                        database_index: i,
+                        database_name: databases[i].display_name(),
+                        status: "failure".into(),
+                        error: Some(history::sanitize_error(
+                            &format!("panicked: {panic_msg}"),
+                            &databases[i].url,
+                            &cfg.tg_bot_token,
+                            &cfg.tg_chat_id,
+                        )),
+                        dump_bytes: 0,
+                        packaged_bytes: 0,
+                        chunk_count: 0,
+                        sha256: None,
+                        encrypted: !no_encryption && cfg.age_recipient.is_some(),
+                        duration_secs: 0.0,
+                        upload_duration_secs: 0.0,
+                        upload_attempts: 0,
+                        upload_retries: 0,
+                    },
+                    &databases[i].url,
+                    cfg,
+                );
             }
         }
     }

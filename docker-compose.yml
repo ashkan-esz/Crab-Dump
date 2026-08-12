@@ -15,4 +15,10 @@ services:
     env_file: .env
     environment:
       BACKUP_INTERVAL: "0 */8 * * *"
+      HISTORY_DIR: /var/lib/crab-dump/history
+    volumes:
+      - crab_dump_history:/var/lib/crab-dump/history
     restart: "unless-stopped"
+
+volumes:
+  crab_dump_history:

@@ -16,12 +16,14 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 use crate::cron::Cron;
+use crate::history::HistoryStore;
 
 // ===========================================================================
 // Constants & defaults
@@ -105,6 +107,8 @@ pub struct SharedConfig {
     /// and exits, which is what an external cron or systemd timer wants.
     /// `Some(_)` keeps the process alive and backs up on that schedule.
     pub backup_schedule: Option<Schedule>,
+    /// Monthly JSONL attempt history.
+    pub history: Arc<HistoryStore>,
 }
 
 impl SharedConfig {
@@ -332,6 +336,8 @@ struct RawConfigFile {
     age_recipient: Option<String>,
     chunk_size_mb: Option<u64>,
     work_dir: Option<String>,
+    history_dir: Option<String>,
+    history_retention_months: Option<u32>,
     api_port: Option<u16>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
@@ -445,6 +451,16 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         None => env::temp_dir(),
     };
 
+    let history_dir = raw
+        .history_dir
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("./history"));
+    let history_retention_months = raw.history_retention_months.unwrap_or(12);
+    if history_retention_months == 0 {
+        bail!("HISTORY_RETENTION_MONTHS must be at least 1");
+    }
+
     let socks_proxy = match raw.socks_proxy.clone() {
         Some(s) => {
             if !(s.starts_with("socks5://") || s.starts_with("socks5h://")) {
@@ -481,6 +497,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
         backup_schedule,
+        history: Arc::new(HistoryStore::new(history_dir, history_retention_months)),
     })
 }
 
@@ -555,6 +572,10 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
             .and_then(|v| v.parse().ok())
             .or(raw.chunk_size_mb),
         work_dir: env("WORK_DIR").or(raw.work_dir),
+        history_dir: env("HISTORY_DIR").or(raw.history_dir),
+        history_retention_months: env("HISTORY_RETENTION_MONTHS")
+            .and_then(|v| v.parse().ok())
+            .or(raw.history_retention_months),
         api_port: env("API_PORT")
             .and_then(|v| v.parse().ok())
             .or(raw.api_port),
@@ -826,6 +847,7 @@ mod tests {
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,
             backup_schedule: None,
+            history: Arc::new(HistoryStore::new("./history", 12)),
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
     }

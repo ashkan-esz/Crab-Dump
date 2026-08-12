@@ -134,6 +134,8 @@ directory yourself).
 | `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
 | `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
+| `HISTORY_DIR`        | no       | `./history`    | monthly JSONL backup-attempt history               |
+| `HISTORY_RETENTION_MONTHS` | no | `12`       | current month plus this many total monthly files   |
 | `KEEP_FAILED_DUMPS`  | no       | `0`            | keep a failed backup's chunks in `WORK_DIR` for debugging |
 | `BACKUP_INTERVAL`    | no       | *(one-shot)*   | repeat instead of exiting: an interval like `6h` (min `60s`), or a crontab expression like `0 */4 * * *` |
 | `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
@@ -191,6 +193,15 @@ backups. Uploads are serialized process-wide because all databases share one
 > spent. Size `WORK_DIR` accordingly, or lower `MAX_PARALLEL_DATABASES`.
 
 The dashboard shows the active limit in its info bar ("Parallel limit").
+
+Every database attempt is also appended to `HISTORY_DIR/YYYY-MM.jsonl`,
+including failures that happen before packaging completes. Records include
+timestamps, byte counts, chunk count, SHA-256, encryption, duration, and
+aggregate Telegram upload attempts/retries. History is best-effort: an
+I/O error is logged as a warning and does not change the backup outcome.
+Retention defaults to the current month plus the previous 11 months. In
+containers, mount `HISTORY_DIR` as persistent storage; the example
+`docker-compose.yml` provides a named volume.
 
 ## Running in Docker
 

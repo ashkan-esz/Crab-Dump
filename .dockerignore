@@ -30,6 +30,7 @@ config.toml
 tmp/
 temp/
 *.tmp
+history
 
 # Archives
 *.tar
