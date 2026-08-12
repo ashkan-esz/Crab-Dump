@@ -108,9 +108,11 @@ Chunk files are named `db{index}-{name}-{YYYYmmdd-HHMMSS}.partNNNN`. A database
 that fails does not stop the others; it gets a `FAILED` line in the manifest
 with its error, and the run exits non-zero.
 
-Temp chunk files are deleted on success and **kept on failure** for debugging —
-including partial chunks from a database that failed mid-dump. They are never
-removed automatically, so sweep `WORK_DIR` after investigating a failed run.
+Temp chunk files are deleted as soon as Telegram accepts them, so `WORK_DIR`
+holds only the chunks still waiting to upload — not the whole dump. A failed
+database's leftovers are swept too, unless you set `KEEP_FAILED_DUMPS=1`, which
+leaves them in `WORK_DIR` for debugging (nothing removes them later — sweep the
+directory yourself).
 
 ## Configuration reference
 
@@ -130,6 +132,7 @@ removed automatically, so sweep `WORK_DIR` after investigating a failed run.
 | `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
 | `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
+| `KEEP_FAILED_DUMPS`  | no       | `0`            | keep a failed backup's chunks in `WORK_DIR` for debugging |
 | `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
 
 \* Either `DATABASE_URL` (single database) or `DATABASE_URL_0`, `DATABASE_URL_1`,
@@ -178,9 +181,10 @@ backups. Uploads are serialized process-wide because all databases share one
 > **Disk:** each pipeline writes its entire compressed dump to `WORK_DIR`
 > before uploading its first chunk, so peak disk usage is the sum across the
 > databases running concurrently — up to `MAX_PARALLEL_DATABASES` × the
-> single-database figure. Nothing pre-checks free space; exhaustion surfaces as
-> an I/O error mid-dump, after the dump time has been spent. Size `WORK_DIR`
-> accordingly, or lower `MAX_PARALLEL_DATABASES`.
+> single-database figure. Chunks are deleted as they upload, so usage falls
+> during the upload stage, but the peak stands. Nothing pre-checks free space;
+> exhaustion surfaces as an I/O error mid-dump, after the dump time has been
+> spent. Size `WORK_DIR` accordingly, or lower `MAX_PARALLEL_DATABASES`.
 
 The dashboard shows the active limit in its info bar ("Parallel limit").
 

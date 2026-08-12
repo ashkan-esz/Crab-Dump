@@ -139,11 +139,6 @@ fn main() -> Result<()> {
     // ── Print consolidated manifest ─────────────────────────────────────────
     print_manifest(&results, &failures);
 
-    // ── Cleanup temp chunks on success ──────────────────────────────────────
-    for r in &results {
-        chunk::cleanup(&r.chunk_paths);
-    }
-
     tracing::info!(
         successes = results.len(),
         failures = failures.len(),
@@ -171,8 +166,6 @@ struct BackupResult {
     /// operators need for reassembly, which `db_name` alone does not
     /// reconstruct.
     base_name: String,
-    /// Paths to the temporary chunk files written to disk.
-    chunk_paths: Vec<PathBuf>,
     /// Total number of bytes streamed through the pipeline.
     total_bytes: u64,
     /// Whether age encryption was applied to the stream.
@@ -203,10 +196,13 @@ struct DatabaseFailure {
 /// Steps:
 /// 1. Spawn `pg_dump` for this database with configured extra args.
 /// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing `.partNNNN` files.
-/// 3. Upload each chunk to Telegram (with retries).
+/// 3. Upload each chunk to Telegram (with retries), deleting it right after.
 /// 4. Return a [`BackupResult`] with metadata.
 ///
 /// Reports "running" / "done" / "error" status to the dashboard at each phase.
+///
+/// On failure the partial chunks are swept from `work_dir` unless
+/// `cfg.keep_failed_dumps` asks to keep them for debugging.
 fn run_database(
     cfg: &SharedConfig,
     db: &DatabaseConfig,
@@ -224,8 +220,38 @@ fn run_database(
     let stamp = ymdhms(started)?;
     let base_name = format!("db{db_index}-{db_name}-{stamp}");
 
+    let result = backup_pipeline(cfg, db, &db_name, &base_name, started, no_encryption);
+
+    // A failure can happen anywhere — mid-dump, mid-upload — so sweep by
+    // prefix: the chunk path list only exists once the pipeline finished.
+    if result.is_err() {
+        if cfg.keep_failed_dumps {
+            tracing::warn!(
+                db = db_name,
+                work_dir = %cfg.work_dir.display(),
+                prefix = base_name,
+                "KEEP_FAILED_DUMPS is set — leaving partial chunks on disk; remove them yourself",
+            );
+        } else {
+            chunk::cleanup_prefix(&cfg.work_dir, &base_name);
+        }
+    }
+
+    result
+}
+
+/// The pipeline itself, split out so [`run_database`] can clean up after it on
+/// every failure path with a single check.
+fn backup_pipeline(
+    cfg: &SharedConfig,
+    db: &DatabaseConfig,
+    db_name: &str,
+    base_name: &str,
+    started: SystemTime,
+    no_encryption: bool,
+) -> Result<BackupResult> {
     // Report "running" status to the dashboard before starting heavy work.
-    web::set_db_status(&db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
+    web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
 
     // ── Resolve encryption mode ────────────────────────────────────────────
     let age_recipient = if no_encryption {
@@ -251,7 +277,7 @@ fn run_database(
             let enc = encrypt::encryptor_for(recipient).context("building age encryptor")?;
             let age_writer = encrypt::wrap(
                 enc,
-                ChunkWriter::new(&cfg.work_dir, &base_name, cfg.chunk_size_bytes()),
+                ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
             )
             .context("wrapping chunker in age StreamWriter")?;
             let zstd = compress::encoder(age_writer).context("building zstd encoder")?;
@@ -269,7 +295,7 @@ fn run_database(
                     "AGE_RECIPIENT not set — dump will be compressed but NOT encrypted"
                 );
             }
-            let chunker = ChunkWriter::new(&cfg.work_dir, &base_name, cfg.chunk_size_bytes());
+            let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
             let zstd = compress::encoder(chunker).context("building zstd encoder")?;
             Sink::Plain(zstd)
         }
@@ -298,12 +324,12 @@ fn run_database(
             .with_context(|| format!("writing through pipeline (db={db_name})"))?;
         raw_bytes += n as u64;
         if raw_bytes - reported_at >= DUMP_REPORT_EVERY {
-            web::set_db_dump_bytes(&db_name, raw_bytes);
+            web::set_db_dump_bytes(db_name, raw_bytes);
             reported_at = raw_bytes;
         }
     }
     // Exact total, including the tail below the reporting threshold.
-    web::set_db_dump_bytes(&db_name, raw_bytes);
+    web::set_db_dump_bytes(db_name, raw_bytes);
 
     // ── Finalize pipeline stages ───────────────────────────────────────────
     // Unwind the writer stack in reverse order:
@@ -311,7 +337,7 @@ fn run_database(
     //   2. age::StreamWriter::finish() → Result<ChunkWriter> (if encrypted)
     //   3. ChunkWriter::finish() → Result<(paths, hash, total)>
     web::set_db_status(
-        &db_name,
+        db_name,
         1,
         "package",
         if encrypted {
@@ -335,12 +361,12 @@ fn run_database(
     // the post-compression (and post-encryption) size — i.e. exactly what
     // goes over the wire to Telegram.
     web::set_db_status(
-        &db_name,
+        db_name,
         1,
         "upload",
         format!("Uploading to Telegram — 0/{chunks_count} chunks"),
     );
-    web::set_db_transfer(&db_name, 0, total_bytes, 0.0);
+    web::set_db_transfer(db_name, 0, total_bytes, 0.0);
 
     tracing::info!(
         db = db_name,
@@ -353,10 +379,14 @@ fn run_database(
     );
 
     // ── Upload chunks to Telegram ──────────────────────────────────────────
+    // Each chunk is deleted the moment Telegram has it, so `work_dir` peaks at
+    // the chunks still pending instead of the whole compressed dump.
     let client = build_http_client(cfg)?;
     let upload_started = SystemTime::now();
     let mut sent_bytes: u64 = 0;
     for (i, p) in chunks.iter().enumerate() {
+        // Read the size before uploading — the file is gone right after.
+        let chunk_bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         telegram::send_document(&client, &cfg.tg_bot_token, &cfg.tg_chat_id, p).with_context(
             || {
                 format!(
@@ -367,17 +397,18 @@ fn run_database(
                 )
             },
         )?;
+        chunk::remove(p);
         // Report progress from the chunk sizes actually on disk; throughput is
         // wall-clock over the upload stage, so retries and stalls show up in it.
-        sent_bytes += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        sent_bytes += chunk_bytes;
         web::set_db_status(
-            &db_name,
+            db_name,
             1,
             "upload",
             format!("Uploading to Telegram — {}/{chunks_count} chunks", i + 1),
         );
         web::set_db_transfer(
-            &db_name,
+            db_name,
             sent_bytes,
             total_bytes,
             rate(sent_bytes, &upload_started),
@@ -386,22 +417,21 @@ fn run_database(
 
     // Mark database as done in the dashboard.
     web::set_db_status(
-        &db_name,
+        db_name,
         0,
         "done",
         format!("Backup complete — {chunks_count} chunks uploaded"),
     );
     web::set_db_transfer(
-        &db_name,
+        db_name,
         total_bytes,
         total_bytes,
         rate(total_bytes, &upload_started),
     );
 
     Ok(BackupResult {
-        db_name,
-        base_name,
-        chunk_paths: chunks,
+        db_name: db_name.to_string(),
+        base_name: base_name.to_string(),
         total_bytes,
         encrypted,
         sha256: hash,
@@ -742,7 +772,6 @@ mod tests {
         BackupResult {
             db_name: "mvpcore".into(),
             base_name: base_name.into(),
-            chunk_paths: Vec::new(),
             total_bytes: 0,
             encrypted,
             sha256: [0u8; 32],

@@ -135,13 +135,37 @@ impl Drop for ChunkWriter {
     }
 }
 
-/// Best-effort removal of a list of chunk files. Errors are logged, not fatal.
-pub fn cleanup(paths: &[PathBuf]) {
-    for p in paths {
-        if let Err(e) = std::fs::remove_file(p) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(path = %p.display(), error = %e, "failed to remove chunk");
-            }
+/// Best-effort removal of one chunk file. Errors are logged, not fatal.
+///
+/// Called the moment a chunk's bytes are on Telegram, so `work_dir` holds the
+/// chunks still waiting to upload rather than the whole dump.
+pub fn remove(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(path = %path.display(), error = %e, "failed to remove chunk");
+        }
+    }
+}
+
+/// Best-effort removal of every `{prefix}.partNNNN` file in `work_dir`.
+///
+/// Sweeps by prefix rather than by a collected path list because a failure can
+/// happen before [`ChunkWriter::finish`] hands the list back — the partial
+/// chunks are on disk either way.
+pub fn cleanup_prefix(work_dir: &Path, prefix: &str) {
+    let entries = match std::fs::read_dir(work_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(dir = %work_dir.display(), error = %e, "cannot scan work_dir for chunks");
+            return;
+        }
+    };
+    let part_prefix = format!("{prefix}.part");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(&part_prefix) {
+            remove(&entry.path());
         }
     }
 }
@@ -288,6 +312,41 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(std::fs::metadata(&paths[0]).unwrap().len(), max);
         assert_eq!(std::fs::metadata(&paths[1]).unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Failure cleanup sweeps by prefix, so it must catch partial chunks the
+    /// caller never got a path list for — and must not touch another
+    /// database's chunks sharing the same `work_dir`.
+    #[test]
+    fn cleanup_prefix_removes_only_matching_chunks() {
+        let dir = tmpdir();
+        let mut mine = ChunkWriter::new(&dir, "db0-app-1", 8);
+        write_all(&mut mine, &[b'x'; 20]);
+        mine.flush().unwrap();
+        let mut theirs = ChunkWriter::new(&dir, "db1-other-1", 8);
+        write_all(&mut theirs, &[b'y'; 20]);
+        theirs.flush().unwrap();
+
+        // No finish() call: exactly the mid-dump failure case.
+        cleanup_prefix(&dir, "db0-app-1");
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !left.iter().any(|n| n.starts_with("db0-app-1.part")),
+            "own chunks must be gone: {left:?}"
+        );
+        assert_eq!(
+            left.iter()
+                .filter(|n| n.starts_with("db1-other-1.part"))
+                .count(),
+            3,
+            "another database's chunks must survive: {left:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

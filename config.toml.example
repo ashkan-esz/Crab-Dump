@@ -39,6 +39,11 @@ tg_chat_id = "-1001234567890"
 # disk, CPU or database load is the constraint. 1 = fully sequential.
 # max_parallel_databases = 4
 
+# Keep a failed backup's partial chunk files in work_dir for debugging
+# (default: false — chunks are deleted as soon as they upload, and a failure
+# sweeps whatever is left). Nothing removes kept files later.
+# keep_failed_dumps = false
+
 # Multi-server configuration (optional)
 # ─────────────────────────────────────────────────────────────────────────────
 # Instead of the single `database_url` above, you can declare multiple servers

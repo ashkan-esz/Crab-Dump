@@ -49,7 +49,7 @@ For pull requests, include a brief description, link any related issues, and not
 
 ## Configuration Tips
 
-All settings come from environment variables (load via `set -a; source .env`). Required vars: `DATABASE_URL`, `TG_BOT_TOKEN`, `TG_CHAT_ID`. Optional: `AGE_RECIPIENT` (encryption public key), `SOCKS_PROXY`, `CHUNK_SIZE_MB`, `MAX_PARALLEL_DATABASES` (concurrent database backups, default 4), `WORK_DIR`, `RUST_LOG`. See `src/config.rs` for defaults.
+All settings come from environment variables (load via `set -a; source .env`). Required vars: `DATABASE_URL`, `TG_BOT_TOKEN`, `TG_CHAT_ID`. Optional: `AGE_RECIPIENT` (encryption public key), `SOCKS_PROXY`, `CHUNK_SIZE_MB`, `MAX_PARALLEL_DATABASES` (concurrent database backups, default 4), `WORK_DIR`, `KEEP_FAILED_DUMPS` (keep a failed run's chunks for debugging, default off), `RUST_LOG`. See `src/config.rs` for defaults.
 
 ## hi
 

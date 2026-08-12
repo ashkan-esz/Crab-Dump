@@ -69,6 +69,10 @@ pub struct SharedConfig {
     /// How many database backups may run at the same time (≥ 1). Databases
     /// beyond this many wait for a free slot.
     pub max_parallel_databases: usize,
+    /// Keep the temporary chunk files of a failed backup for debugging.
+    /// Default `false`: chunks are removed as soon as they are uploaded, and a
+    /// failure sweeps whatever is left behind.
+    pub keep_failed_dumps: bool,
 }
 
 impl SharedConfig {
@@ -299,6 +303,7 @@ struct RawConfigFile {
     api_port: Option<u16>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
+    keep_failed_dumps: Option<bool>,
     // Populated only when [[databases]] exists in the TOML file.
     databases: Option<Vec<TomlDatabase>>,
 }
@@ -431,6 +436,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         api_port: raw.api_port.unwrap_or(8080),
         socks_proxy,
         max_parallel_databases,
+        keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
     })
 }
 
@@ -458,8 +464,20 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         max_parallel_databases: env("MAX_PARALLEL_DATABASES")
             .and_then(|v| v.parse().ok())
             .or(raw.max_parallel_databases),
+        keep_failed_dumps: env("KEEP_FAILED_DUMPS")
+            .map(|v| parse_bool(&v))
+            .or(raw.keep_failed_dumps),
         databases: raw.databases, // TOML-only; never merged with env.
     }
+}
+
+/// Parse a boolean env var. Anything other than an explicit off value counts as
+/// on, so `KEEP_FAILED_DUMPS=yes` does not silently mean "delete my evidence".
+fn parse_bool(v: &str) -> bool {
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 /// Extract database configurations from TOML `[[databases]]` entries.
@@ -707,6 +725,7 @@ mod tests {
             api_port: 8080,
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
+            keep_failed_dumps: false,
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
     }
@@ -755,6 +774,32 @@ mod tests {
         };
         let env = |k: &str| (k == "MAX_PARALLEL_DATABASES").then(|| "7".to_string());
         assert_eq!(merge_raw_with_env(raw, env).max_parallel_databases, Some(7));
+    }
+
+    // -- Keeping failed dumps --
+
+    /// Deleting dumps is the default; keeping them is opt-in, and the opt-in
+    /// must not read `KEEP_FAILED_DUMPS=0` as "keep".
+    #[test]
+    fn keep_failed_dumps_defaults_off_and_parses_env() {
+        assert!(!build_shared_config(&shared_raw()).unwrap().keep_failed_dumps);
+        for on in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_bool(on), "`{on}` must enable keeping");
+        }
+        for off in ["0", "false", "no", "off", " "] {
+            assert!(!parse_bool(off), "`{off}` must not enable keeping");
+        }
+    }
+
+    #[test]
+    fn keep_failed_dumps_env_shadows_file() {
+        let raw = RawConfigFile {
+            keep_failed_dumps: Some(true),
+            ..shared_raw()
+        };
+        let env = |k: &str| (k == "KEEP_FAILED_DUMPS").then(|| "0".to_string());
+        let merged = merge_raw_with_env(raw, env);
+        assert!(!build_shared_config(&merged).unwrap().keep_failed_dumps);
     }
 
     // -- Single-database fallback (D1, D4) --
