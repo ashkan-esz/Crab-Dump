@@ -4,11 +4,13 @@
 # Environment variables always override file values — for sensitive data
 # (tokens, secrets) prefer env vars; for everything else a file is convenient.
 #
-# Required fields: database_url, tg_bot_token, tg_chat_id
+# Required fields: at least one [[databases]] entry, tg_bot_token, tg_chat_id
 # ---------------------------------------------------------------------------
 
-# PostgreSQL connection string.
-database_url = "postgresql://user:password@host:5432/dbname"
+# At least one database entry is required.
+# [[databases]]
+# url = "postgresql://user:password@host:5432/dbname"
+# name = "dbname"
 
 # Telegram bot token from @BotFather.
 tg_bot_token = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -60,15 +62,11 @@ tg_chat_id = "-1001234567890"
 # Set to "0" or "" to disable.
 # history_upload_schedule = "59 23 * * *"
 
-# Multi-server configuration (optional)
+# Multi-server configuration
 # ─────────────────────────────────────────────────────────────────────────────
-# Instead of the single `database_url` above, you can declare multiple servers
-# using a TOML array. Each server gets its own connection string and optional
-# overrides. Servers are backed up in parallel during a single run, up to
+# Declare one or more servers using a TOML array. Each server gets its own
+# connection string and optional overrides. Servers are backed up in parallel up to
 # `max_parallel_databases` at a time.
-#
-# This section takes priority over the single-database fields above.
-# When both are present, only [[databases]] is used.
 #
 # See docs/ADR-0001-multi-database-support.md for design details.
 

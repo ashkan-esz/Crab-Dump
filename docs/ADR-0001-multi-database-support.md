@@ -11,10 +11,10 @@
 
 ## Context
 
-crab-dump currently backs up exactly one PostgreSQL database per invocation.
-The single `DATABASE_URL` environment variable drives the entire pipeline —
-spawning `pg_dump`, streaming through compression and optional encryption,
-chunking to Telegram-safe sizes, and uploading.
+crab-dump backs up one or more PostgreSQL databases per invocation. Each
+configured database drives the same pipeline — spawning `pg_dump`, streaming
+through compression and optional encryption, chunking to Telegram-safe sizes,
+and uploading.
 
 As use cases grow, operators need to back up databases on different servers
 (e.g., production vs analytics), each with its own connection string, network
@@ -28,7 +28,8 @@ introducing an indexed configuration scheme:
 
 ### Configuration model
 
-Two parallel input paths resolve to a vector of `DatabaseConfig` entries:
+Two input paths resolve to a vector of `DatabaseConfig` entries. At least one
+database must be configured:
 
 1. **TOML array** (preferred for TOML-based deployments):
 
@@ -50,9 +51,6 @@ Two parallel input paths resolve to a vector of `DatabaseConfig` entries:
    PG_DUMP_EXTRA_ARGS_1=--exclude-table=logs
    ```
 
-3. **Fallback**: If no indexed entries and no TOML array are found, the existing
-   single `DATABASE_URL` flow proceeds unchanged — full backward compatibility.
-
 Each `DatabaseConfig` carries:
 
 | Field                | Required | Default                          |
@@ -69,7 +67,7 @@ global — they apply uniformly across all servers.
 - **Parallelism**: One `tokio::task::spawn` per server, each running its own
   `pg_dump → zstd → age? → ChunkWriter → Telegram upload` pipeline.
 - **Chunk namespacing**: File prefix becomes
-  `"db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}"` in UTC to
+  `"db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}"` in UTC to
   prevent collisions in the shared work directory. (The index was added by
   ADR-0002, D3; this ADR originally specified `"db-{name}-{timestamp}"`, which
   collided when two servers hosted a database of the same name.)
@@ -101,7 +99,8 @@ A new per-database endpoint exposes individual states:
 ### Positive
 
 - **Speed**: Parallel dumps reduce total wall time from sequential sum to max.
-- **Backward compat**: Existing single-DATABASE_URL setups keep working unmodified.
+- **Explicit configuration**: Every backup target is declared in a TOML array or
+  indexed environment variable.
 - **Flexibility**: Per-DB extra args allow fine-grained control (e.g., exclude
   noisy tables from analytics dumps).
 - **Debuggability**: Chunk filenames are namespaced by database; manifests show

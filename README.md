@@ -101,11 +101,11 @@ server 0: app (bytes=145572521, chunks=3, encrypted=false, sha256=4d52dfe801d349
 server 1: analytics (bytes=8815104, chunks=1, encrypted=false, sha256=9f2b1c0e5d47a8836be1f0a2c9d43e7715b6c8a09f3d2e1b4c5a6978d0e1f2a3, duration=4.2s)
 FAILED [2] archive: dumping database 'archive': pg_dump exited with status 1
 
-# restore [app]: cat db0-app-2026-08-12_20-55-32.part* | zstd -d | pg_restore --dbname=...
-# restore [analytics]: cat db1-analytics-2026-08-12_20-55-32 | zstd -d | pg_restore --dbname=...
+# restore [app]: cat db0-app-2026-08-12_20:55:32.part* | zstd -d | pg_restore --dbname=...
+# restore [analytics]: cat db1-analytics-2026-08-12_20:55:32 | zstd -d | pg_restore --dbname=...
 ```
 
-Chunk files use the prefix `db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}` in UTC. A one-chunk
+Chunk files use the prefix `db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}` in UTC. A one-chunk
 backup uses that prefix as its bare filename; multi-part backups append
 `.partNNNN`. A database that fails does not stop the others — every remaining database is still dumped
 and uploaded — it gets a `FAILED` line in the manifest with its error. A
@@ -122,7 +122,6 @@ directory yourself).
 
 | Variable             | Required | Default        | Notes                                              |
 |----------------------|:--------:|----------------|----------------------------------------------------|
-| `DATABASE_URL`       | yes\*     |                | `postgresql://user:pass@host:5432/db`              |
 | `DATABASE_URL_N`     | yes\*     |                | one per database, indexed from `0` — see below     |
 | `DB_NAME_N`          | no       | from URL path  | display name for database `N`; must be unique      |
 | `PG_DUMP_EXTRA_ARGS_N` | no     | shared value   | per-database override of `PG_DUMP_EXTRA_ARGS`      |
@@ -143,8 +142,9 @@ directory yourself).
 | `BACKUP_INTERVAL`    | no       | *(one-shot)*   | repeat instead of exiting: an interval like `6h` (min `60s`), or a crontab expression like `0 */4 * * *` |
 | `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
 
-\* Either `DATABASE_URL` (single database) or `DATABASE_URL_0`, `DATABASE_URL_1`,
-… (multiple). Every value in this table can also be set in `config.toml`; the
+\* At least one database is required: use `DATABASE_URL_0`, `DATABASE_URL_1`, …
+with contiguous indices, or one or more `[[databases]]` entries in
+`config.toml`. Every value in this table can also be set in `config.toml`; the
 environment wins where both define the same key.
 
 ### Multiple databases
@@ -232,14 +232,14 @@ thing you need to provide is configuration via environment variables.
 ```bash
 # One-shot backup (without encryption):
 docker run --rm \
-  -e DATABASE_URL="postgresql://user:pass@dbhost:5432/mydb" \
+  -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID="..." \
   crab-dump
 
 # One-shot backup (with encryption):
 docker run --rm \
-  -e DATABASE_URL="postgresql://user:pass@dbhost:5432/mydb" \
+  -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID="..." \
   -e AGE_RECIPIENT="age1..." \
@@ -380,10 +380,10 @@ Enable with `systemctl enable --now crab-dump.timer`.
 
 On a machine with the `identity.txt` (private key) and the downloaded parts.
 `BASE` is the prefix printed in the manifest's restore line
-(`db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}`):
+(`db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}`):
 
 ```bash
-BASE=db0-app-2026-08-12_20-55-32
+BASE=db0-app-2026-08-12_20:55:32
 
 # Encrypted, single-chunk dump (manifest says chunks=1):
 cat "$BASE" \
@@ -415,17 +415,19 @@ For a **plain-text** dump (if you set `PG_DUMP_EXTRA_ARGS=--format=plain`),
 swap `pg_restore` for `psql`:
 
 ```bash
+# Set RESTORE_DATABASE_URL to the target database connection string first.
+
 # Encrypted plain dump, single chunk:
-cat "$BASE" | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
+cat "$BASE" | rage -d -i identity.txt | zstd -d | psql "$RESTORE_DATABASE_URL"
 
 # Encrypted plain dump, multiple chunks:
-cat "$BASE".part* | rage -d -i identity.txt | zstd -d | psql "$DATABASE_URL"
+cat "$BASE".part* | rage -d -i identity.txt | zstd -d | psql "$RESTORE_DATABASE_URL"
 
 # Plain plain dump, single chunk:
-cat "$BASE" | zstd -d | psql "$DATABASE_URL"
+cat "$BASE" | zstd -d | psql "$RESTORE_DATABASE_URL"
 
 # Plain plain dump, multiple chunks:
-cat "$BASE".part* | zstd -d | psql "$DATABASE_URL"
+cat "$BASE".part* | zstd -d | psql "$RESTORE_DATABASE_URL"
 ```
 
 > The `sha256` in the manifest covers the stream that was written to

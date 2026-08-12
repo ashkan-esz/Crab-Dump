@@ -76,10 +76,6 @@ fn main() -> Result<()> {
     load_env();
 
     // ── Resolve configuration ───────────────────────────────────────────────
-    // resolve_databases tries three sources in descending priority:
-    //   1. TOML [[databases]] arrays from config.toml
-    //   2. Indexed env vars (DATABASE_URL_0, DATABASE_URL_1, …)
-    //   3. Single legacy DATABASE_URL (backward compat)
     let (shared_cfg, databases) =
         Config::resolve_databases().context("loading configuration from env")?;
 
@@ -572,7 +568,7 @@ fn run_database(
 
     // Namespaced prefix prevents collisions when multiple databases share
     // the same working directory. Format:
-    // `db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}`.
+    // `db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}`.
     // Duplicate display names are rejected at config time; the index is belt
     // and braces, so a future resolution path cannot make two pipelines write
     // the same `.partNNNN` files.
@@ -1186,11 +1182,11 @@ impl Sink {
 }
 
 /// Convert a Unix epoch timestamp to a readable, filename-safe UTC timestamp
-/// (`YYYY-MM-DD_HH-mm-ss`) for dump and history filenames.
+/// (`YYYY-MM-DD_HH:mm:ss`) for dump and history filenames.
 fn dump_timestamp(t: SystemTime) -> Result<String> {
     let (year, month, day, hour, minute, second) = utc_timestamp_parts(t)?;
     Ok(format!(
-        "{year:04}-{month:02}-{day:02}_{hour:02}-{minute:02}-{second:02}"
+        "{year:04}-{month:02}-{day:02}_{hour:02}:{minute:02}:{second:02}"
     ))
 }
 
@@ -1259,7 +1255,7 @@ mod tests {
     #[test]
     fn dump_timestamp_is_readable_and_utc() {
         let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_786_568_132);
-        assert_eq!(dump_timestamp(timestamp).unwrap(), "2026-08-12_20-55-32");
+        assert_eq!(dump_timestamp(timestamp).unwrap(), "2026-08-12_20:55:32");
     }
 
     #[test]
