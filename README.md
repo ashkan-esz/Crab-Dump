@@ -105,8 +105,10 @@ FAILED [2] archive: dumping database 'archive': pg_dump exited with status 1
 ```
 
 Chunk files are named `db{index}-{name}-{YYYYmmdd-HHMMSS}.partNNNN`. A database
-that fails does not stop the others; it gets a `FAILED` line in the manifest
-with its error, and the run exits non-zero.
+that fails does not stop the others — every remaining database is still dumped
+and uploaded — it gets a `FAILED` line in the manifest with its error. A
+one-shot run then exits non-zero; a scheduled run (`BACKUP_INTERVAL`) logs it
+and retries that database on the next cycle.
 
 Temp chunk files are deleted as soon as Telegram accepts them, so `WORK_DIR`
 holds only the chunks still waiting to upload — not the whole dump. A failed
@@ -133,6 +135,7 @@ directory yourself).
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
 | `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
 | `KEEP_FAILED_DUMPS`  | no       | `0`            | keep a failed backup's chunks in `WORK_DIR` for debugging |
+| `BACKUP_INTERVAL`    | no       | *(one-shot)*   | repeat instead of exiting: an interval like `6h` (min `60s`), or a crontab expression like `0 */4 * * *` |
 | `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
 
 \* Either `DATABASE_URL` (single database) or `DATABASE_URL_0`, `DATABASE_URL_1`,
@@ -171,7 +174,8 @@ dashboard cards, so crab-dump refuses to start on a collision. Set `DB_NAME_N`
 (or `name`) when two servers host a database of the same name.
 
 Each database dumps and packages on its own thread; one failure does not stop
-the others, but any failure makes the run exit non-zero. At most
+the others — not even when every database fails — but in one-shot mode any
+failure makes the run exit non-zero. At most
 `MAX_PARALLEL_DATABASES` (default `4`) run at a time — a database waits for a
 free slot, and a worker takes the next queued database as soon as it finishes,
 so a slow dump never idles the others. Set it to `1` for strictly sequential
@@ -235,6 +239,72 @@ docker run --rm \
 ```
 
 ## Scheduling
+
+Two options: let crab-dump schedule itself, or drive it from cron / a systemd
+timer.
+
+### Built-in scheduler (`BACKUP_INTERVAL`)
+
+Set `BACKUP_INTERVAL` and the process stays alive, repeating forever. Nothing
+external is needed, and the dashboard keeps serving between runs — its info bar
+shows the schedule, whether a cycle is **Running** or **Waiting**, and a live
+countdown to the next one. It takes either a plain interval or a crontab
+expression:
+
+```bash
+BACKUP_INTERVAL=6h            # every 6 hours, first backup immediately
+BACKUP_INTERVAL="0 */4 * * *" # 00:00, 04:00, 08:00, … first backup at the next match
+```
+
+```bash
+# docker-compose.yml — long-running instead of one-shot
+services:
+  crab-dump:
+    build: .
+    env_file: .env      # with BACKUP_INTERVAL set
+    restart: unless-stopped
+    ports: ["8080:8080"]
+```
+
+**Interval form** — seconds, or a number with an `s`/`m`/`h`/`d` suffix, minimum
+`60s`. The first backup runs at startup. The interval is measured from the
+**start** of each cycle, so `6h` means six hours apart rather than six hours of
+idle time.
+
+**Crontab form** — any value containing whitespace is parsed as a 5-field
+crontab line, `minute hour day-of-month month day-of-week`:
+
+| Expression | Fires |
+|------------|-------|
+| `0 */4 * * *`     | every 4 hours, on the hour: 00:00, 04:00, 08:00, … |
+| `30 3 * * *`      | every day at 03:30 |
+| `0 2 * * sun`     | Sundays at 02:00 |
+| `0 9-17/2 * * 1-5`| weekdays at 09:00, 11:00, 13:00, 15:00, 17:00 |
+| `0 0 1 * *`       | the 1st of every month |
+
+`*`, `*/n`, ranges, stepped ranges, lists, and 3-letter month/weekday names all
+work; `7` is Sunday. Day-of-month and day-of-week are ORed when both are
+restricted, as in vixie cron. `@daily`-style nicknames, `L`/`W`/`#`, and a
+seconds field are not supported. Unlike the interval form, **nothing runs at
+startup** — the first backup happens at the next matching time. Times follow the
+machine's local clock, so set `TZ` if the schedule should be timezone-independent
+(a DST shift can otherwise move a cycle by an hour). A bad expression, or one
+that can never fire, is rejected at startup rather than silently never running.
+
+Cycles never overlap in either form: the next firing time is computed after a
+cycle finishes, so a slot missed by a long-running cycle is skipped rather than
+run back-to-back — two at once would double the `pg_dump` load and the
+`WORK_DIR` peak. With the interval form, an overrun logs a warning and the next
+cycle starts immediately.
+
+Failures never stop the loop: a database that fails is reported in that cycle's
+manifest and retried on the next one. Unset `BACKUP_INTERVAL` (or set it to
+`0`) for the one-shot behaviour below.
+
+### External timer (one-shot)
+
+With `BACKUP_INTERVAL` unset, crab-dump runs one cycle and exits — non-zero if
+any database failed, which is what a timer's failure handling wants.
 
 Example systemd timer (replace paths/users as needed):
 

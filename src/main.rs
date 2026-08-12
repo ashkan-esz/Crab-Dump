@@ -2,7 +2,11 @@
 //!
 //! Multi-database aware: spawns independent pipelines per configured server,
 //! each running `pg_dump → zstd → age? → chunk → upload`, at most
-//! `MAX_PARALLEL_DATABASES` of them at a time.
+//! `MAX_PARALLEL_DATABASES` of them at a time. A database that fails is
+//! reported and skipped — never fatal to its peers.
+//!
+//! Runs once and exits by default (for cron / systemd timers). Set
+//! `BACKUP_INTERVAL` to keep the process alive and repeat the cycle itself.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -11,19 +15,21 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use chrono::NaiveDateTime;
 use clap::Parser;
 use reqwest::blocking::Client;
 
 mod chunk;
 mod compress;
 mod config;
+mod cron;
 mod dump;
 mod encrypt;
 mod telegram;
 mod web;
 
 use chunk::ChunkWriter;
-use config::{Config, DatabaseConfig, SharedConfig};
+use config::{Config, DatabaseConfig, Schedule, SharedConfig};
 
 /// Load `.env` / `.env.local` before config resolution so environment-based
 /// config loading picks up credentials without manual export.
@@ -132,11 +138,239 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── Execute backups ─────────────────────────────────────────────────────
-    let (results, failures) = execute_all_databases(&shared_cfg, &databases, cli.no_encryption)
-        .context("running database backups")?;
+    // ── Scheduled mode ──────────────────────────────────────────────────────
+    // With BACKUP_INTERVAL set the process stays alive and repeats the cycle
+    // itself, so no external cron/systemd timer is needed (and the dashboard
+    // keeps serving between runs). Failures never end the loop — a database
+    // that is down now may well be up at the next cycle.
+    if let Some(schedule) = &shared_cfg.backup_schedule {
+        run_scheduled(&shared_cfg, &databases, cli.no_encryption, schedule);
+        // `run_scheduled` only returns if the loop is ever made to terminate;
+        // today it runs until the process is signalled.
+        return Ok(());
+    }
 
-    // ── Print consolidated manifest ─────────────────────────────────────────
+    // ── One-shot mode ───────────────────────────────────────────────────────
+    web::set_cycle_running(true);
+    let (results, failures) = run_cycle(&shared_cfg, &databases, cli.no_encryption);
+    web::set_cycle_running(false);
+
+    // A partial run must not look like a clean one to cron/systemd, but the
+    // databases that did work are already uploaded — the exit code is the only
+    // thing left to report.
+    if !failures.is_empty() && results.is_empty() {
+        anyhow::bail!(
+            "all {} database backups failed (see the manifest above)",
+            failures.len(),
+        );
+    }
+    if !failures.is_empty() {
+        // Partial failure: non-zero so a timer's failure handling still fires,
+        // after every other database has been backed up and reported.
+        anyhow::bail!(
+            "{} of {} database backups failed (see the manifest above)",
+            failures.len(),
+            results.len() + failures.len(),
+        );
+    }
+    Ok(())
+}
+
+/// Run backup cycles on `schedule`, forever, and never stop on failure.
+///
+/// The two schedule forms differ only in when the next cycle starts:
+///
+/// - [`Schedule::Every`] backs up immediately, then keeps cycles one interval
+///   apart measured from the *start* of each cycle (so `6h` means six hours
+///   apart rather than six hours of idling).
+/// - [`Schedule::Cron`] waits for the next wall-clock time matching the
+///   expression, exactly like crontab — nothing runs at startup.
+///
+/// Either way a cycle that overruns its own slot does not stack a second cycle
+/// on top of itself: two concurrent cycles would double the `pg_dump` load and
+/// the `WORK_DIR` peak. An interval schedule starts the next cycle immediately;
+/// a cron schedule skips the firing times that went by while it was busy,
+/// rather than running them back to back.
+fn run_scheduled(
+    cfg: &SharedConfig,
+    databases: &[DatabaseConfig],
+    no_encryption: bool,
+    schedule: &Schedule,
+) {
+    match schedule {
+        Schedule::Every(interval) => tracing::info!(
+            interval_secs = interval.as_secs(),
+            databases = databases.len(),
+            "scheduled mode — running the first cycle now, then every interval",
+        ),
+        Schedule::Cron(expr) => tracing::info!(
+            cron = %expr,
+            databases = databases.len(),
+            "scheduled mode — waiting for the first matching time (nothing runs now)",
+        ),
+    }
+    web::set_schedule_label(schedule_label(schedule));
+
+    for cycle in 1u64.. {
+        // A cron schedule has to reach its first matching time before the first
+        // cycle; an interval schedule backs up straight away.
+        if let Schedule::Cron(expr) = schedule {
+            sleep_until_cron(expr, cycle);
+        }
+
+        let cycle_started = std::time::Instant::now();
+        tracing::info!(cycle, "backup cycle starting");
+        web::set_cycle_running(true);
+
+        // Reset every card to "queued" so the dashboard shows this cycle's
+        // progress rather than the previous cycle's outcome.
+        for db in databases {
+            web::register_database(&db.display_name());
+        }
+
+        let (results, failures) = run_cycle(cfg, databases, no_encryption);
+        web::set_cycle_running(false);
+
+        // A failing database is reported and then forgotten: the next cycle
+        // retries it from scratch. This is the whole point of running on a
+        // schedule instead of exiting non-zero and waiting for a human.
+        if failures.is_empty() {
+            tracing::info!(cycle, successes = results.len(), "backup cycle complete");
+        } else {
+            tracing::warn!(
+                cycle,
+                successes = results.len(),
+                failures = failures.len(),
+                "backup cycle finished with failures — retrying them next cycle",
+            );
+        }
+
+        // An interval schedule sleeps off whatever is left of its interval; a
+        // cron schedule computes its next firing time at the top of the loop,
+        // from the clock as it is once the cycle has actually finished.
+        if let Schedule::Every(interval) = schedule {
+            let elapsed = cycle_started.elapsed();
+            match interval.checked_sub(elapsed) {
+                Some(remaining) => {
+                    tracing::info!(
+                        cycle,
+                        elapsed_secs = elapsed.as_secs_f64(),
+                        sleep_secs = remaining.as_secs(),
+                        "sleeping until the next backup cycle",
+                    );
+                    web::set_next_run_in(remaining);
+                    std::thread::sleep(remaining);
+                }
+                None => tracing::warn!(
+                    cycle,
+                    elapsed_secs = elapsed.as_secs_f64(),
+                    interval_secs = interval.as_secs(),
+                    "cycle took longer than BACKUP_INTERVAL — starting the next one \
+                     immediately; raise the interval or lower MAX_PARALLEL_DATABASES",
+                ),
+            }
+        }
+    }
+}
+
+/// Sleep until the next local time matching `expr`.
+///
+/// The target is computed **once** and then compared against the wall clock in
+/// bounded slices. Recomputing it each slice would never fire: a sleep normally
+/// wakes a hair past the target, and `next_after` is strictly-after, so the
+/// target would keep advancing to the following firing time.
+///
+/// Sleeping in slices rather than one long call means a clock adjustment (NTP
+/// step, DST change, a resumed container) is noticed within [`SLEEP_SLICE`]
+/// instead of firing that far off — a jump forward past the target fires
+/// immediately, and a jump backwards simply waits longer.
+fn sleep_until_cron(expr: &cron::Cron, cycle: u64) {
+    let now = chrono::Local::now().naive_local();
+    // `Cron::parse` rejects expressions that can never fire, so `None` here
+    // would mean the clock has run past the four-year search window. Fire now
+    // rather than sleeping forever on an unanswerable question.
+    let Some(target) = expr.next_after(now) else {
+        tracing::error!(
+            cycle,
+            cron = %expr,
+            "cannot determine the next firing time from the current clock; \
+             running this cycle immediately",
+        );
+        return;
+    };
+
+    tracing::info!(
+        cycle,
+        cron = %expr,
+        next_run = %target.format("%Y-%m-%d %H:%M:%S"),
+        wait_secs = target.signed_duration_since(now).num_seconds(),
+        "waiting for the next scheduled backup",
+    );
+
+    if let Ok(wait) = target.signed_duration_since(now).to_std() {
+        web::set_next_run_in(wait);
+    }
+
+    while let Some(slice) = sleep_slice(chrono::Local::now().naive_local(), target) {
+        std::thread::sleep(slice);
+    }
+}
+
+/// How the dashboard should describe the schedule it is running on.
+fn schedule_label(schedule: &Schedule) -> String {
+    match schedule {
+        Schedule::Every(interval) => format!("every {}", format_secs(interval.as_secs())),
+        Schedule::Cron(expr) => format!("cron {expr}"),
+    }
+}
+
+/// Render a whole number of seconds as the compact `1d 2h 3m` form used in the
+/// dashboard, dropping zero units. Zero itself is `0s`.
+fn format_secs(total: u64) -> String {
+    let parts = [
+        (total / 86_400, 'd'),
+        (total % 86_400 / 3_600, 'h'),
+        (total % 3_600 / 60, 'm'),
+        (total % 60, 's'),
+    ];
+    let out: Vec<String> = parts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, unit)| format!("{n}{unit}"))
+        .collect();
+    if out.is_empty() {
+        return "0s".to_string();
+    }
+    out.join(" ")
+}
+
+/// Longest single sleep [`sleep_until_cron`] takes before re-reading the clock.
+const SLEEP_SLICE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to sleep before re-checking the clock, or `None` once `target` has
+/// arrived (or already passed, after a forward clock jump).
+fn sleep_slice(now: NaiveDateTime, target: NaiveDateTime) -> Option<std::time::Duration> {
+    // `to_std` fails for a negative span — i.e. the target is behind us.
+    let remaining = target.signed_duration_since(now).to_std().ok()?;
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(remaining.min(SLEEP_SLICE))
+}
+
+/// Run one full backup cycle over every database and print its manifest.
+///
+/// Never fails as a whole: an individual database's failure is collected and
+/// reported, and the remaining databases are backed up regardless. The caller
+/// decides what a failure means (exit code in one-shot mode, "try again next
+/// cycle" in scheduled mode).
+fn run_cycle(
+    cfg: &SharedConfig,
+    databases: &[DatabaseConfig],
+    no_encryption: bool,
+) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
+    let (results, failures) = execute_all_databases(cfg, databases, no_encryption);
+
     print_manifest(&results, &failures);
 
     tracing::info!(
@@ -145,15 +379,7 @@ fn main() -> Result<()> {
         "backup complete",
     );
 
-    // A partial run must not look like a clean one to cron/systemd.
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} of {} database backups failed (see the manifest above)",
-            failures.len(),
-            results.len() + failures.len(),
-        );
-    }
-    Ok(())
+    (results, failures)
 }
 
 /// Result produced by a single database backup pipeline.
@@ -455,25 +681,20 @@ fn rate(bytes: u64, since: &SystemTime) -> f64 {
 /// Execute backups for all configured databases.
 ///
 /// Runs at most `cfg.max_parallel_databases` pipelines at the same time; the
-/// rest wait for a free slot. Individual failures do not cancel other databases
-/// (failure policy: continue). The operation fails only when ALL databases fail.
+/// rest wait for a free slot. Individual failures never cancel other databases
+/// and never abort the run — including the case where every database fails, so
+/// a scheduled run keeps going and retries next cycle.
 ///
 /// Returns the successes and the per-database failures; the caller reports both
-/// and sets the exit code.
+/// and decides the exit code.
 fn execute_all_databases(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     no_encryption: bool,
-) -> Result<(Vec<BackupResult>, Vec<DatabaseFailure>)> {
-    // Fast path: single database skips threading overhead.
-    if databases.len() == 1 {
-        let db_name = databases[0].display_name();
-        let result = run_database(cfg, &databases[0], 0, no_encryption)
-            .inspect_err(|e| web::fail_db(&db_name, e.to_string()))?;
-        return Ok((vec![result], Vec::new()));
-    }
-
-    // Never start more workers than there is work for them.
+) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
+    // Never start more workers than there is work for them. With a single
+    // database this is one worker, which is the sequential path — no special
+    // case needed, and no path that skips failure collection.
     let workers = cfg.max_parallel_databases.min(databases.len()).max(1);
     tracing::info!(
         count = databases.len(),
@@ -542,16 +763,6 @@ fn execute_all_databases(
         }
     }
 
-    // Fatal only when ALL databases failed.
-    if results.is_empty() && !errors.is_empty() {
-        let details = errors
-            .iter()
-            .map(|f| format!("  [{}] {}: {}", f.index, f.db_name, f.error))
-            .collect::<Vec<_>>()
-            .join("\n");
-        anyhow::bail!("All {} database backups failed:\n{details}", errors.len());
-    }
-
     if !errors.is_empty() {
         tracing::warn!(
             successes = results.len(),
@@ -560,7 +771,7 @@ fn execute_all_databases(
         );
     }
 
-    Ok((results, errors))
+    (results, errors)
 }
 
 /// Run `f` over every item with at most `workers` running at the same time.
@@ -857,5 +1068,75 @@ mod tests {
             "the panicking item must be reported as such"
         );
         assert!(out[2].is_ok(), "a peer panic must not skip later items");
+    }
+
+    /// The cron wait must actually end. Slicing the sleep is only safe because
+    /// the target is fixed up front — recomputing it each slice pushed it to the
+    /// next firing minute every time the sleep woke a moment late, so the
+    /// scheduler waited forever and never ran a cycle.
+    #[test]
+    fn cron_sleep_slices_converge_on_the_target() {
+        let target = chrono::NaiveDate::from_ymd_opt(2026, 8, 12)
+            .unwrap()
+            .and_hms_opt(9, 30, 0)
+            .unwrap();
+
+        // Walk the loop the way `sleep_until_cron` does, advancing a simulated
+        // clock by each returned slice — including a final wake a hair late.
+        let mut now = target - chrono::Duration::seconds(74);
+        let mut slices = 0;
+        while let Some(slice) = sleep_slice(now, target) {
+            assert!(slice <= SLEEP_SLICE, "a slice must stay bounded: {slice:?}");
+            now += chrono::Duration::from_std(slice).unwrap() + chrono::Duration::milliseconds(3);
+            slices += 1;
+            assert!(slices < 10, "the wait must terminate, not loop");
+        }
+
+        // 30s + 30s + the 14s remainder, then the overshoot ends it.
+        assert_eq!(slices, 3);
+        assert!(now >= target, "the loop must not exit before the target");
+    }
+
+    /// A forward clock jump past the target (NTP step, resumed container) fires
+    /// immediately rather than waiting out another full period.
+    #[test]
+    fn cron_sleep_fires_when_the_target_already_passed() {
+        let target = chrono::NaiveDate::from_ymd_opt(2026, 8, 12)
+            .unwrap()
+            .and_hms_opt(9, 30, 0)
+            .unwrap();
+        assert_eq!(sleep_slice(target, target), None);
+        assert_eq!(
+            sleep_slice(target + chrono::Duration::hours(2), target),
+            None
+        );
+    }
+
+    /// The dashboard shows these strings verbatim, so both forms have to read
+    /// like something an operator recognises from their own config.
+    #[test]
+    fn schedule_labels_describe_both_forms() {
+        assert_eq!(
+            schedule_label(&Schedule::Every(std::time::Duration::from_secs(21_600))),
+            "every 6h",
+        );
+        assert_eq!(
+            schedule_label(&Schedule::Every(std::time::Duration::from_secs(90))),
+            "every 1m 30s",
+        );
+        assert_eq!(
+            schedule_label(&Schedule::Cron(Box::new(
+                cron::Cron::parse("0 */4 * * *").unwrap()
+            ))),
+            "cron 0 */4 * * *",
+        );
+    }
+
+    #[test]
+    fn seconds_render_as_compact_units_without_zero_parts() {
+        assert_eq!(format_secs(0), "0s");
+        assert_eq!(format_secs(45), "45s");
+        assert_eq!(format_secs(3_600), "1h");
+        assert_eq!(format_secs(90_061), "1d 1h 1m 1s");
     }
 }

@@ -44,6 +44,17 @@ tg_chat_id = "-1001234567890"
 # sweeps whatever is left). Nothing removes kept files later.
 # keep_failed_dumps = false
 
+# Built-in scheduler. Omitted (or "0") = one backup cycle, then exit — for an
+# external cron job or systemd timer. Set an interval and crab-dump stays
+# alive instead: it backs up immediately, then repeats forever, keeping the
+# dashboard served in between.
+#
+# Either a plain interval — seconds, or a number with an `s`/`m`/`h`/`d` suffix,
+# minimum 60s, measured from the start of each cycle — or a 5-field crontab
+# expression, which aligns to the wall clock and does not back up at startup.
+# backup_interval = "6h"
+# backup_interval = "0 */4 * * *"   # 00:00, 04:00, 08:00, …
+
 # Multi-server configuration (optional)
 # ─────────────────────────────────────────────────────────────────────────────
 # Instead of the single `database_url` above, you can declare multiple servers

@@ -13,7 +13,6 @@ services:
     build: .
     image: crab-dump:latest
     env_file: .env
-    # ONE-SHOT container: exit immediately after the backup.
-    # For scheduling, use `docker compose run` from cron, or wrap with
-    # supercronic / a sidecar. See README for a cron example.
-    restart: "no"
+    environment:
+      BACKUP_INTERVAL: "0 */8 * * *"
+    restart: "unless-stopped"

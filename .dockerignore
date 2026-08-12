@@ -9,6 +9,13 @@ Cargo.lock
 .idea/
 .vscode/
 
+# AI
+.agents
+.claude
+.codex
+.gapcode
+.vexp
+
 # OS
 .DS_Store
 Thumbs.db

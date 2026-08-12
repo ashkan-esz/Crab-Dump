@@ -17,9 +17,11 @@ config.toml
 *~
 
 # AI
-.claude
 .agents
+.claude
+.codex
 .gapcode
+.vexp
 
 # Rust artifacts
 **/*.rs.bk

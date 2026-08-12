@@ -16,9 +16,12 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+
+use crate::cron::Cron;
 
 // ===========================================================================
 // Constants & defaults
@@ -41,8 +44,33 @@ const DEFAULT_MAX_DATABASES: usize = 10;
 /// number — not with the total database count.
 pub const DEFAULT_MAX_PARALLEL_DATABASES: usize = 4;
 
+/// Shortest accepted `BACKUP_INTERVAL`. A dump cycle costs minutes of CPU and
+/// disk; anything under a minute would stack cycles on top of each other.
+const MIN_BACKUP_INTERVAL_SECS: u64 = 60;
+
 /// Default config file name searched in the current directory.
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
+
+// ===========================================================================
+// Backup schedule
+// ===========================================================================
+
+/// When to run backup cycles, parsed from `BACKUP_INTERVAL`.
+///
+/// Both forms are accepted in the same variable — see [`parse_schedule`].
+#[derive(Debug, Clone)]
+pub enum Schedule {
+    /// Repeat every fixed duration, measured from the start of each cycle.
+    /// `6h` means "six hours apart", drifting with however long a cycle takes
+    /// to start.
+    Every(Duration),
+    /// Fire at wall-clock times matching a crontab expression, so `0 */4 * * *`
+    /// lands on 00:00, 04:00, 08:00 … regardless of when the process started.
+    ///
+    /// Boxed to keep [`Schedule`] (and so `SharedConfig`) small — the duration
+    /// variant is one `u64` pair next to `Cron`'s six masks.
+    Cron(Box<Cron>),
+}
 
 // ===========================================================================
 // Shared configuration (applies uniformly across all databases)
@@ -73,6 +101,10 @@ pub struct SharedConfig {
     /// Default `false`: chunks are removed as soon as they are uploaded, and a
     /// failure sweeps whatever is left behind.
     pub keep_failed_dumps: bool,
+    /// When to repeat the whole backup cycle. `None` (the default) runs once
+    /// and exits, which is what an external cron or systemd timer wants.
+    /// `Some(_)` keeps the process alive and backs up on that schedule.
+    pub backup_schedule: Option<Schedule>,
 }
 
 impl SharedConfig {
@@ -304,6 +336,10 @@ struct RawConfigFile {
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
     keep_failed_dumps: Option<bool>,
+    /// Interval (`"6h"`, `"90m"`, `"3600"`) or crontab expression
+    /// (`"0 */4 * * *"`), parsed by [`parse_schedule`]. Kept as a string so the
+    /// file and the environment accept exactly the same spellings.
+    backup_interval: Option<String>,
     // Populated only when [[databases]] exists in the TOML file.
     databases: Option<Vec<TomlDatabase>>,
 }
@@ -427,6 +463,13 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         None => DEFAULT_MAX_PARALLEL_DATABASES,
     };
 
+    // Unset (or explicitly blank/`0`) keeps the historical one-shot behaviour,
+    // so an existing cron/systemd deployment is unaffected by the upgrade.
+    let backup_schedule = match raw.backup_interval.as_deref().map(str::trim) {
+        None | Some("") | Some("0") => None,
+        Some(s) => Some(parse_schedule(s)?),
+    };
+
     Ok(SharedConfig {
         tg_bot_token,
         tg_chat_id,
@@ -437,7 +480,62 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         socks_proxy,
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
+        backup_schedule,
     })
+}
+
+/// Parse a `BACKUP_INTERVAL` value into a [`Schedule`].
+///
+/// Whitespace decides the form: a crontab expression is five space-separated
+/// fields, and every duration spelling is a single token. That means neither
+/// form can be mistaken for the other, and an operator does not have to set a
+/// second variable to say which one they meant.
+fn parse_schedule(s: &str) -> Result<Schedule> {
+    let s = s.trim();
+    if s.split_whitespace().count() > 1 {
+        return Ok(Schedule::Cron(Box::new(Cron::parse(s).with_context(
+            || format!("BACKUP_INTERVAL `{s}` is not a valid cron expression"),
+        )?)));
+    }
+    Ok(Schedule::Every(parse_duration(s)?))
+}
+
+/// Parse a backup interval: a bare number of seconds, or a number with a
+/// `s`/`m`/`h`/`d` suffix (`"30m"`, `"6h"`, `"1d"`).
+///
+/// Rejects anything below [`MIN_BACKUP_INTERVAL_SECS`]: a cycle that starts
+/// before the previous one finished would pile up `pg_dump` processes and fill
+/// `work_dir`, and the scheduler deliberately does not run cycles in parallel.
+fn parse_duration(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    // Split the trailing unit off the digits; no suffix means seconds.
+    let (digits, multiplier) = match s.chars().last() {
+        Some('s') | Some('S') => (&s[..s.len() - 1], 1),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 60),
+        Some('h') | Some('H') => (&s[..s.len() - 1], 3600),
+        Some('d') | Some('D') => (&s[..s.len() - 1], 86400),
+        _ => (s, 1),
+    };
+
+    let value: u64 = digits.trim().parse().map_err(|_| {
+        anyhow!(
+            "BACKUP_INTERVAL must be a number of seconds or a number with an \
+             `s`/`m`/`h`/`d` suffix (e.g. `6h`, `90m`, `3600`), got `{s}`"
+        )
+    })?;
+
+    let secs = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("BACKUP_INTERVAL `{s}` overflows — use a smaller value"))?;
+
+    if secs < MIN_BACKUP_INTERVAL_SECS {
+        bail!(
+            "BACKUP_INTERVAL must be at least {MIN_BACKUP_INTERVAL_SECS}s \
+             (got `{s}` = {secs}s); a backup cycle takes far longer than that",
+        );
+    }
+
+    Ok(Duration::from_secs(secs))
 }
 
 /// Merge a raw TOML-parsed config with environment variables.
@@ -467,6 +565,7 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         keep_failed_dumps: env("KEEP_FAILED_DUMPS")
             .map(|v| parse_bool(&v))
             .or(raw.keep_failed_dumps),
+        backup_interval: env("BACKUP_INTERVAL").or(raw.backup_interval),
         databases: raw.databases, // TOML-only; never merged with env.
     }
 }
@@ -726,6 +825,7 @@ mod tests {
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,
+            backup_schedule: None,
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
     }
@@ -782,7 +882,11 @@ mod tests {
     /// must not read `KEEP_FAILED_DUMPS=0` as "keep".
     #[test]
     fn keep_failed_dumps_defaults_off_and_parses_env() {
-        assert!(!build_shared_config(&shared_raw()).unwrap().keep_failed_dumps);
+        assert!(
+            !build_shared_config(&shared_raw())
+                .unwrap()
+                .keep_failed_dumps
+        );
         for on in ["1", "true", "TRUE", "yes", "on"] {
             assert!(parse_bool(on), "`{on}` must enable keeping");
         }
@@ -800,6 +904,120 @@ mod tests {
         let env = |k: &str| (k == "KEEP_FAILED_DUMPS").then(|| "0".to_string());
         let merged = merge_raw_with_env(raw, env);
         assert!(!build_shared_config(&merged).unwrap().keep_failed_dumps);
+    }
+
+    // -- Backup schedule --
+
+    /// Read a schedule's duration, or fail the test if it is a cron expression.
+    fn every(s: &Schedule) -> Duration {
+        match s {
+            Schedule::Every(d) => *d,
+            Schedule::Cron(c) => panic!("expected an interval, got cron `{c}`"),
+        }
+    }
+
+    /// Unset means one-shot (the historical behaviour every cron deployment
+    /// relies on); the suffixes are the whole point of the string form.
+    #[test]
+    fn backup_interval_defaults_off_and_parses_units() {
+        assert!(build_shared_config(&shared_raw())
+            .unwrap()
+            .backup_schedule
+            .is_none());
+
+        for (input, secs) in [
+            ("3600", 3600),
+            ("120s", 120),
+            ("90m", 5400),
+            ("6h", 21600),
+            ("1d", 86400),
+            (" 2H ", 7200),
+        ] {
+            assert_eq!(
+                every(&parse_schedule(input).unwrap()),
+                Duration::from_secs(secs),
+                "`{input}` must parse as {secs}s",
+            );
+        }
+    }
+
+    /// An explicit `0` (or blank) is the documented way to turn the schedule
+    /// back off without deleting the variable.
+    #[test]
+    fn backup_interval_zero_means_one_shot() {
+        for off in ["0", "", "   "] {
+            let raw = RawConfigFile {
+                backup_interval: Some(off.into()),
+                ..shared_raw()
+            };
+            assert!(
+                build_shared_config(&raw).unwrap().backup_schedule.is_none(),
+                "`{off}` must mean one-shot",
+            );
+        }
+    }
+
+    /// A sub-minute interval would start the next cycle before the previous one
+    /// finished, so it is a startup error rather than a runtime pile-up.
+    #[test]
+    fn backup_interval_rejects_too_short_and_garbage() {
+        for bad in ["30", "59s", "0m"] {
+            let err = parse_duration(bad).unwrap_err().to_string();
+            assert!(err.contains("at least"), "`{bad}`: unexpected error: {err}");
+        }
+        for bad in ["", "soon", "6hh", "-1h", "1.5h"] {
+            let err = parse_duration(bad).unwrap_err().to_string();
+            assert!(err.contains("must be a number"), "`{bad}`: {err}");
+        }
+    }
+
+    /// Multi-token values are crontab expressions; single tokens are durations.
+    /// The split has to be unambiguous, since one variable carries both.
+    #[test]
+    fn multi_field_values_parse_as_cron_expressions() {
+        for expr in [
+            "0 */4 * * *",
+            "30 3 * * *",
+            "0 9 * * mon-fri",
+            "  * * * * *  ",
+        ] {
+            match parse_schedule(expr).unwrap() {
+                Schedule::Cron(c) => assert_eq!(c.to_string(), expr.trim()),
+                Schedule::Every(d) => panic!("`{expr}` must be cron, got {d:?}"),
+            }
+        }
+    }
+
+    /// A cron typo must name both the variable and the reason, since a
+    /// scheduler that never fires looks identical to one that is idle.
+    #[test]
+    fn invalid_cron_expression_is_rejected_at_startup() {
+        let raw = RawConfigFile {
+            backup_interval: Some("0 99 * * *".into()),
+            ..shared_raw()
+        };
+        let msg = format!("{:#}", build_shared_config(&raw).unwrap_err());
+        assert!(msg.contains("BACKUP_INTERVAL"), "unexpected error: {msg}");
+        assert!(msg.contains("hour"), "must name the bad field: {msg}");
+    }
+
+    #[test]
+    fn backup_interval_env_shadows_file() {
+        let raw = RawConfigFile {
+            backup_interval: Some("6h".into()),
+            ..shared_raw()
+        };
+        let env = |k: &str| (k == "BACKUP_INTERVAL").then(|| "30m".to_string());
+        let merged = merge_raw_with_env(raw, env);
+        assert_eq!(
+            every(
+                &build_shared_config(&merged)
+                    .unwrap()
+                    .backup_schedule
+                    .unwrap()
+            ),
+            Duration::from_secs(1800),
+        );
     }
 
     // -- Single-database fallback (D1, D4) --

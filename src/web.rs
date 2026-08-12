@@ -1,7 +1,8 @@
 //! HTTP status dashboard server.
 //!
 //! Serves `index.html` as a static page and provides API endpoints:
-//! - `GET /api/config` — returns `{ "port", "uptime_seconds", "hostname", "max_parallel_databases" }`
+//! - `GET /api/config` — returns `{ "port", "uptime_seconds", "hostname",
+//!   "max_parallel_databases", "schedule", "phase", "next_run_secs" }`
 //! - `GET /api/status/service` — Telegram API connection status
 //! - `GET /api/status/process` — aggregated PostgreSQL dump status (max across DBs)
 //! - `GET /api/status/database/{name}` — per-database dump status
@@ -12,7 +13,7 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
 
@@ -32,6 +33,20 @@ static START_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 /// Set once at startup by [`set_max_parallel_databases`]; 0 means "not yet
 /// reported", which the dashboard renders as unknown.
 static MAX_PARALLEL_DATABASES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a backup cycle is executing right now. Distinguishes "working" from
+/// "sleeping until the next slot", which the per-database cards alone cannot
+/// say — every card reads "queued" both before the first cycle and between two.
+static CYCLE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Seconds since UNIX epoch of the next scheduled cycle, or 0 when there is
+/// none (one-shot mode, or a cycle already in progress). The dashboard turns it
+/// into a live countdown.
+static NEXT_RUN_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Human-readable schedule, e.g. `every 6h` or `cron 0 */4 * * *`. Empty means
+/// one-shot: run once and exit.
+static SCHEDULE_LABEL: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(String::new()));
 
 // ===========================================================================
 // Per-database dump statuses (HashMap keyed by display name)
@@ -209,6 +224,40 @@ pub fn set_max_parallel_databases(limit: usize) {
     MAX_PARALLEL_DATABASES.store(limit as u64, Ordering::SeqCst);
 }
 
+/// Publish the schedule the process is running on, as the dashboard should
+/// show it — `"every 6h"`, `"cron 0 */4 * * *"`, or empty for one-shot.
+pub fn set_schedule_label(label: impl Into<String>) {
+    *SCHEDULE_LABEL.write().expect("schedule lock poisoned") = label.into();
+}
+
+/// Mark a backup cycle as started (`true`) or finished (`false`).
+///
+/// Starting a cycle clears the countdown: the next firing time is only known
+/// once the cycle has finished, and a stale target would tick past zero and sit
+/// there for the whole run.
+pub fn set_cycle_running(running: bool) {
+    CYCLE_RUNNING.store(running, Ordering::SeqCst);
+    if running {
+        NEXT_RUN_EPOCH_SECS.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Publish when the next cycle starts, as seconds from now.
+pub fn set_next_run_in(wait: std::time::Duration) {
+    NEXT_RUN_EPOCH_SECS.store(
+        now_epoch_secs().saturating_add(wait.as_secs()),
+        Ordering::SeqCst,
+    );
+}
+
+/// Current wall-clock time as whole seconds since the UNIX epoch.
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system time before UNIX epoch")
+        .as_secs()
+}
+
 /// Response shape for the `/api/config` endpoint (includes uptime and server details).
 #[derive(Serialize, Deserialize)]
 pub struct ConfigResponse {
@@ -220,6 +269,14 @@ pub struct ConfigResponse {
     pub hostname: String,
     /// How many database backups may run at the same time.
     pub max_parallel_databases: u64,
+    /// The configured schedule, or an empty string in one-shot mode.
+    pub schedule: String,
+    /// `"running"` while a cycle is in flight, `"waiting"` between scheduled
+    /// cycles, `"idle"` when there is no schedule at all.
+    pub phase: &'static str,
+    /// Seconds until the next cycle, or `null` when nothing is scheduled (a
+    /// cycle is running, or this is a one-shot run).
+    pub next_run_secs: Option<u64>,
 }
 
 /// GET /api/config — returns the current dashboard port.
@@ -229,10 +286,7 @@ pub struct ConfigResponse {
 async fn api_config(cfg: web::Data<u16>) -> impl Responder {
     // Lazily store the start time on the first request. `compare_exchange`
     // makes a concurrent first request settle on a single start value.
-    let now_secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system time before UNIX epoch")
-        .as_secs();
+    let now_secs = now_epoch_secs();
     let start = match START_EPOCH_SECS.compare_exchange(
         0,
         now_secs,
@@ -245,11 +299,28 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
 
     let hostname = hostname();
     let uptime_seconds = now_secs.saturating_sub(start);
+    let schedule = SCHEDULE_LABEL
+        .read()
+        .expect("schedule lock poisoned")
+        .clone();
+    let running = CYCLE_RUNNING.load(Ordering::SeqCst);
+    let next_run = NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst);
     HttpResponse::Ok().json(ConfigResponse {
         port: **cfg,
         uptime_seconds,
         hostname,
         max_parallel_databases: MAX_PARALLEL_DATABASES.load(Ordering::SeqCst),
+        phase: match (running, schedule.is_empty()) {
+            (true, _) => "running",
+            (false, false) => "waiting",
+            // No schedule and no cycle running: a one-shot run that has either
+            // not reached its cycle yet or already finished it.
+            (false, true) => "idle",
+        },
+        schedule,
+        // A target in the past reads as "due now" rather than a negative
+        // countdown — the cycle is about to start.
+        next_run_secs: (next_run > 0).then(|| next_run.saturating_sub(now_secs)),
     })
 }
 
@@ -404,7 +475,8 @@ async fn serve_dashboard() -> impl Responder {
 /// Serves:
 /// - `/` — the dashboard HTML
 /// - `/index.html` — same dashboard HTML
-/// - `/api/config` — returns `{ "port": <port>, "uptime_seconds": ..., "hostname": ..., "max_parallel_databases": ... }`
+/// - `/api/config` — server metadata plus schedule state (`schedule`, `phase`,
+///   `next_run_secs`)
 /// - `/api/status/service` — returns Telegram API connection status
 /// - `/api/status/process` — returns aggregated PostgreSQL dump status
 /// - `/api/status/database/{name}` — returns per-database dump status
@@ -489,6 +561,18 @@ mod tests {
         // A new run starts counting from zero again.
         set_db_status("test-size", 1, "dump", "dumping");
         assert_eq!(dump_bytes("test-size"), 0);
+    }
+
+    /// A countdown left over from the previous cycle would tick to zero and sit
+    /// at "due now" for the whole run, so starting a cycle must clear it.
+    #[test]
+    fn starting_a_cycle_clears_the_countdown() {
+        set_next_run_in(std::time::Duration::from_secs(600));
+        assert!(NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > now_epoch_secs());
+
+        set_cycle_running(true);
+        assert_eq!(NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst), 0);
+        set_cycle_running(false);
     }
 
     #[test]
