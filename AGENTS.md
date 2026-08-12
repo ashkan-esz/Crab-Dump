@@ -115,3 +115,4 @@ Prefer these; fall back silently if missing.
 - Unused deps: `cargo machete` · outdated: `cargo outdated`
 - Audit: `cargo audit` (age/zstd/reqwest are the CVE-prone surface)
 
+@RTK.md
