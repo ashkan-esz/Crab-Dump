@@ -68,7 +68,8 @@ global — they apply uniformly across all servers.
 
 - **Parallelism**: One `tokio::task::spawn` per server, each running its own
   `pg_dump → zstd → age? → ChunkWriter → Telegram upload` pipeline.
-- **Chunk namespacing**: File prefix becomes `"db{index}-{name}-{timestamp}"` to
+- **Chunk namespacing**: File prefix becomes
+  `"db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}"` in UTC to
   prevent collisions in the shared work directory. (The index was added by
   ADR-0002, D3; this ADR originally specified `"db-{name}-{timestamp}"`, which
   collided when two servers hosted a database of the same name.)

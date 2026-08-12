@@ -101,11 +101,11 @@ server 0: app (bytes=145572521, chunks=3, encrypted=false, sha256=4d52dfe801d349
 server 1: analytics (bytes=8815104, chunks=1, encrypted=false, sha256=9f2b1c0e5d47a8836be1f0a2c9d43e7715b6c8a09f3d2e1b4c5a6978d0e1f2a3, duration=4.2s)
 FAILED [2] archive: dumping database 'archive': pg_dump exited with status 1
 
-# restore [app]: cat db0-app-20260704-205532.part* | zstd -d | pg_restore --dbname=...
-# restore [analytics]: cat db1-analytics-20260704-205532 | zstd -d | pg_restore --dbname=...
+# restore [app]: cat db0-app-2026-08-12_20-55-32.part* | zstd -d | pg_restore --dbname=...
+# restore [analytics]: cat db1-analytics-2026-08-12_20-55-32 | zstd -d | pg_restore --dbname=...
 ```
 
-Chunk files use the prefix `db{index}-{name}-{YYYYmmdd-HHMMSS}`. A one-chunk
+Chunk files use the prefix `db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}` in UTC. A one-chunk
 backup uses that prefix as its bare filename; multi-part backups append
 `.partNNNN`. A database that fails does not stop the others — every remaining database is still dumped
 and uploaded — it gets a `FAILED` line in the manifest with its error. A
@@ -380,10 +380,10 @@ Enable with `systemctl enable --now crab-dump.timer`.
 
 On a machine with the `identity.txt` (private key) and the downloaded parts.
 `BASE` is the prefix printed in the manifest's restore line
-(`db{index}-{name}-{YYYYmmdd-HHMMSS}`):
+(`db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}`):
 
 ```bash
-BASE=db0-app-20260704-205532
+BASE=db0-app-2026-08-12_20-55-32
 
 # Encrypted, single-chunk dump (manifest says chunks=1):
 cat "$BASE" \

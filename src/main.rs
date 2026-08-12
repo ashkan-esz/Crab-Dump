@@ -237,7 +237,7 @@ fn upload_active_history(
         tracing::info!("history upload skipped — active monthly history is empty");
         return Ok(());
     };
-    let stamp = match ymdhms(SystemTime::now()) {
+    let stamp = match dump_timestamp(SystemTime::now()) {
         Ok(stamp) => stamp,
         Err(error) => {
             let _ = std::fs::remove_file(&snapshot.path);
@@ -571,11 +571,12 @@ fn run_database(
     };
 
     // Namespaced prefix prevents collisions when multiple databases share
-    // the same working directory. Format: `db{index}-{name}-{YYYYMMDD-HHMMSS}`.
+    // the same working directory. Format:
+    // `db{index}-{name}-{YYYY-MM-DD_HH-mm-ss}`.
     // Duplicate display names are rejected at config time; the index is belt
     // and braces, so a future resolution path cannot make two pipelines write
     // the same `.partNNNN` files.
-    let stamp = ymdhms(started)?;
+    let stamp = dump_timestamp(started)?;
     let base_name = format!("db{db_index}-{db_name}-{stamp}");
 
     let result = backup_pipeline(
@@ -1184,11 +1185,18 @@ impl Sink {
     }
 }
 
-/// Convert a Unix epoch timestamp to a UTC timestamp string (`YYYYMMDD-HHMMSS`).
-///
-/// Uses Howard Hinnant's civil date algorithm — no external crates required.
-/// Deterministic across platforms; used for generating unique backup filenames.
-fn ymdhms(t: SystemTime) -> Result<String> {
+/// Convert a Unix epoch timestamp to a readable, filename-safe UTC timestamp
+/// (`YYYY-MM-DD_HH-mm-ss`) for dump and history filenames.
+fn dump_timestamp(t: SystemTime) -> Result<String> {
+    let (year, month, day, hour, minute, second) = utc_timestamp_parts(t)?;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}_{hour:02}-{minute:02}-{second:02}"
+    ))
+}
+
+/// Return UTC timestamp components using Howard Hinnant's civil date
+/// algorithm — no external crates required.
+fn utc_timestamp_parts(t: SystemTime) -> Result<(i64, i64, i64, i64, i64, i64)> {
     use std::time::UNIX_EPOCH;
     let secs = t
         .duration_since(UNIX_EPOCH)
@@ -1214,7 +1222,7 @@ fn ymdhms(t: SystemTime) -> Result<String> {
     let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let year = if month <= 2 { y + 1 } else { y };
 
-    Ok(format!("{year:04}{month:02}{d:02}-{h:02}{m:02}{s:02}"))
+    Ok((year, month, d, h, m, s))
 }
 
 #[cfg(test)]
@@ -1246,6 +1254,32 @@ mod tests {
         chunk::cleanup_prefix(&root, "history-2026-08-123456");
         assert!(parts.iter().all(|part| !part.exists()));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dump_timestamp_is_readable_and_utc() {
+        let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_786_568_132);
+        assert_eq!(dump_timestamp(timestamp).unwrap(), "2026-08-12_20-55-32");
+    }
+
+    #[test]
+    fn dump_timestamps_sort_lexically_across_time_boundaries() {
+        let seconds = [
+            1_786_568_132, // 2026-08-12 20:55:32
+            1_786_568_133, // next second
+            1_786_579_200, // 2026-08-13 00:00:00, next day
+            1_788_220_800, // 2026-09-01 00:00:00, next month
+            1_798_761_600, // 2027-01-01 00:00:00, next year
+        ];
+        let timestamps: Vec<_> = seconds
+            .into_iter()
+            .map(|seconds| {
+                dump_timestamp(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                    .unwrap()
+            })
+            .collect();
+
+        assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
