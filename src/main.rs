@@ -32,7 +32,7 @@ mod telegram_users;
 mod web;
 
 use chunk::ChunkWriter;
-use config::{Config, DatabaseConfig, Schedule, SharedConfig};
+use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
 
@@ -85,13 +85,11 @@ fn main() -> Result<()> {
         .iter()
         .map(DatabaseConfig::display_name)
         .collect::<Vec<_>>();
-    let database_states = Arc::new(DatabaseStateStore::load(
-        shared_cfg.history.directory_display(),
-        &names,
-    ));
+    let data_dir = PathBuf::from(DATA_DIR);
+    let database_states = Arc::new(DatabaseStateStore::load(&data_dir, &names));
     web::set_database_state_store(Arc::clone(&database_states));
     let telegram_users = Arc::new(
-        telegram_users::TelegramUserStore::load(&shared_cfg.telegram_users_file)
+        telegram_users::TelegramUserStore::load(data_dir.join("../data/telegram_users.toml"))
             .context("loading Telegram users directory")?,
     );
 

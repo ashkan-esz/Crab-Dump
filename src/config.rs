@@ -53,6 +53,9 @@ const MIN_BACKUP_INTERVAL_SECS: u64 = 60;
 /// Default config file name searched in the current directory.
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
+/// Fixed directory for persistent application state.
+pub const DATA_DIR: &str = "./data";
+
 // ===========================================================================
 // Backup schedule
 // ===========================================================================
@@ -100,8 +103,6 @@ pub struct SharedConfig {
     pub dashboard_username: String,
     /// Basic Auth password for the dashboard.
     pub dashboard_password: String,
-    /// Persistent Telegram user directory file.
-    pub telegram_users_file: PathBuf,
     /// Optional SOCKS5 proxy URL (`socks5://` or `socks5h://`).
     pub socks_proxy: Option<String>,
     /// How many database backups may run at the same time (≥ 1). Databases
@@ -145,7 +146,6 @@ impl fmt::Debug for SharedConfig {
             .field("dashboard_host", &self.dashboard_host)
             .field("dashboard_username", &self.dashboard_username)
             .field("dashboard_password", &"[REDACTED]")
-            .field("telegram_users_file", &self.telegram_users_file)
             .field(
                 "socks_proxy",
                 &self.socks_proxy.as_ref().map(|_| "[REDACTED]"),
@@ -369,7 +369,6 @@ struct RawConfigFile {
     dashboard_host: Option<String>,
     dashboard_username: Option<String>,
     dashboard_password: Option<String>,
-    telegram_users_file: Option<String>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
     keep_failed_dumps: Option<bool>,
@@ -548,11 +547,6 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
             .unwrap_or_else(|| "127.0.0.1".into()),
         dashboard_username: raw.dashboard_username.clone().unwrap_or_default(),
         dashboard_password: raw.dashboard_password.clone().unwrap_or_default(),
-        telegram_users_file: raw
-            .telegram_users_file
-            .clone()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("telegram_users.toml")),
         socks_proxy,
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
@@ -654,7 +648,6 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         dashboard_host: env("DASHBOARD_HOST").or(raw.dashboard_host),
         dashboard_username: env("DASHBOARD_USERNAME").or(raw.dashboard_username),
         dashboard_password: env("DASHBOARD_PASSWORD").or(raw.dashboard_password),
-        telegram_users_file: env("TELEGRAM_USERS_FILE").or(raw.telegram_users_file),
         socks_proxy: env("SOCKS_PROXY").or(raw.socks_proxy),
         max_parallel_databases: env("MAX_PARALLEL_DATABASES")
             .and_then(|v| v.parse().ok())
@@ -963,7 +956,6 @@ mod tests {
             dashboard_host: "127.0.0.1".into(),
             dashboard_username: String::new(),
             dashboard_password: String::new(),
-            telegram_users_file: PathBuf::from("telegram_users.toml"),
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,
@@ -972,6 +964,11 @@ mod tests {
             history: Arc::new(HistoryStore::new("./history", 12)),
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
+    }
+
+    #[test]
+    fn persistent_state_uses_fixed_data_directory() {
+        assert_eq!(PathBuf::from(DATA_DIR), PathBuf::from("./data"));
     }
 
     #[test]

@@ -42,6 +42,7 @@ temp/
 *.tmp
 **/*.tmp
 history
+data/
 
 # Archive & compressed
 *.tar

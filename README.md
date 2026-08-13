@@ -129,7 +129,6 @@ directory yourself).
 | `MAX_PARALLEL_DATABASES` | no   | `4`            | how many databases back up at the same time (≥ 1)  |
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
 | `TG_CHAT_ID_0`, `_1`, … | yes |                | contiguous numeric IDs or `@channelusername` values |
-| `TELEGRAM_USERS_FILE` | no | `telegram_users.toml` | persistent dashboard-managed Telegram user directory |
 | `DASHBOARD_HOST`     | no       | `127.0.0.1`    | bind address; use `0.0.0.0` for remote/container access |
 | `DASHBOARD_USERNAME` | yes      |                | HTTP Basic Auth username for the dashboard |
 | `DASHBOARD_PASSWORD` | yes     |                | HTTP Basic Auth password for the dashboard |
@@ -156,7 +155,11 @@ The dashboard and every dashboard API require HTTP Basic Auth. The Telegram
 user directory is informational/manageable only; backup uploads continue to
 use only the indexed `TG_CHAT_ID_N` destinations. Visit `/users` to add,
 edit, enable/disable, or delete directory entries. Changes are persisted
-atomically to `TELEGRAM_USERS_FILE`.
+atomically to `./data/telegram_users.toml`. Database enablement state is
+persisted to `./data/database-state.json`; both files share the fixed
+`./data` directory and are ignored by Git. `HISTORY_DIR` is reserved for
+monthly backup history. An existing root-level `telegram_users.toml` is no
+longer read automatically.
 
 ### Multiple databases
 
@@ -218,7 +221,8 @@ aggregate Telegram upload attempts/retries. History is best-effort: an
 I/O error is logged as a warning and does not change the backup outcome.
 Retention defaults to the current month plus the previous 11 months. In
 containers, mount `HISTORY_DIR` as persistent storage; the example
-`docker-compose.yml` provides a named volume.
+`docker-compose.yml` provides separate named volumes for history and `./data`
+state.
 
 The dashboard keeps the live pipeline view separate from historical data.
 Expand a database row to load its retained history on demand; the expanded

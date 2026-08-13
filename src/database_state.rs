@@ -19,8 +19,8 @@ struct StateFile {
 }
 
 impl DatabaseStateStore {
-    pub fn load(history_dir: impl Into<PathBuf>, configured_names: &[String]) -> Self {
-        let path = history_dir.into().join("database-state.json");
+    pub fn load(data_dir: impl Into<PathBuf>, configured_names: &[String]) -> Self {
+        let path = data_dir.into().join("database-state.json");
         let states = match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<StateFile>(&contents) {
                 Ok(file) => filter_known(file.databases, configured_names),
@@ -108,8 +108,10 @@ mod tests {
 
     #[test]
     fn save_replaces_state_atomically() {
-        let dir = std::env::temp_dir().join(format!("crab-dump-state-{}-save", std::process::id()));
-        fs::remove_dir_all(&dir).ok();
+        let root =
+            std::env::temp_dir().join(format!("crab-dump-state-{}-save", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let dir = root.join("data");
         let store = DatabaseStateStore::load(&dir, &["app".into()]);
         store.set_enabled("app", false).unwrap();
         let parsed: StateFile =
@@ -117,7 +119,7 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.databases.get("app"), Some(&false));
         assert!(!dir.join("database-state.json.tmp").exists());
-        fs::remove_dir_all(dir).ok();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -20,7 +20,9 @@ services:
       HISTORY_DIR: /var/lib/crab-dump/history
     volumes:
       - crab_dump_history:/var/lib/crab-dump/history
+      - crab_dump_data:/app/data
     restart: "unless-stopped"
 
 volumes:
   crab_dump_history:
+  crab_dump_data:

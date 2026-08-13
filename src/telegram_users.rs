@@ -130,6 +130,8 @@ fn validate_users(users: &[TelegramUser]) -> Result<()> {
 
 fn persist(path: &Path, users: &[TelegramUser]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating Telegram users directory {}", parent.display()))?;
     let content = toml::to_string_pretty(&TelegramUsersFile {
         users: users.to_vec(),
     })
@@ -179,14 +181,16 @@ mod tests {
 
     #[test]
     fn load_save_round_trip() {
-        let dir = std::env::temp_dir().join(format!("crab-users-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("telegram_users.toml");
+        let dir = std::env::temp_dir().join(format!("crab-users-{}-roundtrip", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("data").join("../data/telegram_users.toml");
         let _ = fs::remove_file(&path);
         let store = TelegramUserStore::load(&path).unwrap();
         store.create(user("-1")).unwrap();
         let loaded = TelegramUserStore::load(&path).unwrap();
         assert_eq!(loaded.list(), vec![user("-1")]);
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -234,10 +238,13 @@ mod tests {
         let _ = fs::remove_file(&path);
         let store = TelegramUserStore::load(&path).unwrap();
         store.create(user("-1")).unwrap();
-        let bad_path = dir.join("missing").join("users.toml");
+        let bad_parent = dir.join("missing");
+        let bad_path = bad_parent.join("users.toml");
         let bad_store = TelegramUserStore::load(&bad_path).unwrap();
+        let _ = fs::write(&bad_parent, b"not a directory");
         assert!(bad_store.create(user("-2")).is_err());
         assert!(bad_store.list().is_empty());
         assert_eq!(store.list().len(), 1);
+        let _ = fs::remove_file(bad_parent);
     }
 }

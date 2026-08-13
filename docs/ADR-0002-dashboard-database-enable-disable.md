@@ -30,11 +30,11 @@ Add persistent per-database enablement controlled by the local dashboard.
 Store state in:
 
 ```text
-HISTORY_DIR/database-state.json
+./data/database-state.json
 ```
 
-The state file is separate from monthly JSONL history but uses the same
-history volume. Database display names are the keys because they already
+The state file is separate from monthly JSONL history and uses a fixed,
+non-configurable `./data` directory. Database display names are the keys because they already
 identify dashboard cards, history queries, and configured databases.
 
 State behavior:
@@ -118,7 +118,7 @@ database and refreshes its card state.
 
 - Database display names become a persisted operational identity and should
   not be casually renamed.
-- The state file is local to the configured `HISTORY_DIR`; replacing or
+- The state file is local to the fixed `./data` directory; replacing or
   deleting that volume resets all databases to enabled.
 - The dashboard is a trusted local control surface and does not add
   authentication.
