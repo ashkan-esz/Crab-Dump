@@ -10,16 +10,20 @@
 //!
 //! The dashboard polls these endpoints every 4 seconds and updates the UI.
 
-use actix_web::{dev::ServiceRequest, web, App, Error, HttpResponse, HttpServer, Responder};
-use actix_web_httpauth::{
-    extractors::basic::{BasicAuth, Config as BasicConfig},
-    middleware::HttpAuthentication,
+use actix_web::{
+    body::BoxBody,
+    cookie::{Cookie, SameSite},
+    dev::{ServiceRequest, ServiceResponse},
+    http::{header, Method},
+    middleware::{from_fn, Next},
+    web, App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
@@ -655,7 +659,22 @@ async fn api_databases_list() -> impl Responder {
     HttpResponse::Ok().json(entries)
 }
 
+fn audit_action(req: &HttpRequest, action: &str, target: &str, result: &str) {
+    let actor = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| user.username.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let source = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_string();
+    tracing::info!(actor, source, action, target, result, "dashboard action");
+}
+
 async fn api_database_action(
+    req: HttpRequest,
     path: web::Path<(String, String)>,
     history: web::Data<std::sync::Arc<HistoryStore>>,
     users: web::Data<Arc<TelegramUserStore>>,
@@ -664,9 +683,20 @@ async fn api_database_action(
     let (name, action) = path.into_inner();
     if action == "backup" {
         let Some(payload) = payload else {
+            audit_action(&req, "backup", &name, "rejected_missing_payload");
             return HttpResponse::BadRequest()
                 .json(serde_json::json!({"error": "recipient and no_encryption are required"}));
         };
+        if payload.no_encryption
+            && req
+                .extensions()
+                .get::<AuthenticatedUser>()
+                .is_some_and(|user| user.role != DashboardRole::Admin)
+        {
+            audit_action(&req, "backup", &name, "rejected_no_encryption");
+            return HttpResponse::Forbidden()
+                .json(serde_json::json!({"error": "no_encryption requires administrator role"}));
+        }
         if !manual_backup_available() {
             return HttpResponse::Conflict().json(
                 serde_json::json!({"error": "Manual backups are unavailable in one-shot mode"}),
@@ -708,6 +738,7 @@ async fn api_database_action(
             "queued",
             "Manual backup queued — waiting to start",
         );
+        audit_action(&req, "backup", &name, "queued");
         return HttpResponse::Accepted()
             .json(serde_json::json!({"name": name, "status": "queued"}));
     }
@@ -726,10 +757,12 @@ async fn api_database_action(
     }
     let enabled = action == "enable";
     if let Err(error) = store.set_enabled(&name, enabled) {
+        audit_action(&req, &action, &name, "failed");
         tracing::warn!(database = %name, error = %error, "failed to persist database state");
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": "database state unavailable"}));
     }
+    audit_action(&req, &action, &name, "ok");
     if enabled {
         set_db_status(&name, 0, "queued", "Queued — waiting to start");
     } else {
@@ -784,32 +817,329 @@ async fn api_history(
     }
 }
 
-#[derive(Clone)]
-pub struct DashboardAuth {
-    username: String,
-    password: String,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DashboardRole {
+    Viewer,
+    Operator,
+    Admin,
 }
 
-async fn dashboard_auth(
+#[derive(Clone)]
+struct DashboardCredential {
+    username: String,
+    password: String,
+    role: DashboardRole,
+}
+
+#[derive(Clone)]
+struct DashboardSession {
+    username: String,
+    role: DashboardRole,
+    csrf_token: String,
+    expires_at: SystemTime,
+}
+
+#[derive(Clone)]
+struct AuthenticatedUser {
+    username: String,
+    role: DashboardRole,
+}
+
+#[derive(Clone)]
+pub struct DashboardAuth {
+    credentials: Vec<DashboardCredential>,
+    sessions: Arc<Mutex<HashMap<String, DashboardSession>>>,
+    failures: Arc<Mutex<HashMap<String, (u32, SystemTime)>>>,
+}
+
+impl DashboardAuth {
+    pub fn new(
+        admin_username: String,
+        admin_password: String,
+        operator: Option<(String, String)>,
+        viewer: Option<(String, String)>,
+    ) -> Self {
+        let mut credentials = vec![DashboardCredential {
+            username: admin_username,
+            password: admin_password,
+            role: DashboardRole::Admin,
+        }];
+        if let Some((username, password)) = operator {
+            credentials.push(DashboardCredential {
+                username,
+                password,
+                role: DashboardRole::Operator,
+            });
+        }
+        if let Some((username, password)) = viewer {
+            credentials.push(DashboardCredential {
+                username,
+                password,
+                role: DashboardRole::Viewer,
+            });
+        }
+        Self {
+            credentials,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            failures: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn credential(&self, username: &str, password: &str) -> Option<DashboardRole> {
+        self.credentials
+            .iter()
+            .find(|credential| credential.username == username && credential.password == password)
+            .map(|credential| credential.role)
+    }
+
+    fn is_throttled(&self, source: &str) -> bool {
+        let failures = self.failures.lock().expect("login failure lock poisoned");
+        failures.get(source).is_some_and(|(count, since)| {
+            since.elapsed().unwrap_or_default() < Duration::from_secs(60) && *count >= 5
+        })
+    }
+
+    fn record_failure(&self, source: &str) {
+        let mut failures = self.failures.lock().expect("login failure lock poisoned");
+        let entry = failures
+            .entry(source.to_string())
+            .or_insert((0, SystemTime::now()));
+        if entry.1.elapsed().unwrap_or_default() >= Duration::from_secs(60) {
+            *entry = (0, SystemTime::now());
+        }
+        entry.0 = entry.0.saturating_add(1);
+    }
+
+    fn clear_failures(&self, source: &str) {
+        self.failures
+            .lock()
+            .expect("login failure lock poisoned")
+            .remove(source);
+    }
+}
+
+#[cfg(test)]
+async fn legacy_dashboard_auth(
     req: ServiceRequest,
-    credentials: BasicAuth,
+    credentials: actix_web_httpauth::extractors::basic::BasicAuth,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let expected = req
         .app_data::<web::Data<DashboardAuth>>()
         .expect("dashboard auth state not initialized");
-    if credentials.user_id() == expected.username
-        && credentials
-            .password()
-            .is_some_and(|password| password == expected.password)
+    if credentials
+        .password()
+        .and_then(|password| expected.credential(credentials.user_id(), password))
+        .is_some()
     {
         Ok(req)
     } else {
-        let config = BasicConfig::default().realm("crab-dump");
+        let config = actix_web_httpauth::extractors::basic::Config::default().realm("crab-dump");
         Err((
             actix_web_httpauth::extractors::AuthenticationError::from(config).into(),
             req,
         ))
     }
+}
+
+#[derive(Deserialize)]
+struct LoginPayload {
+    username: String,
+    password: String,
+}
+
+fn token() -> String {
+    static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(now.to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+async fn login(
+    req: HttpRequest,
+    auth: web::Data<DashboardAuth>,
+    payload: web::Json<LoginPayload>,
+) -> impl Responder {
+    let source = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_string();
+    if auth.is_throttled(&source) {
+        return HttpResponse::TooManyRequests()
+            .insert_header((header::RETRY_AFTER, "60"))
+            .json(serde_json::json!({"error": "login temporarily throttled"}));
+    }
+    let Some(role) = auth.credential(&payload.username, &payload.password) else {
+        auth.record_failure(&source);
+        tracing::warn!(source = %source, "dashboard login failed");
+        return HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error": "invalid credentials"}));
+    };
+    auth.clear_failures(&source);
+    let session_token = token();
+    let csrf_token = token();
+    auth.sessions
+        .lock()
+        .expect("dashboard session lock poisoned")
+        .insert(
+            session_token.clone(),
+            DashboardSession {
+                username: payload.username.clone(),
+                role,
+                csrf_token: csrf_token.clone(),
+                expires_at: SystemTime::now() + Duration::from_secs(8 * 60 * 60),
+            },
+        );
+    HttpResponse::Ok()
+        .cookie(
+            Cookie::build("crab_session", session_token)
+                .http_only(true)
+                .same_site(SameSite::Strict)
+                .path("/")
+                .finish(),
+        )
+        .cookie(
+            Cookie::build("crab_csrf", csrf_token.clone())
+                .http_only(false)
+                .same_site(SameSite::Strict)
+                .path("/")
+                .finish(),
+        )
+        .json(serde_json::json!({"role": format!("{role:?}").to_lowercase(), "csrf_token": csrf_token}))
+}
+
+fn minimum_role(req: &ServiceRequest) -> DashboardRole {
+    let path = req.path();
+    if path.starts_with("/api/telegram-users") {
+        DashboardRole::Admin
+    } else if path.ends_with("/backup") || path.ends_with("/enable") || path.ends_with("/disable") {
+        DashboardRole::Operator
+    } else if matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE) {
+        DashboardRole::Admin
+    } else {
+        DashboardRole::Viewer
+    }
+}
+
+fn origin_is_same_site(req: &ServiceRequest) -> bool {
+    let Some(origin) = req.headers().get(header::ORIGIN) else {
+        return true;
+    };
+    let Some(host) = req.headers().get(header::HOST) else {
+        return false;
+    };
+    let host = host.to_str().unwrap_or("");
+    origin.to_str().ok().is_some_and(|value| {
+        value == format!("http://{host}") || value == format!("https://{host}")
+    })
+}
+
+async fn dashboard_auth(
+    req: ServiceRequest,
+    next: Next<BoxBody>,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    // The HTML shell must be public so its JavaScript can perform the session
+    // login. All data and mutation endpoints remain protected below.
+    if matches!(
+        req.path(),
+        "/" | "/index.html" | "/users" | "/api/auth/login"
+    ) {
+        return next.call(req).await;
+    }
+    let Some(auth) = req.app_data::<web::Data<DashboardAuth>>().cloned() else {
+        return Ok(req.into_response(HttpResponse::InternalServerError().finish()));
+    };
+    let Some(cookie) = req.cookie("crab_session") else {
+        return Ok(req.into_response(
+            HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "authentication required"})),
+        ));
+    };
+    let session = auth
+        .sessions
+        .lock()
+        .expect("dashboard session lock poisoned")
+        .get(cookie.value())
+        .cloned();
+    let Some(session) = session else {
+        return Ok(req.into_response(
+            HttpResponse::Unauthorized().json(serde_json::json!({"error": "session expired"})),
+        ));
+    };
+    if session.expires_at <= SystemTime::now() {
+        auth.sessions
+            .lock()
+            .expect("dashboard session lock poisoned")
+            .remove(cookie.value());
+        return Ok(req.into_response(
+            HttpResponse::Unauthorized().json(serde_json::json!({"error": "session expired"})),
+        ));
+    }
+    if session.role < minimum_role(&req) {
+        return Ok(req.into_response(
+            HttpResponse::Forbidden()
+                .json(serde_json::json!({"error": "insufficient dashboard role"})),
+        ));
+    }
+    if matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE) {
+        let csrf_cookie = req
+            .cookie("crab_csrf")
+            .map(|cookie| cookie.value().to_string());
+        let csrf_header = req
+            .headers()
+            .get("x-csrf-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if csrf_cookie.as_deref() != Some(session.csrf_token.as_str())
+            || csrf_header.as_deref() != Some(session.csrf_token.as_str())
+            || !origin_is_same_site(&req)
+        {
+            return Ok(req.into_response(
+                HttpResponse::Forbidden()
+                    .json(serde_json::json!({"error": "CSRF validation failed"})),
+            ));
+        }
+    }
+    req.extensions_mut().insert(AuthenticatedUser {
+        username: session.username,
+        role: session.role,
+    });
+    next.call(req).await
+}
+
+async fn security_headers(
+    req: ServiceRequest,
+    next: Next<BoxBody>,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    let mut response = next.call(req).await?;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"),
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -824,6 +1154,7 @@ async fn api_telegram_users(store: web::Data<Arc<TelegramUserStore>>) -> impl Re
 }
 
 async fn create_telegram_user(
+    req: HttpRequest,
     store: web::Data<Arc<TelegramUserStore>>,
     payload: web::Json<TelegramUserPayload>,
 ) -> impl Responder {
@@ -833,7 +1164,10 @@ async fn create_telegram_user(
         enabled: payload.enabled,
     };
     match store.create(user.clone()) {
-        Ok(()) => HttpResponse::Created().json(user),
+        Ok(()) => {
+            audit_action(&req, "telegram_user_create", &user.chat_id, "ok");
+            HttpResponse::Created().json(user)
+        }
         Err(error) if error.to_string().contains("already exists") => {
             HttpResponse::Conflict().json(serde_json::json!({"error": "chat ID already exists"}))
         }
@@ -849,6 +1183,7 @@ async fn create_telegram_user(
 }
 
 async fn update_telegram_user(
+    req: HttpRequest,
     path: web::Path<String>,
     store: web::Data<Arc<TelegramUserStore>>,
     payload: web::Json<TelegramUserPayload>,
@@ -860,7 +1195,10 @@ async fn update_telegram_user(
         enabled: payload.enabled,
     };
     match store.update(&chat_id, user.clone()) {
-        Ok(true) => HttpResponse::Ok().json(user),
+        Ok(true) => {
+            audit_action(&req, "telegram_user_update", &chat_id, "ok");
+            HttpResponse::Ok().json(user)
+        }
         Ok(false) => {
             HttpResponse::NotFound().json(serde_json::json!({"error": "Telegram user not found"}))
         }
@@ -879,11 +1217,16 @@ async fn update_telegram_user(
 }
 
 async fn delete_telegram_user(
+    req: HttpRequest,
     path: web::Path<String>,
     store: web::Data<Arc<TelegramUserStore>>,
 ) -> impl Responder {
-    match store.delete(&path.into_inner()) {
-        Ok(true) => HttpResponse::NoContent().finish(),
+    let chat_id = path.into_inner();
+    match store.delete(&chat_id) {
+        Ok(true) => {
+            audit_action(&req, "telegram_user_delete", &chat_id, "ok");
+            HttpResponse::NoContent().finish()
+        }
         Ok(false) => {
             HttpResponse::NotFound().json(serde_json::json!({"error": "Telegram user not found"}))
         }
@@ -928,26 +1271,34 @@ async fn serve_users() -> impl Responder {
 /// - `/api/status/databases` — returns all tracked database statuses as an array
 ///
 /// All status endpoints return JSON with `state`, `message`, and `timestamp` fields.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_server(
     host: &str,
     port: u16,
     history: std::sync::Arc<HistoryStore>,
-    username: String,
-    password: String,
+    admin_username: String,
+    admin_password: String,
+    operator_credentials: Option<(String, String)>,
+    viewer_credentials: Option<(String, String)>,
     telegram_users: Arc<TelegramUserStore>,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
-    let auth_data = web::Data::new(DashboardAuth { username, password });
+    let auth_data = web::Data::new(DashboardAuth::new(
+        admin_username,
+        admin_password,
+        operator_credentials,
+        viewer_credentials,
+    ));
     let users_data = web::Data::new(telegram_users);
 
     HttpServer::new(move || {
-        let auth = HttpAuthentication::basic(dashboard_auth);
         App::new()
             .app_data(port_data.clone())
             .app_data(web::Data::new(history.clone()))
             .app_data(auth_data.clone())
             .app_data(users_data.clone())
+            .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
             .route("/api/status/process", web::get().to(api_process_status))
@@ -972,7 +1323,8 @@ pub async fn start_server(
             .route("/", web::get().to(serve_dashboard))
             .route("/index.html", web::get().to(serve_dashboard))
             .route("/users", web::get().to(serve_users))
-            .wrap(auth)
+            .wrap(from_fn(dashboard_auth))
+            .wrap(from_fn(security_headers))
     })
     .bind((host, port))?
     // Dashboard runs on a background thread; actix's own SIGINT handler would
@@ -987,6 +1339,7 @@ mod tests {
     use super::*;
     use actix_web::http::header;
     use actix_web::test as aw_test;
+    use actix_web_httpauth::middleware::HttpAuthentication;
     use std::path::PathBuf;
 
     /// Read one entry's fields. Tests use distinct database names because
@@ -1139,14 +1492,115 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn dashboard_shell_is_public_but_api_requires_session() {
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(DashboardAuth::new(
+                    "admin".into(),
+                    "a-strong-test-password".into(),
+                    None,
+                    None,
+                )))
+                .app_data(web::Data::new(8080_u16))
+                .route("/", web::get().to(serve_dashboard))
+                .route("/api/config", web::get().to(api_config))
+                .route("/api/auth/login", web::post().to(login))
+                .wrap(from_fn(dashboard_auth)),
+        )
+        .await;
+
+        let shell =
+            aw_test::call_service(&app, aw_test::TestRequest::get().uri("/").to_request()).await;
+        assert_eq!(shell.status(), 200);
+        assert!(shell.headers().get(header::CONTENT_TYPE).is_some());
+
+        let protected_api = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get().uri("/api/config").to_request(),
+        )
+        .await;
+        assert_eq!(protected_api.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn viewer_sessions_cannot_mutate_and_csrf_is_required() {
+        let auth = DashboardAuth::new(
+            "admin".into(),
+            "a-strong-admin-password".into(),
+            Some(("operator".into(), "a-strong-operator-password".into())),
+            Some(("viewer".into(), "a-strong-viewer-password".into())),
+        );
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(auth))
+                .route("/api/auth/login", web::post().to(login))
+                .route(
+                    "/api/status/database/demo/disable",
+                    web::post().to(api_process_status),
+                )
+                .wrap(from_fn(dashboard_auth)),
+        )
+        .await;
+
+        let login_response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(serde_json::json!({
+                    "username": "viewer",
+                    "password": "a-strong-viewer-password"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(login_response.status(), 200);
+        let cookies: Vec<Cookie<'static>> = login_response
+            .response()
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| Cookie::parse(value.to_string()).ok())
+            .map(|cookie| cookie.into_owned())
+            .collect();
+        let session = cookies
+            .iter()
+            .find(|cookie| cookie.name() == "crab_session")
+            .unwrap();
+        let csrf = cookies
+            .iter()
+            .find(|cookie| cookie.name() == "crab_csrf")
+            .unwrap();
+
+        let forbidden = aw_test::TestRequest::post()
+            .uri("/api/status/database/demo/disable")
+            .cookie(session.clone())
+            .cookie(csrf.clone())
+            .insert_header(("x-csrf-token", csrf.value()))
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, forbidden).await.status(), 403);
+
+        let missing_csrf = aw_test::TestRequest::post()
+            .uri("/api/status/database/demo/disable")
+            .cookie(session.clone())
+            .cookie(csrf.clone())
+            .to_request();
+        assert_eq!(
+            aw_test::call_service(&app, missing_csrf).await.status(),
+            403
+        );
+    }
+
+    #[actix_web::test]
     async fn telegram_users_require_auth_and_support_crud() {
         let store = users_test_store();
         let app = aw_test::init_service(
             App::new()
-                .app_data(web::Data::new(DashboardAuth {
-                    username: "admin".into(),
-                    password: "secret".into(),
-                }))
+                .app_data(web::Data::new(DashboardAuth::new(
+                    "admin".into(),
+                    "a-strong-test-password".into(),
+                    None,
+                    None,
+                )))
                 .app_data(web::Data::new(store))
                 .route("/api/telegram-users", web::get().to(api_telegram_users))
                 .route("/api/telegram-users", web::post().to(create_telegram_user))
@@ -1158,7 +1612,7 @@ mod tests {
                     "/api/telegram-users/{chat_id}",
                     web::delete().to(delete_telegram_user),
                 )
-                .wrap(HttpAuthentication::basic(dashboard_auth)),
+                .wrap(HttpAuthentication::basic(legacy_dashboard_auth)),
         )
         .await;
 
@@ -1175,7 +1629,10 @@ mod tests {
 
         let create = aw_test::TestRequest::post()
             .uri("/api/telegram-users")
-            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .insert_header((
+                header::AUTHORIZATION,
+                "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
+            ))
             .set_json(serde_json::json!({
                 "name": "Alice",
                 "chat_id": "-1",
@@ -1186,7 +1643,10 @@ mod tests {
 
         let update = aw_test::TestRequest::put()
             .uri("/api/telegram-users/-1")
-            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .insert_header((
+                header::AUTHORIZATION,
+                "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
+            ))
             .set_json(serde_json::json!({
                 "name": "Alice updated",
                 "chat_id": "-1",
@@ -1197,13 +1657,19 @@ mod tests {
 
         let delete = aw_test::TestRequest::delete()
             .uri("/api/telegram-users/-1")
-            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .insert_header((
+                header::AUTHORIZATION,
+                "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
+            ))
             .to_request();
         assert_eq!(aw_test::call_service(&app, delete).await.status(), 204);
 
         let missing_delete = aw_test::TestRequest::delete()
             .uri("/api/telegram-users/-1")
-            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .insert_header((
+                header::AUTHORIZATION,
+                "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
+            ))
             .to_request();
         assert_eq!(
             aw_test::call_service(&app, missing_delete).await.status(),

@@ -99,10 +99,16 @@ pub struct SharedConfig {
     pub api_port: u16,
     /// Address for the HTTP status dashboard.
     pub dashboard_host: String,
-    /// Basic Auth username for the dashboard.
+    /// Administrator username for the dashboard login.
     pub dashboard_username: String,
-    /// Basic Auth password for the dashboard.
+    /// Administrator password for the dashboard login.
     pub dashboard_password: String,
+    /// Optional operator session credentials.
+    pub dashboard_operator_username: Option<String>,
+    pub dashboard_operator_password: Option<String>,
+    /// Optional read-only viewer session credentials.
+    pub dashboard_viewer_username: Option<String>,
+    pub dashboard_viewer_password: Option<String>,
     /// Optional SOCKS5 proxy URL (`socks5://` or `socks5h://`).
     pub socks_proxy: Option<String>,
     /// How many database backups may run at the same time (≥ 1). Databases
@@ -146,6 +152,13 @@ impl fmt::Debug for SharedConfig {
             .field("dashboard_host", &self.dashboard_host)
             .field("dashboard_username", &self.dashboard_username)
             .field("dashboard_password", &"[REDACTED]")
+            .field(
+                "dashboard_operator_username",
+                &self.dashboard_operator_username,
+            )
+            .field("dashboard_operator_password", &"[REDACTED]")
+            .field("dashboard_viewer_username", &self.dashboard_viewer_username)
+            .field("dashboard_viewer_password", &"[REDACTED]")
             .field(
                 "socks_proxy",
                 &self.socks_proxy.as_ref().map(|_| "[REDACTED]"),
@@ -234,6 +247,17 @@ impl Config {
         if shared.dashboard_password.is_empty() {
             bail!("DASHBOARD_PASSWORD is required");
         }
+        validate_dashboard_password(&shared.dashboard_password, "DASHBOARD_PASSWORD")?;
+        validate_optional_dashboard_credentials(
+            shared.dashboard_operator_username.as_deref(),
+            shared.dashboard_operator_password.as_deref(),
+            "DASHBOARD_OPERATOR",
+        )?;
+        validate_optional_dashboard_credentials(
+            shared.dashboard_viewer_username.as_deref(),
+            shared.dashboard_viewer_password.as_deref(),
+            "DASHBOARD_VIEWER",
+        )?;
 
         // Shared pg_dump args, from either source — the default each database
         // inherits unless it declares its own.
@@ -369,6 +393,10 @@ struct RawConfigFile {
     dashboard_host: Option<String>,
     dashboard_username: Option<String>,
     dashboard_password: Option<String>,
+    dashboard_operator_username: Option<String>,
+    dashboard_operator_password: Option<String>,
+    dashboard_viewer_username: Option<String>,
+    dashboard_viewer_password: Option<String>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
     keep_failed_dumps: Option<bool>,
@@ -437,6 +465,30 @@ fn get_env(k: &str) -> Option<String> {
 ///
 /// The caller merges file and environment values (defaults < file < env), so
 /// this function only validates and applies fallbacks.
+fn validate_dashboard_password(password: &str, name: &str) -> Result<()> {
+    if password.len() < 12 {
+        bail!("{name} must be at least 12 characters");
+    }
+    if password.eq_ignore_ascii_case("change-me") {
+        bail!("{name} must not use the example password");
+    }
+    Ok(())
+}
+
+fn validate_optional_dashboard_credentials(
+    username: Option<&str>,
+    password: Option<&str>,
+    prefix: &str,
+) -> Result<()> {
+    match (username, password) {
+        (Some(username), Some(password)) if !username.trim().is_empty() => {
+            validate_dashboard_password(password, &format!("{prefix}_PASSWORD"))
+        }
+        (None, None) => Ok(()),
+        _ => bail!("{prefix}_USERNAME and {prefix}_PASSWORD must be set together"),
+    }
+}
+
 fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
     let tg_bot_token = raw
         .tg_bot_token
@@ -547,6 +599,10 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
             .unwrap_or_else(|| "127.0.0.1".into()),
         dashboard_username: raw.dashboard_username.clone().unwrap_or_default(),
         dashboard_password: raw.dashboard_password.clone().unwrap_or_default(),
+        dashboard_operator_username: raw.dashboard_operator_username.clone(),
+        dashboard_operator_password: raw.dashboard_operator_password.clone(),
+        dashboard_viewer_username: raw.dashboard_viewer_username.clone(),
+        dashboard_viewer_password: raw.dashboard_viewer_password.clone(),
         socks_proxy,
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
@@ -648,6 +704,14 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         dashboard_host: env("DASHBOARD_HOST").or(raw.dashboard_host),
         dashboard_username: env("DASHBOARD_USERNAME").or(raw.dashboard_username),
         dashboard_password: env("DASHBOARD_PASSWORD").or(raw.dashboard_password),
+        dashboard_operator_username: env("DASHBOARD_OPERATOR_USERNAME")
+            .or(raw.dashboard_operator_username),
+        dashboard_operator_password: env("DASHBOARD_OPERATOR_PASSWORD")
+            .or(raw.dashboard_operator_password),
+        dashboard_viewer_username: env("DASHBOARD_VIEWER_USERNAME")
+            .or(raw.dashboard_viewer_username),
+        dashboard_viewer_password: env("DASHBOARD_VIEWER_PASSWORD")
+            .or(raw.dashboard_viewer_password),
         socks_proxy: env("SOCKS_PROXY").or(raw.socks_proxy),
         max_parallel_databases: env("MAX_PARALLEL_DATABASES")
             .and_then(|v| v.parse().ok())
@@ -956,6 +1020,10 @@ mod tests {
             dashboard_host: "127.0.0.1".into(),
             dashboard_username: String::new(),
             dashboard_password: String::new(),
+            dashboard_operator_username: None,
+            dashboard_operator_password: None,
+            dashboard_viewer_username: None,
+            dashboard_viewer_password: None,
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,

@@ -380,8 +380,50 @@
     $('refreshing').hidden = !loading || !users.length;
     $('table-scroll').setAttribute('aria-busy', String(loading && !users.length));
   }
+  function csrfToken() {
+    return document.cookie.split('; ').find(value => value.startsWith('crab_csrf='))?.split('=').slice(1).join('=') || '';
+  }
+  let loginPromise = null;
+  let loginFailed = false;
+  let sessionEstablished = false;
+  async function ensureSession() {
+    if (sessionEstablished) return true;
+    if (loginFailed) return false;
+    if (loginPromise) return loginPromise;
+    loginPromise = (async () => {
+      const username = window.prompt('Dashboard username');
+      const password = username === null ? null : window.prompt('Dashboard password');
+      if (username === null || password === null) {
+        loginFailed = true;
+        return false;
+      }
+      const login = await fetch('/api/auth/login', {
+        method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username, password}),
+      });
+      loginFailed = !login.ok;
+      sessionEstablished = login.ok;
+      return login.ok;
+    })().catch(() => {
+      loginFailed = true;
+      return false;
+    }).finally(() => {
+      loginPromise = null;
+    });
+    return loginPromise;
+  }
   async function request(url, options = {}) {
-    const response = await fetch(url, { headers: {'Content-Type': 'application/json', ...(options.headers || {})}, ...options });
+    const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
+    if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
+    let response = await fetch(url, { credentials: 'same-origin', ...options, headers });
+    if (response.status === 401) {
+      sessionEstablished = false;
+      if (await ensureSession()) {
+        if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
+        response = await fetch(url, { credentials: 'same-origin', ...options, headers });
+      }
+    }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Request failed (${response.status})`);

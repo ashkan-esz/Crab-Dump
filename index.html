@@ -1459,8 +1459,54 @@
     }
 
     // ── Fetch logic ────────────────────────────────────────────────
+    function csrfToken() {
+        return document.cookie.split('; ').find(value => value.startsWith('crab_csrf='))?.split('=').slice(1).join('=') || '';
+    }
+    let loginPromise = null;
+    let loginFailed = false;
+    let sessionEstablished = false;
+    async function ensureSession() {
+        if (sessionEstablished) return true;
+        if (loginFailed) return false;
+        if (loginPromise) return loginPromise;
+        loginPromise = (async () => {
+            const username = window.prompt('Dashboard username');
+            const password = username === null ? null : window.prompt('Dashboard password');
+            if (username === null || password === null) {
+                loginFailed = true;
+                return false;
+            }
+            const login = await fetch('/api/auth/login', {
+                method: 'POST', credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password}),
+            });
+            loginFailed = !login.ok;
+            sessionEstablished = login.ok;
+            return login.ok;
+        })().catch(() => {
+            loginFailed = true;
+            return false;
+        }).finally(() => {
+            loginPromise = null;
+        });
+        return loginPromise;
+    }
+    async function apiFetch(endpoint, options = {}) {
+        const headers = { ...(options.body ? {'Content-Type': 'application/json'} : {}), ...(options.headers || {}) };
+        if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
+        let res = await fetch(endpoint, { credentials: 'same-origin', ...options, headers });
+        if (res.status === 401) {
+            sessionEstablished = false;
+            if (await ensureSession()) {
+                if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
+                res = await fetch(endpoint, { credentials: 'same-origin', ...options, headers });
+            }
+        }
+        return res;
+    }
     async function fetchStatus(endpoint, options) {
-        const res = await fetch(endpoint, options);
+        const res = await apiFetch(endpoint, options);
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
         return res.json();
     }
@@ -1518,7 +1564,7 @@
             button.textContent = 'Queuing...';
         }
         try {
-            const res = await fetch(`/api/status/database/${encodeURIComponent(name)}/backup`, {
+            const res = await apiFetch(`/api/status/database/${encodeURIComponent(name)}/backup`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ chat_id: chatId, no_encryption: noEncryption }),

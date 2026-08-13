@@ -130,8 +130,10 @@ directory yourself).
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
 | `TG_CHAT_ID_0`, `_1`, … | yes |                | contiguous numeric IDs or `@channelusername` values |
 | `DASHBOARD_HOST`     | no       | `127.0.0.1`    | bind address; use `0.0.0.0` for remote/container access |
-| `DASHBOARD_USERNAME` | yes      |                | HTTP Basic Auth username for the dashboard |
-| `DASHBOARD_PASSWORD` | yes     |                | HTTP Basic Auth password for the dashboard |
+| `DASHBOARD_USERNAME` | yes      |                | administrator username for the dashboard |
+| `DASHBOARD_PASSWORD` | yes     |                | administrator password; minimum 12 characters |
+| `DASHBOARD_OPERATOR_USERNAME/PASSWORD` | no | | optional backup/database-control account |
+| `DASHBOARD_VIEWER_USERNAME/PASSWORD` | no | | optional read-only status account |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
 | `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
@@ -151,8 +153,13 @@ with contiguous indices, or one or more `[[databases]]` entries in
 contiguous `TG_CHAT_ID_N` variables in the environment; the removed scalar
 `TG_CHAT_ID` and TOML `tg_chat_id` settings are not supported.
 
-The dashboard and every dashboard API require HTTP Basic Auth. The Telegram
-user directory is informational/manageable only; backup uploads continue to
+The dashboard and every dashboard API require a login session. Sessions expire
+after eight hours; mutating API requests also require a same-site CSRF token.
+The administrator account can manage Telegram users, the optional operator
+account can trigger backups and enable/disable databases, and the optional
+viewer account is read-only. Put the dashboard behind HTTPS when it is reachable
+outside localhost (for example, with a TLS-terminating reverse proxy).
+The Telegram user directory is informational/manageable only; backup uploads continue to
 use only the indexed `TG_CHAT_ID_N` destinations. Visit `/users` to add,
 edit, enable/disable, or delete directory entries. Changes are persisted
 atomically to `./data/telegram_users.toml`. Database enablement state is
@@ -254,7 +261,7 @@ docker run --rm \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID_0="..." \
   -e DASHBOARD_USERNAME="admin" \
-  -e DASHBOARD_PASSWORD="change-me" \
+  -e DASHBOARD_PASSWORD="replace-with-a-long-unique-secret" \
   crab-dump
 
 # One-shot backup (with encryption):
@@ -265,7 +272,7 @@ docker run --rm \
   -e AGE_RECIPIENT="age1..." \
   -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
   -e DASHBOARD_USERNAME="admin" \
-  -e DASHBOARD_PASSWORD="change-me" \
+  -e DASHBOARD_PASSWORD="replace-with-a-long-unique-secret" \
   crab-dump
 
 # Or with docker-compose (uses a .env file)

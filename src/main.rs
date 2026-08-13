@@ -100,6 +100,14 @@ fn main() -> Result<()> {
     let dashboard_host = shared_cfg.dashboard_host.clone();
     let dashboard_username = shared_cfg.dashboard_username.clone();
     let dashboard_password = shared_cfg.dashboard_password.clone();
+    let dashboard_operator = shared_cfg
+        .dashboard_operator_username
+        .clone()
+        .zip(shared_cfg.dashboard_operator_password.clone());
+    let dashboard_viewer = shared_cfg
+        .dashboard_viewer_username
+        .clone()
+        .zip(shared_cfg.dashboard_viewer_password.clone());
     let dashboard_users = Arc::clone(&telegram_users);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
@@ -118,6 +126,8 @@ fn main() -> Result<()> {
                 dashboard_history,
                 dashboard_username,
                 dashboard_password,
+                dashboard_operator,
+                dashboard_viewer,
                 dashboard_users,
             )
             .await
