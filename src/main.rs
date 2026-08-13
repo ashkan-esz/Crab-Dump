@@ -696,6 +696,10 @@ impl BackupSource {
             Self::OneShot => "one-shot",
         }
     }
+
+    fn sends_manual_notifications(self) -> bool {
+        self == Self::Manual
+    }
 }
 
 /// Result produced by a single database backup pipeline.
@@ -860,6 +864,7 @@ fn run_database(
         &db_name,
         &base_name,
         started,
+        source,
         options,
         client,
         &mut metrics,
@@ -955,6 +960,7 @@ fn backup_pipeline(
     db_name: &str,
     base_name: &str,
     started: SystemTime,
+    source: BackupSource,
     options: &BackupOptions,
     client: &Client,
     metrics: &mut AttemptMetrics,
@@ -1091,6 +1097,26 @@ fn backup_pipeline(
         "pipeline complete; uploading",
     );
 
+    if source.sends_manual_notifications() {
+        if let Some(chat_id) = options.chat_ids.first() {
+            let message = telegram::format_backup_summary(
+                db_name,
+                base_name,
+                total_bytes,
+                chunks_count,
+                encrypted,
+            );
+            if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
+            {
+                tracing::warn!(
+                    db = db_name,
+                    error = %error,
+                    "failed to send manual backup summary; continuing upload",
+                );
+            }
+        }
+    }
+
     // ── Upload chunks to Telegram ──────────────────────────────────────────
     // Each chunk is retained until every currently active destination has been
     // attempted. A failed destination is skipped for subsequent chunks.
@@ -1126,6 +1152,20 @@ fn backup_pipeline(
     metrics.upload_attempts += upload_stats.attempts;
     metrics.upload_retries += upload_stats.retries;
     metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
+
+    if source.sends_manual_notifications() && chunks_count > 1 {
+        if let Some(chat_id) = options.chat_ids.first() {
+            let message = telegram::format_backup_completion(db_name, base_name, chunks_count);
+            if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
+            {
+                tracing::warn!(
+                    db = db_name,
+                    error = %error,
+                    "failed to send manual backup completion notice; backup succeeded",
+                );
+            }
+        }
+    }
 
     // Mark database as done in the dashboard.
     web::set_db_status(
@@ -1725,6 +1765,13 @@ mod tests {
         assert_eq!(format_secs(45), "45s");
         assert_eq!(format_secs(3_600), "1h");
         assert_eq!(format_secs(90_061), "1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn manual_source_is_the_only_notification_source() {
+        assert!(BackupSource::Manual.sends_manual_notifications());
+        assert!(!BackupSource::Scheduled.sends_manual_notifications());
+        assert!(!BackupSource::OneShot.sends_manual_notifications());
     }
 
     fn upload_test_chunks(label: &str, count: usize) -> (PathBuf, Vec<PathBuf>) {

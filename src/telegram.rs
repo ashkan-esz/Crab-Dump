@@ -30,6 +30,47 @@ pub struct UploadStats {
     pub retries: u64,
 }
 
+pub fn format_backup_summary(
+    database: &str,
+    filename: &str,
+    total_bytes: u64,
+    parts: usize,
+    encrypted: bool,
+) -> String {
+    let part_label = if parts == 1 { "part" } else { "parts" };
+    let encryption = if encrypted { "age enabled" } else { "disabled" };
+    let size_mb = total_bytes as f64 / (1024.0 * 1024.0);
+    format!(
+        "📦 <b>Manual backup ready</b>\n\n\
+         🗄️ <b>Database:</b> <code>{}</code>\n\
+         📄 <b>File:</b> <code>{}</code>\n\
+         📏 <b>Packaged size:</b> <code>{size_mb:.2} MB</code>\n\
+         🧩 <b>Parts:</b> <code>{parts} {part_label}</code>\n\
+         🗜️ <b>Compression:</b> <code>zstd</code>\n\
+         🔐 <b>Encryption:</b> <code>{encryption}</code>",
+        escape_html(database),
+        escape_html(filename),
+    )
+}
+
+pub fn format_backup_completion(database: &str, filename: &str, parts: usize) -> String {
+    format!(
+        "✅ <b>Manual backup uploaded</b>\n\n\
+         🗄️ <b>Database:</b> <code>{}</code>\n\
+         📄 <b>File:</b> <code>{}</code>\n\
+         🎉 All <code>{parts}</code> parts uploaded successfully.",
+        escape_html(database),
+        escape_html(filename),
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     ok: bool,
@@ -145,6 +186,72 @@ pub fn send_document(
     }
 }
 
+/// Send an informational text message to the configured chat.
+///
+/// Messages use the same process-wide upload lock and retry policy as
+/// document uploads. Callers intentionally decide whether a notice failure is
+/// fatal; dashboard notices are best-effort.
+pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str) -> Result<()> {
+    let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let url = format!("{API_BASE}/bot{bot_token}/sendMessage");
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        let send_result = client
+            .post(&url)
+            .form(&[("chat_id", chat_id), ("text", text), ("parse_mode", "HTML")])
+            .send()
+            .context("sending Telegram message");
+
+        let outcome = match send_result {
+            Ok(resp) => {
+                let status = resp.status();
+                let body: ApiResponse = resp.json().context("parsing Telegram JSON response")?;
+                if body.ok {
+                    Ok(())
+                } else {
+                    Err((
+                        status.as_u16(),
+                        body.error_code,
+                        body.parameters.and_then(|p| p.retry_after),
+                    ))
+                }
+            }
+            Err(_) => Err((0, None, None)),
+        };
+
+        match outcome {
+            Ok(()) => {
+                web::set_telegram_status(0);
+                return Ok(());
+            }
+            Err((http_status, tg_code, retry_after)) => {
+                let transient = is_transient(http_status, tg_code);
+                let exhausted = attempt >= MAX_ATTEMPTS;
+                tracing::warn!(
+                    attempt,
+                    max_attempts = MAX_ATTEMPTS,
+                    http_status,
+                    tg_code,
+                    retry_after,
+                    transient,
+                    "sendMessage failed"
+                );
+                if !transient || exhausted {
+                    web::set_telegram_status(2);
+                    bail!(
+                        "sendMessage failed permanently after {attempt} attempt(s) \
+                         (http={http_status}, tg_code={tg_code:?})"
+                    );
+                }
+                web::set_telegram_status(1);
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
+            }
+        }
+    }
+}
+
 /// How long to wait before retrying attempt `attempt`.
 ///
 /// Telegram knows how long the limit actually runs, so its `retry_after` hint
@@ -208,5 +315,43 @@ mod tests {
         assert!(is_transient(200, Some(429)), "code in the JSON body");
         assert!(!is_transient(400, None), "bad request is permanent");
         assert!(!is_transient(401, None), "bad token is permanent");
+    }
+
+    #[test]
+    fn backup_summary_formats_encrypted_multipart_notice() {
+        let message = format_backup_summary(
+            "analytics",
+            "analytics_20260812T031500Z.sql.zst.age",
+            100_000_000,
+            3,
+            true,
+        );
+        assert!(message.contains("analytics"));
+        assert!(message.contains("analytics_20260812T031500Z.sql.zst.age"));
+        assert!(message.contains("95.37 MB"));
+        assert!(message.contains("3 parts"));
+        assert!(message.contains("zstd"));
+        assert!(message.contains("age"));
+    }
+
+    #[test]
+    fn backup_summary_formats_unencrypted_singlepart_notice() {
+        let message =
+            format_backup_summary("orders", "orders_20260812T031500Z.sql.zst", 42, 1, false);
+        assert!(message.contains("orders"));
+        assert!(message.contains("0.00 MB"));
+        assert!(message.contains("1 part"));
+        assert!(message.contains("zstd"));
+        assert!(message.contains("disabled"));
+        assert!(message.contains("Encryption:</b> <code>disabled"));
+    }
+
+    #[test]
+    fn backup_completion_mentions_all_uploaded_parts() {
+        let message =
+            format_backup_completion("analytics", "analytics_20260812T031500Z.sql.zst.age", 3);
+        assert!(message.contains("analytics"));
+        assert!(message.contains("All <code>3</code> parts"));
+        assert!(message.contains("uploaded"));
     }
 }
