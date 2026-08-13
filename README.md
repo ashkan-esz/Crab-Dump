@@ -71,6 +71,26 @@ export SOCKS_PROXY=socks5h://127.0.0.1:2080
 Use the `socks5h://` scheme (the `h` resolves DNS through the proxy) to
 avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
 
+### 3a. Dashboard-managed VMess/VLESS routing
+
+Docker releases bundle a pinned `sing-box` executable. Local Cargo builds need
+the supported `sing-box` executable installed separately, or can set
+`SING_BOX_PATH` to its path. Log in as the dashboard administrator and use the
+VMess/VLESS routing section to create, test, select, and explicitly apply a
+share URL. Operators and viewers can neither modify profiles nor see their
+URLs or credentials.
+
+Profiles and the active selection are stored in `./data/v2ray_profiles.json`.
+The file and generated `sing-box` configuration are written atomically with
+owner-only permissions. `SOCKS_PROXY` remains supported for legacy deployments,
+but startup rejects it when a dashboard profile is active. Applying a new
+profile starts and verifies its local SOCKS5 listener before replacing the
+previous route; a failed replacement leaves the previous route in service.
+The managed core and generated configuration are removed when the process
+stops. The upstream sing-box binary is distributed under its upstream license;
+see the release artifact and `SING_BOX_VERSION` build argument for the exact
+platform/version.
+
 ### 4. Create a Telegram bot
 
 1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token into `TG_BOT_TOKEN`.

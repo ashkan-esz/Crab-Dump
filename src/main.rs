@@ -11,7 +11,7 @@
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -29,12 +29,16 @@ mod encrypt;
 mod history;
 mod telegram;
 mod telegram_users;
+mod v2ray;
 mod web;
 
 use chunk::ChunkWriter;
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
+use v2ray::{ProfileStore, RouteManager, DEFAULT_SING_BOX_PATH};
+
+type ClientHandle = Arc<RwLock<Client>>;
 
 /// Load `.env` / `.env.local` before config resolution so environment-based
 /// config loading picks up credentials without manual export.
@@ -89,9 +93,31 @@ fn main() -> Result<()> {
     let database_states = Arc::new(DatabaseStateStore::load(&data_dir, &names));
     web::set_database_state_store(Arc::clone(&database_states));
     let telegram_users = Arc::new(
-        telegram_users::TelegramUserStore::load(data_dir.join("../data/telegram_users.toml"))
+        telegram_users::TelegramUserStore::load(data_dir.join("telegram_users.toml"))
             .context("loading Telegram users directory")?,
     );
+    let v2ray_profiles =
+        Arc::new(ProfileStore::load(&data_dir).context("loading routing profiles")?);
+    let route_manager = Arc::new(RouteManager::new(
+        shared_cfg.work_dir.join("sing-box"),
+        std::env::var("SING_BOX_PATH").unwrap_or_else(|_| DEFAULT_SING_BOX_PATH.to_string()),
+    ));
+    if let Some(active_url) = v2ray_profiles.active_url() {
+        if shared_cfg.socks_proxy.is_some() {
+            anyhow::bail!(
+                "SOCKS_PROXY cannot be combined with an active dashboard routing profile"
+            );
+        }
+        if !cli.dry_run {
+            route_manager
+                .apply(&active_url)
+                .context("starting active dashboard routing profile")?;
+        }
+    }
+    let route_proxy = route_manager.active_proxy();
+    let telegram_client: ClientHandle = Arc::new(RwLock::new(build_http_client_for_proxy(
+        route_proxy.as_deref().or(shared_cfg.socks_proxy.as_deref()),
+    )?));
 
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
@@ -109,6 +135,9 @@ fn main() -> Result<()> {
         .clone()
         .zip(shared_cfg.dashboard_viewer_password.clone());
     let dashboard_users = Arc::clone(&telegram_users);
+    let dashboard_profiles = Arc::clone(&v2ray_profiles);
+    let dashboard_route = Arc::clone(&route_manager);
+    let dashboard_client = Arc::clone(&telegram_client);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
@@ -129,6 +158,9 @@ fn main() -> Result<()> {
                 dashboard_operator,
                 dashboard_viewer,
                 dashboard_users,
+                dashboard_profiles,
+                dashboard_route,
+                dashboard_client,
             )
             .await
             {
@@ -179,8 +211,6 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-
-    let telegram_client = Arc::new(build_http_client(&shared_cfg)?);
 
     // ── Scheduled mode ──────────────────────────────────────────────────────
     // With BACKUP_INTERVAL set the process stays alive and repeats the cycle
@@ -245,7 +275,7 @@ fn main() -> Result<()> {
 /// The worker has its own wall-clock loop, but shares the process-wide
 /// Telegram upload lock used by database backups. It intentionally is not
 /// started in one-shot mode.
-fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: Arc<Client>) {
+fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: ClientHandle) {
     let Schedule::Cron(cron) = schedule else {
         tracing::error!("history upload schedule must be a five-field cron expression");
         return;
@@ -279,7 +309,7 @@ fn upload_active_history(
     history: &HistoryStore,
     work_dir: &std::path::Path,
     chunk_size: u64,
-    client: &Client,
+    client: &ClientHandle,
     bot_token: &str,
     chat_ids: &[String],
 ) -> Result<()> {
@@ -308,7 +338,10 @@ fn upload_active_history(
         upload_chunks_to_destinations(
             &parts,
             chat_ids,
-            |chat_id, part, stats| telegram::send_document(client, bot_token, chat_id, part, stats),
+            |chat_id, part, stats| {
+                let client = client.read().expect("Telegram client lock poisoned");
+                telegram::send_document(&client, bot_token, chat_id, part, stats)
+            },
             |_index| {},
             &mut stats,
         )
@@ -370,7 +403,7 @@ fn run_scheduled(
     databases: &[DatabaseConfig],
     no_encryption: bool,
     schedule: &Schedule,
-    client: &Arc<Client>,
+    client: &ClientHandle,
 ) {
     match schedule {
         Schedule::Every(interval) => tracing::info!(
@@ -481,7 +514,7 @@ fn run_scheduled(
 fn run_manual_requests(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
-    client: &Arc<Client>,
+    client: &ClientHandle,
     controller: &Arc<web::ManualBackupController>,
 ) -> bool {
     let requests = controller.take_pending();
@@ -633,7 +666,7 @@ fn run_cycle(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     no_encryption: bool,
-    client: &Arc<Client>,
+    client: &ClientHandle,
     source: BackupSource,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
     let controller = web::manual_backup_controller();
@@ -844,7 +877,7 @@ fn run_database(
     cfg: &SharedConfig,
     db: &DatabaseConfig,
     db_index: usize,
-    client: &Client,
+    client: &ClientHandle,
     source: BackupSource,
     options: &BackupOptions,
 ) -> Result<BackupResult> {
@@ -970,7 +1003,7 @@ fn backup_pipeline(
     started: SystemTime,
     source: BackupSource,
     options: &BackupOptions,
-    client: &Client,
+    client: &ClientHandle,
     metrics: &mut AttemptMetrics,
 ) -> Result<BackupResult> {
     // Report "running" status to the dashboard before starting heavy work.
@@ -1124,7 +1157,9 @@ fn backup_pipeline(
             )
         };
         for chat_id in source.notification_chat_ids(options) {
-            if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
+            let client_guard = client.read().expect("Telegram client lock poisoned");
+            if let Err(error) =
+                telegram::send_message(&client_guard, &cfg.tg_bot_token, chat_id, &message)
             {
                 tracing::warn!(
                     db = db_name,
@@ -1146,7 +1181,8 @@ fn backup_pipeline(
         &chunks,
         &options.chat_ids,
         |chat_id, path, stats| {
-            telegram::send_document(client, &cfg.tg_bot_token, chat_id, path, stats)
+            let client_guard = client.read().expect("Telegram client lock poisoned");
+            telegram::send_document(&client_guard, &cfg.tg_bot_token, chat_id, path, stats)
         },
         |i| {
             let path = &chunks[i];
@@ -1179,7 +1215,9 @@ fn backup_pipeline(
             telegram::format_backup_completion(db_name, base_name, chunks_count)
         };
         for chat_id in source.notification_chat_ids(options) {
-            if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
+            let client_guard = client.read().expect("Telegram client lock poisoned");
+            if let Err(error) =
+                telegram::send_message(&client_guard, &cfg.tg_bot_token, chat_id, &message)
             {
                 tracing::warn!(
                     db = db_name,
@@ -1258,7 +1296,7 @@ fn execute_database_indices(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     indices: &[usize],
-    client: &Arc<Client>,
+    client: &ClientHandle,
     source: BackupSource,
     already_claimed: bool,
     options_by_db: &std::collections::HashMap<String, BackupOptions>,
@@ -1438,14 +1476,6 @@ fn run_bounded<T: Sync, R: Send>(
     let mut collected = out.into_inner().expect("result lock poisoned");
     collected.sort_by_key(|(i, _)| *i);
     collected.into_iter().map(|(_, r)| r).collect()
-}
-
-/// Build an HTTP client configured for Telegram Bot API uploads.
-///
-/// Applies the optional SOCKS5 proxy setting and a 5-minute request timeout
-/// to accommodate large document uploads over unreliable connections.
-fn build_http_client(cfg: &SharedConfig) -> Result<Client> {
-    build_http_client_for_proxy(cfg.socks_proxy.as_deref())
 }
 
 fn build_http_client_for_proxy(socks_proxy: Option<&str>) -> Result<Client> {

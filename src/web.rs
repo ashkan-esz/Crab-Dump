@@ -18,6 +18,7 @@ use actix_web::{
     middleware::{from_fn, Next},
     web, App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder,
 };
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
+use crate::v2ray::{ProfileInput, ProfileStore, RouteManager};
 
 // ===========================================================================
 // Global status atoms (Telegram service — single value)
@@ -1061,7 +1063,7 @@ async fn dashboard_auth(
     // login. All data and mutation endpoints remain protected below.
     if matches!(
         req.path(),
-        "/" | "/index.html" | "/users" | "/api/auth/login"
+        "/" | "/index.html" | "/users" | "/routing" | "/api/auth/login"
     ) {
         return next.call(req).await;
     }
@@ -1250,6 +1252,147 @@ async fn delete_telegram_user(
         }
     }
 }
+
+async fn api_v2ray_profiles(store: web::Data<Arc<ProfileStore>>) -> impl Responder {
+    HttpResponse::Ok().json(store.list())
+}
+
+async fn create_v2ray_profile(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    payload: web::Json<ProfileInput>,
+) -> impl Responder {
+    match store.create(payload.into_inner()) {
+        Ok(summary) => {
+            audit_action(&req, "v2ray_profile_create", &summary.id, "ok");
+            HttpResponse::Created().json(summary)
+        }
+        Err(_) => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": "invalid routing profile"}))
+        }
+    }
+}
+
+async fn update_v2ray_profile(
+    req: HttpRequest,
+    path: web::Path<String>,
+    store: web::Data<Arc<ProfileStore>>,
+    payload: web::Json<ProfileInput>,
+) -> impl Responder {
+    match store.update(&path.into_inner(), payload.into_inner()) {
+        Ok(Some(summary)) => {
+            audit_action(&req, "v2ray_profile_update", &summary.id, "ok");
+            HttpResponse::Ok().json(summary)
+        }
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}))
+        }
+        Err(_) => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": "invalid routing profile"}))
+        }
+    }
+}
+
+async fn delete_v2ray_profile(
+    req: HttpRequest,
+    path: web::Path<String>,
+    store: web::Data<Arc<ProfileStore>>,
+) -> impl Responder {
+    let id = path.into_inner();
+    match store.delete(&id) {
+        Ok(true) => {
+            audit_action(&req, "v2ray_profile_delete", &id, "ok");
+            HttpResponse::NoContent().finish()
+        }
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}))
+        }
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "profile storage unavailable"})),
+    }
+}
+
+async fn test_v2ray_profile(
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(url) = store.get_url(&path.into_inner()) else {
+        return HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}));
+    };
+    match route.test(&url) {
+        Ok(parsed) => HttpResponse::Ok().json(serde_json::json!({
+            "kind": parsed.kind,
+            "transport": parsed.transport,
+            "tls": parsed.tls,
+            "valid": true
+        })),
+        Err(_) => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": "invalid routing profile"}))
+        }
+    }
+}
+
+async fn apply_v2ray_profile(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+    client: web::Data<Arc<RwLock<Client>>>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let Some(url) = store.get_url(&id) else {
+        return HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}));
+    };
+    let Ok(proxy) = route.apply(&url) else {
+        return HttpResponse::BadGateway()
+            .json(serde_json::json!({"error": "routing profile could not be applied"}));
+    };
+    let Ok(new_client) = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .proxy(match reqwest::Proxy::all(&proxy) {
+            Ok(proxy) => proxy,
+            Err(_) => {
+                route.stop();
+                return HttpResponse::BadGateway()
+                    .json(serde_json::json!({"error": "routing profile could not be applied"}));
+            }
+        })
+        .build()
+    else {
+        route.stop();
+        return HttpResponse::BadGateway()
+            .json(serde_json::json!({"error": "routing profile could not be applied"}));
+    };
+    *client.write().expect("Telegram client lock poisoned") = new_client;
+    if store.set_active(&id).is_err() {
+        route.stop();
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "profile storage unavailable"}));
+    }
+    audit_action(&req, "v2ray_profile_apply", &id, "ok");
+    let _ = proxy;
+    HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
+}
+
+async fn select_v2ray_profile(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let id = path.into_inner();
+    match store.set_active(&id) {
+        Ok(true) => {
+            audit_action(&req, "v2ray_profile_select", &id, "ok");
+            HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
+        }
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}))
+        }
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "profile storage unavailable"})),
+    }
+}
 /// Resolve the local hostname; fall back to "unknown" on failure.
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
@@ -1269,6 +1412,12 @@ async fn serve_users() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(include_str!("../users.html"))
+}
+
+async fn serve_routing() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../routing.html"))
 }
 
 /// Start the HTTP server and block until it stops.
@@ -1294,6 +1443,9 @@ pub async fn start_server(
     operator_credentials: Option<(String, String)>,
     viewer_credentials: Option<(String, String)>,
     telegram_users: Arc<TelegramUserStore>,
+    v2ray_profiles: Arc<ProfileStore>,
+    route_manager: Arc<RouteManager>,
+    telegram_client: Arc<RwLock<Client>>,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -1304,6 +1456,9 @@ pub async fn start_server(
         viewer_credentials,
     ));
     let users_data = web::Data::new(telegram_users);
+    let profiles_data = web::Data::new(v2ray_profiles);
+    let route_data = web::Data::new(route_manager);
+    let client_data = web::Data::new(telegram_client);
 
     HttpServer::new(move || {
         App::new()
@@ -1311,6 +1466,9 @@ pub async fn start_server(
             .app_data(web::Data::new(history.clone()))
             .app_data(auth_data.clone())
             .app_data(users_data.clone())
+            .app_data(profiles_data.clone())
+            .app_data(route_data.clone())
+            .app_data(client_data.clone())
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
@@ -1332,10 +1490,33 @@ pub async fn start_server(
                 "/api/telegram-users/{chat_id}",
                 web::delete().to(delete_telegram_user),
             )
+            .route("/api/v2ray/profiles", web::get().to(api_v2ray_profiles))
+            .route("/api/v2ray/profiles", web::post().to(create_v2ray_profile))
+            .route(
+                "/api/v2ray/profiles/{id}",
+                web::put().to(update_v2ray_profile),
+            )
+            .route(
+                "/api/v2ray/profiles/{id}",
+                web::delete().to(delete_v2ray_profile),
+            )
+            .route(
+                "/api/v2ray/profiles/{id}/test",
+                web::post().to(test_v2ray_profile),
+            )
+            .route(
+                "/api/v2ray/profiles/{id}/apply",
+                web::post().to(apply_v2ray_profile),
+            )
+            .route(
+                "/api/v2ray/profiles/{id}/select",
+                web::post().to(select_v2ray_profile),
+            )
             .route("/api/info", web::get().to(api_config))
             .route("/", web::get().to(serve_dashboard))
             .route("/index.html", web::get().to(serve_dashboard))
             .route("/users", web::get().to(serve_users))
+            .route("/routing", web::get().to(serve_routing))
             .wrap(from_fn(dashboard_auth))
             .wrap(from_fn(security_headers))
     })

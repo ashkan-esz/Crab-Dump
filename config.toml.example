@@ -27,6 +27,10 @@ tg_bot_token = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 # SOCKS5 proxy for Telegram API.
 # socks_proxy = "socks5h://127.0.0.1:2080"
 
+# Dashboard-managed VMess/VLESS profiles are stored in ./data and configured
+# from the dashboard. SOCKS_PROXY/socks_proxy cannot be combined with an
+# active profile.
+
 # Extra args passed verbatim to pg_dump.
 # pg_dump_extra_args = "--format=custom --no-owner"
 

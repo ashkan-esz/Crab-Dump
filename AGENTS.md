@@ -110,6 +110,18 @@ cat mydb_20260812T031500Z.sql.zst.part* | zstd -d | psql
 ## Done
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test` clean; no new deps without justification.
 
+## Dashboard-managed routing
+
+VMess/VLESS share profiles are stored as owner-only plaintext in
+`data/v2ray_profiles.json` and are changed only through administrator-only
+dashboard actions. API responses expose summaries, never URLs or credentials.
+The bundled `sing-box` executable listens on a managed local SOCKS5 port;
+Telegram requests use the shared `reqwest` client rebuilt for that listener.
+`SOCKS_PROXY` remains supported when no profile is active, but startup rejects
+the conflicting combination. Apply starts and verifies a replacement before
+switching routes; failed replacements retain the previous working route.
+Generated configs and the managed process are cleaned up on shutdown.
+
 ## Bash Tooling
 Prefer these; fall back silently if missing.
 - Content search: `rg` (not `grep`); files: `fd` (not `find`)

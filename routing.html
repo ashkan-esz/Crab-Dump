@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Routing profiles · crab-dump</title>
+<style>
+body{max-width:900px;margin:2rem auto;padding:0 1rem;font:15px system-ui;background:#0f172a;color:#dbeafe}
+form,li{border:1px solid #334155;border-radius:8px;padding:1rem;margin:1rem 0;background:#111827}
+input{display:block;width:100%;box-sizing:border-box;margin:.35rem 0 .75rem;padding:.6rem;background:#0f172a;color:inherit;border:1px solid #475569;border-radius:5px}
+button{margin:.2rem;padding:.45rem .7rem;color:inherit;background:#1e293b;border:1px solid #475569;border-radius:5px}
+ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between;gap:1rem;align-items:center}.muted{color:#94a3b8}.active{color:#86efac}
+</style>
+<body>
+<p><a href="/" style="color:#93c5fd">← dashboard</a></p>
+<h1>Routing profiles</h1>
+<p class="muted">Credentials are never returned by the API. Mutations require administrator access.</p>
+<form id="profileForm">
+<label>Name<input id="profileName" required maxlength="100"></label>
+<label>Share URL<input id="profileUrl" type="password" required autocomplete="off" placeholder="vmess://… or vless://…"></label>
+<button type="submit">Create profile</button> <span id="message" class="muted"></span>
+</form>
+<ul id="profiles"></ul>
+<script>
+const csrf=()=>document.cookie.split('; ').find(v=>v.startsWith('crab_csrf='))?.split('=').slice(1).join('=');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(opt.method)h['x-csrf-token']=csrf()||'';const r=await fetch(path,{...opt,headers:h});if(!r.ok)throw Error((await r.json().catch(()=>({}))).error||`HTTP ${r.status}`);return r.status===204?null:r.json()}
+async function refresh(){const ps=await api('/api/v2ray/profiles');profiles.innerHTML=ps.map(p=>`<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="${p.active?'active':'muted'}">${p.active?'ACTIVE':''}</span></span><span><button onclick="testP('${p.id}')">Test</button><button onclick="applyP('${p.id}')">Apply</button><button onclick="deleteP('${p.id}')">Delete</button></span></li>`).join('')||'<li class="muted">No profiles saved.</li>'}
+async function testP(id){try{const r=await api(`/api/v2ray/profiles/${id}/test`,{method:'POST'});message.textContent=`Valid ${r.kind} profile (${r.transport})`}catch(e){message.textContent=e.message}}
+async function applyP(id){try{await api(`/api/v2ray/profiles/${id}/apply`,{method:'POST'});message.textContent='Profile applied';refresh()}catch(e){message.textContent=e.message}}
+async function deleteP(id){if(!confirm('Delete this profile?'))return;try{await api(`/api/v2ray/profiles/${id}`,{method:'DELETE'});refresh()}catch(e){message.textContent=e.message}}
+profileForm.onsubmit=async e=>{e.preventDefault();try{await api('/api/v2ray/profiles',{method:'POST',body:JSON.stringify({name:profileName.value,url:profileUrl.value})});profileName.value='';profileUrl.value='';message.textContent='Profile created';refresh()}catch(x){message.textContent=x.message}};refresh().catch(e=>message.textContent=e.message);
+</script>
+</body>
