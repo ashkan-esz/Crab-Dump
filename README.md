@@ -349,9 +349,36 @@ services:
   crab-dump:
     build: .
     env_file: .env      # with BACKUP_INTERVAL set
+    environment:
+      API_PORT: "1111"
+      DASHBOARD_HOST: "0.0.0.0"
+    ports: ["1111:1111"]
     restart: unless-stopped
-    ports: ["8080:8080"]
 ```
+
+The bundled `docker-compose.yml` uses `${API_PORT:-1111}:1111`, persists
+`./data` state at `/app/data`, and adds `host.docker.internal` for databases or
+SOCKS proxies running on the Docker host. Set `DATABASE_URL_N` and
+`SOCKS_PROXY` to use that hostname when appropriate; `localhost` inside the
+container refers to the container itself. Compose does not replace
+`BACKUP_INTERVAL`, so the value in `.env` is honored. If it is unset, the
+one-shot process exits after its cycle; set it (for example `BACKUP_INTERVAL=6h`)
+for a long-running `docker compose up -d` service.
+
+Before starting a deployment, validate the rendered configuration and image:
+
+```bash
+docker compose config
+docker compose build --no-cache
+make docker-smoke
+docker compose run --rm --no-deps crab-dump --dry-run
+docker compose up -d
+```
+
+The dashboard is then available on `http://localhost:${API_PORT:-1111}`.
+The bind-mounted `./history` and `./data` directories retain history and
+dashboard profile/state files across container recreation. The image creates the
+mounted directories with ownership for its `postgres` runtime user.
 
 **Interval form** — seconds, or a number with an `s`/`m`/`h`/`d` suffix, minimum
 `60s`. The first backup runs at startup. The interval is measured from the

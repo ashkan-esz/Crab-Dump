@@ -1,14 +1,6 @@
-# Example: run crab-dump on a schedule via docker-compose.
-#
-#   docker compose run --rm crab-dump           # one-shot backup
-#   docker compose run --rm crab-dump --dry-run # validate config
-#
-# Put secrets in a .env file next to this compose file (see .env.example).
-# Configure at least one database with DATABASE_URL_0 (and subsequent indexed
-# variables) or TOML [[databases]] entries.
 # Note: the container has its own network namespace. If your Postgres or
-# SOCKS proxy runs on the Docker host, use host.docker.internal or the
-# host's LAN IP instead of 127.0.0.1.
+# SOCKS proxy runs on the Docker host, use host.docker.internal (enabled below)
+# or the host's LAN IP instead of 127.0.0.1.
 
 services:
   crab-dump:
@@ -16,11 +8,18 @@ services:
     image: crab-dump:latest
     env_file: .env
     environment:
-      BACKUP_INTERVAL: "0 */8 * * *"
-      HISTORY_DIR: /var/lib/crab-dump/history
+      API_PORT: "1111"
+      DASHBOARD_HOST: "0.0.0.0"
+      SING_BOX_PATH: /usr/local/bin/sing-box
+      HISTORY_DIR: /app/history
+      WORK_DIR: /app/work
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - crab_dump_history:/var/lib/crab-dump/history
+      - crab_dump_history:/app/history
       - crab_dump_data:/app/data
+    ports:
+      - "${API_PORT:-1111}:1111"
     restart: "unless-stopped"
 
 volumes:
