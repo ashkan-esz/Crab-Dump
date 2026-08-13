@@ -562,7 +562,8 @@
         <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">—</strong></span>
         <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">—</strong></span>
         <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f5d3;</span> Schedule: <strong id="infoSchedule">—</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f5d3;</span> Backup: <strong id="infoBackupSchedule">—</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f4c5;</span> History upload: <strong id="infoHistorySchedule">—</strong></span>
         <span class="info-chip" id="infoPhaseChip"><span class="icon">&#x1f504;</span> State: <strong id="infoPhase">—</strong></span>
     </div>
 
@@ -684,53 +685,65 @@
                 document.getElementById('infoParallel').textContent =
                     `${limit} database${limit === 1 ? '' : 's'} at once`;
             }
-            // A one-shot run reports no schedule at all.
-            document.getElementById('infoSchedule').textContent = config.schedule || 'one-shot';
-            renderPhase(config.phase, config.next_run_secs);
+            renderSchedule(
+                'infoBackupSchedule',
+                config.backup_schedule || config.schedule,
+                config.backup_next_run_secs ?? config.next_run_secs,
+                'one-shot',
+            );
+            renderSchedule(
+                'infoHistorySchedule',
+                config.history_schedule,
+                config.history_next_run_secs,
+                'disabled',
+            );
+            renderPhase(config.phase);
             uptimeSecs = config.uptime_seconds;
             document.getElementById('infoUptime').textContent = formatUptime(uptimeSecs);
             startTickers();
         } catch (err) { console.warn('Failed to load config:', err); }
     }
 
-    /**
-     * Update the state chip: what the process is doing, plus a countdown to the
-     * next cycle while it is waiting.
-     *
-     * `nextRunSecs` is null whenever nothing is scheduled — a cycle in flight,
-     * or a one-shot run — so the countdown simply disappears then.
-     */
-    let nextRunSecs = null;
-    function renderPhase(phase, secs) {
-        nextRunSecs = (typeof secs === 'number') ? secs : null;
+    /** Update the backup process state chip. */
+    function renderPhase(phase) {
         const chip = document.getElementById('infoPhaseChip');
         chip.classList.remove('running', 'waiting');
         if (phase === 'running' || phase === 'waiting') chip.classList.add(phase);
-        document.getElementById('infoPhase').textContent = phaseText(phase);
+        document.getElementById('infoPhase').textContent =
+            phase === 'running' ? 'Running' : phase === 'waiting' ? 'Waiting' : 'Idle';
     }
 
-    function phaseText(phase) {
-        if (phase === 'running') return 'Running';
-        if (phase !== 'waiting') return 'Idle';
-        // Waiting, but the target may already be due — the cycle starts within
-        // the scheduler's next clock check rather than at an exact instant.
-        if (nextRunSecs === null) return 'Waiting';
-        return nextRunSecs > 0
-            ? `Waiting · next in ${formatUptime(nextRunSecs)}`
-            : 'Waiting · due now';
+    const scheduleCountdowns = {};
+
+    function renderSchedule(elementId, label, secs, emptyLabel) {
+        const element = document.getElementById(elementId);
+        const state = scheduleCountdowns[elementId] = {
+            atMs: (typeof secs === 'number') ? Date.now() + secs * 1000 : null,
+        };
+        state.label = label || emptyLabel;
+        element.textContent = formatSchedule(state);
     }
 
-    // Uptime and the countdown tick locally between polls; the server's values
-    // resync them every refresh.
+    function formatSchedule(state) {
+        const secs = scheduleSecs(state);
+        if (secs === null) return state.label;
+        return secs === 0 ? `${state.label} · due now` : `${state.label} · next in ${formatUptime(secs)}`;
+    }
+
+    function scheduleSecs(state) {
+        return state.atMs === null ? null : Math.max(0, Math.ceil((state.atMs - Date.now()) / 1000));
+    }
+
+    // Uptime and both schedule countdowns tick locally between polls; the
+    // server's values resync them every refresh.
     let uptimeSecs = 0;
     let tickTimer = null;
     function startTickers() {
         if (tickTimer) return;
         tickTimer = setInterval(() => {
             document.getElementById('infoUptime').textContent = formatUptime(++uptimeSecs);
-            if (nextRunSecs !== null && nextRunSecs > 0) {
-                nextRunSecs--;
-                document.getElementById('infoPhase').textContent = phaseText('waiting');
+            for (const [elementId, state] of Object.entries(scheduleCountdowns)) {
+                document.getElementById(elementId).textContent = formatSchedule(state);
             }
         }, 1000);
     }

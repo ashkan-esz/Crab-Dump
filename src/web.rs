@@ -1,9 +1,8 @@
 //! HTTP status dashboard server.
 //!
 //! Serves `index.html` as a static page and provides API endpoints:
-//! - `GET /api/config` — returns `{ "port", "uptime_seconds", "hostname",
-//!   "max_parallel_databases", "telegram_chat_count", "schedule", "phase",
-//!   "next_run_secs" }`
+//! - `GET /api/config` — returns server metadata plus independent backup and
+//!   history-upload schedule state
 //! - `GET /api/status/service` — Telegram API connection status
 //! - `GET /api/status/process` — aggregated PostgreSQL dump status (max across DBs)
 //! - `GET /api/status/database/{name}` — per-database dump status
@@ -46,14 +45,21 @@ static TELEGRAM_CHAT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// say — every card reads "queued" both before the first cycle and between two.
 static CYCLE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Seconds since UNIX epoch of the next scheduled cycle, or 0 when there is
-/// none (one-shot mode, or a cycle already in progress). The dashboard turns it
-/// into a live countdown.
-static NEXT_RUN_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+/// Seconds since UNIX epoch of the next scheduled backup cycle, or 0 when
+/// there is none (one-shot mode, or a cycle already in progress).
+static BACKUP_NEXT_RUN_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Seconds since UNIX epoch of the next scheduled history upload, or 0 when
+/// history uploads are disabled.
+static HISTORY_NEXT_RUN_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 
 /// Human-readable schedule, e.g. `every 6h` or `cron 0 */4 * * *`. Empty means
 /// one-shot: run once and exit.
 static SCHEDULE_LABEL: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(String::new()));
+
+/// Human-readable history-upload schedule, or empty when disabled.
+static HISTORY_SCHEDULE_LABEL: LazyLock<RwLock<String>> =
+    LazyLock::new(|| RwLock::new(String::new()));
 
 // ===========================================================================
 // Per-database dump statuses (HashMap keyed by display name)
@@ -272,16 +278,31 @@ pub fn set_schedule_label(label: impl Into<String>) {
 pub fn set_cycle_running(running: bool) {
     CYCLE_RUNNING.store(running, Ordering::SeqCst);
     if running {
-        NEXT_RUN_EPOCH_SECS.store(0, Ordering::SeqCst);
+        BACKUP_NEXT_RUN_EPOCH_SECS.store(0, Ordering::SeqCst);
     }
 }
 
-/// Publish when the next cycle starts, as seconds from now.
-pub fn set_next_run_in(wait: std::time::Duration) {
-    NEXT_RUN_EPOCH_SECS.store(
+/// Publish when the next backup cycle starts, as seconds from now.
+pub fn set_next_backup_run_in(wait: std::time::Duration) {
+    BACKUP_NEXT_RUN_EPOCH_SECS.store(
         now_epoch_secs().saturating_add(wait.as_secs()),
         Ordering::SeqCst,
     );
+}
+
+/// Publish when the next history upload starts, as seconds from now.
+pub fn set_next_history_run_in(wait: std::time::Duration) {
+    HISTORY_NEXT_RUN_EPOCH_SECS.store(
+        now_epoch_secs().saturating_add(wait.as_secs()),
+        Ordering::SeqCst,
+    );
+}
+
+/// Publish the configured history-upload schedule for the dashboard.
+pub fn set_history_schedule_label(label: impl Into<String>) {
+    *HISTORY_SCHEDULE_LABEL
+        .write()
+        .expect("history schedule lock poisoned") = label.into();
 }
 
 /// Current wall-clock time as whole seconds since the UNIX epoch.
@@ -305,14 +326,21 @@ pub struct ConfigResponse {
     pub max_parallel_databases: u64,
     /// Number of configured Telegram destinations.
     pub telegram_chat_count: u64,
-    /// The configured schedule, or an empty string in one-shot mode.
+    /// Backward-compatible alias for the configured backup schedule.
     pub schedule: String,
-    /// `"running"` while a cycle is in flight, `"waiting"` between scheduled
-    /// cycles, `"idle"` when there is no schedule at all.
+    /// The configured backup schedule, or empty in one-shot mode.
+    pub backup_schedule: String,
+    /// The configured history-upload schedule, or empty when disabled.
+    pub history_schedule: String,
+    /// `"running"` while a backup cycle is in flight, `"waiting"` between
+    /// scheduled cycles, `"idle"` when there is no backup schedule.
     pub phase: &'static str,
-    /// Seconds until the next cycle, or `null` when nothing is scheduled (a
-    /// cycle is running, or this is a one-shot run).
+    /// Backward-compatible alias for the backup countdown.
     pub next_run_secs: Option<u64>,
+    /// Seconds until the next backup cycle.
+    pub backup_next_run_secs: Option<u64>,
+    /// Seconds until the next history upload.
+    pub history_next_run_secs: Option<u64>,
 }
 
 /// GET /api/config — returns the current dashboard port.
@@ -335,29 +363,42 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
 
     let hostname = hostname();
     let uptime_seconds = now_secs.saturating_sub(start);
-    let schedule = SCHEDULE_LABEL
+    let backup_schedule = SCHEDULE_LABEL
         .read()
         .expect("schedule lock poisoned")
         .clone();
+    let history_schedule = HISTORY_SCHEDULE_LABEL
+        .read()
+        .expect("history schedule lock poisoned")
+        .clone();
     let running = CYCLE_RUNNING.load(Ordering::SeqCst);
-    let next_run = NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst);
+    let backup_next_run = BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst);
+    let history_next_run = HISTORY_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst);
+    let backup_next_run_secs =
+        (backup_next_run > 0).then(|| backup_next_run.saturating_sub(now_secs));
+    let history_next_run_secs =
+        (history_next_run > 0).then(|| history_next_run.saturating_sub(now_secs));
     HttpResponse::Ok().json(ConfigResponse {
         port: **cfg,
         uptime_seconds,
         hostname,
         max_parallel_databases: MAX_PARALLEL_DATABASES.load(Ordering::SeqCst),
         telegram_chat_count: TELEGRAM_CHAT_COUNT.load(Ordering::SeqCst),
-        phase: match (running, schedule.is_empty()) {
+        phase: match (running, backup_schedule.is_empty()) {
             (true, _) => "running",
             (false, false) => "waiting",
             // No schedule and no cycle running: a one-shot run that has either
             // not reached its cycle yet or already finished it.
             (false, true) => "idle",
         },
-        schedule,
+        schedule: backup_schedule.clone(),
+        backup_schedule,
+        history_schedule,
         // A target in the past reads as "due now" rather than a negative
         // countdown — the cycle is about to start.
-        next_run_secs: (next_run > 0).then(|| next_run.saturating_sub(now_secs)),
+        next_run_secs: backup_next_run_secs,
+        backup_next_run_secs,
+        history_next_run_secs,
     })
 }
 
@@ -682,11 +723,24 @@ mod tests {
     /// at "due now" for the whole run, so starting a cycle must clear it.
     #[test]
     fn starting_a_cycle_clears_the_countdown() {
-        set_next_run_in(std::time::Duration::from_secs(600));
-        assert!(NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > now_epoch_secs());
+        set_next_backup_run_in(std::time::Duration::from_secs(600));
+        assert!(BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > now_epoch_secs());
 
         set_cycle_running(true);
-        assert_eq!(NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst), 0);
+        assert_eq!(BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst), 0);
+        set_cycle_running(false);
+    }
+
+    #[test]
+    fn backup_and_history_countdowns_are_independent() {
+        set_next_backup_run_in(std::time::Duration::from_secs(600));
+        set_next_history_run_in(std::time::Duration::from_secs(1200));
+        assert!(BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > 0);
+        assert!(HISTORY_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > 0);
+
+        set_cycle_running(true);
+        assert_eq!(BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst), 0);
+        assert!(HISTORY_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) > 0);
         set_cycle_running(false);
     }
 

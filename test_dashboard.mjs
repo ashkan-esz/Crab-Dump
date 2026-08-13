@@ -12,15 +12,16 @@ const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 const noop = () => {};
+const element = () => ({ classList: { add: noop, remove: noop }, textContent: '' });
 const stubs = {
-    document: { addEventListener: noop, getElementById: () => null },
+    document: { addEventListener: noop, getElementById: element },
     window: { addEventListener: noop },
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule } = load(...Object.values(stubs));
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 
@@ -86,5 +87,24 @@ expandedDatabases.add('app');
 assert.equal(expandedDatabases.has('app'), true);
 expandedDatabases.delete('app');
 assert.equal(expandedDatabases.has('app'), false);
+
+// Both countdowns derive from independent deadlines, so a delayed timer
+// callback cannot overstate either schedule's time remaining.
+const originalNow = Date.now;
+let now = 1_000_000;
+Date.now = () => now;
+renderSchedule('backup', 'every 6h', 10, 'one-shot');
+renderSchedule('history', 'cron 59 23 * * *', 20, 'disabled');
+now += 2_500;
+assert.equal(scheduleSecs({ atMs: 1_000_000 + 10_000 }), 8);
+assert.equal(scheduleSecs({ atMs: 1_000_000 + 20_000 }), 18);
+now += 7_500;
+assert.equal(scheduleSecs({ atMs: 1_000_000 + 10_000 }), 0);
+assert.equal(scheduleSecs({ atMs: 1_000_000 + 20_000 }), 10);
+assert.equal(
+    formatSchedule({ label: 'every 6h', atMs: now }),
+    'every 6h · due now',
+);
+Date.now = originalNow;
 
 console.log('dashboard timeline, history formatting, and expansion state OK');

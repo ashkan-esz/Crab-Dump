@@ -162,6 +162,7 @@ fn main() -> Result<()> {
     // that is down now may well be up at the next cycle.
     if let Some(schedule) = &shared_cfg.backup_schedule {
         if let Some(history_schedule) = &shared_cfg.history_upload_schedule {
+            web::set_history_schedule_label(schedule_label(history_schedule));
             spawn_history_upload_worker(
                 &shared_cfg,
                 history_schedule,
@@ -226,7 +227,12 @@ fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: 
     std::thread::spawn(move || {
         tracing::info!(cron = %cron, "history upload worker started");
         for occurrence in 1u64.. {
-            sleep_until_cron(&cron, occurrence);
+            sleep_until_cron(
+                &cron,
+                occurrence,
+                "history upload",
+                web::set_next_history_run_in,
+            );
             if let Err(error) = upload_active_history(
                 &history, &work_dir, chunk_size, &client, &bot_token, &chat_ids,
             ) {
@@ -351,7 +357,7 @@ fn run_scheduled(
         // A cron schedule has to reach its first matching time before the first
         // cycle; an interval schedule backs up straight away.
         if let Schedule::Cron(expr) = schedule {
-            sleep_until_cron(expr, cycle);
+            sleep_until_cron(expr, cycle, "backup", web::set_next_backup_run_in);
         }
 
         let cycle_started = std::time::Instant::now();
@@ -397,7 +403,7 @@ fn run_scheduled(
                         sleep_secs = remaining.as_secs(),
                         "sleeping until the next backup cycle",
                     );
-                    web::set_next_run_in(remaining);
+                    web::set_next_backup_run_in(remaining);
                     std::thread::sleep(remaining);
                 }
                 None => tracing::warn!(
@@ -423,7 +429,12 @@ fn run_scheduled(
 /// step, DST change, a resumed container) is noticed within [`SLEEP_SLICE`]
 /// instead of firing that far off — a jump forward past the target fires
 /// immediately, and a jump backwards simply waits longer.
-fn sleep_until_cron(expr: &cron::Cron, cycle: u64) {
+fn sleep_until_cron(
+    expr: &cron::Cron,
+    cycle: u64,
+    schedule_name: &str,
+    set_next_run: fn(std::time::Duration),
+) {
     let now = chrono::Local::now().naive_local();
     // `Cron::parse` rejects expressions that can never fire, so `None` here
     // would mean the clock has run past the four-year search window. Fire now
@@ -433,7 +444,7 @@ fn sleep_until_cron(expr: &cron::Cron, cycle: u64) {
             cycle,
             cron = %expr,
             "cannot determine the next firing time from the current clock; \
-             running this cycle immediately",
+             running this schedule immediately",
         );
         return;
     };
@@ -443,11 +454,12 @@ fn sleep_until_cron(expr: &cron::Cron, cycle: u64) {
         cron = %expr,
         next_run = %target.format("%Y-%m-%d %H:%M:%S"),
         wait_secs = target.signed_duration_since(now).num_seconds(),
-        "waiting for the next scheduled backup",
+        schedule = schedule_name,
+        "waiting for the next scheduled execution",
     );
 
     if let Ok(wait) = target.signed_duration_since(now).to_std() {
-        web::set_next_run_in(wait);
+        set_next_run(wait);
     }
 
     while let Some(slice) = sleep_slice(chrono::Local::now().naive_local(), target) {
