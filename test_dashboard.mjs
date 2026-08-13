@@ -143,3 +143,42 @@ assert.equal(
 Date.now = originalNow;
 
 console.log('dashboard timeline, history formatting, and expansion state OK');
+
+// Telegram users workspace contract checks. The page is intentionally
+// dependency-free, so these assertions protect the rendered states and
+// mutation wiring at the HTML/JavaScript boundary.
+const usersHtml = readFileSync(new URL('./users.html', import.meta.url), 'utf8');
+const usersBody = usersHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+assert.match(usersHtml, /<table>/);
+assert.match(usersHtml, /class="table-scroll"/);
+assert.match(usersHtml, /class="inspector".*role="dialog"/);
+assert.match(usersHtml, /role="alertdialog"/);
+assert.match(usersHtml, /id="cancel-delete"/);
+assert.match(usersHtml, /id="refreshing"/);
+assert.match(usersHtml, /id="refresh-notice"/);
+assert.match(usersHtml, /No matching users/);
+assert.match(usersHtml, /No users yet/);
+assert.match(usersHtml, /Add your first user/);
+assert.match(usersHtml, /Users could not be loaded/);
+assert.match(usersBody, /state\.query\.trim\(\)/);
+assert.match(usersBody, /state\.status === 'enabled'/);
+assert.match(usersBody, /state\.status === 'all' \|\| \(state\.status === 'enabled' \? user\.enabled : !user\.enabled\)/);
+assert.match(usersBody, /localeCompare/);
+assert.match(usersBody, /escapeHtml/);
+assert.match(usersBody, /method: editingId \? 'PUT' : 'POST'/);
+assert.match(usersBody, /enabled: \$\('enabled'\)\.checked/);
+assert.match(usersBody, /method: 'PUT', body: JSON\.stringify\(body\)/);
+assert.match(usersBody, /Delete \$\{user\.name\} \(\$\{user\.chat_id\}\)\?/);
+assert.match(usersBody, /This removes the directory record and cannot be undone/);
+assert.match(usersBody, /catch \(error\) \{ setText\('form-summary', error\.message\)/);
+assert.doesNotMatch(usersBody, /catch \(error\)[\s\S]{0,180}user-form'\)\.reset/);
+assert.match(usersBody, /window\.escapeHtml = escapeHtml/);
+
+const escapeSource = usersBody.match(/function escapeHtml\(value\) \{[\s\S]*?\n  \}/)[0];
+const escapeHtml = new Function(`${escapeSource}; return escapeHtml;`)();
+assert.equal(escapeHtml(`<script>alert("x")</script> & 'id'`),
+    '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &#39;id&#39;');
+assert.doesNotMatch(usersHtml, /—/);
+
+console.log('Telegram users workspace contract OK');

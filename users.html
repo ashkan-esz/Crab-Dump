@@ -3,68 +3,513 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>crab-dump · Telegram Users</title>
+  <title>crab-dump · Telegram users</title>
   <style>
-    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; font: 16px system-ui, sans-serif; color: #172033; }
-    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-    a, button { color: #0758bd; } form { display: grid; gap: .7rem; margin: 1.5rem 0; }
-    input, button { font: inherit; padding: .5rem; } table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: .65rem; border-bottom: 1px solid #ccd3df; }
-    .error { color: #b42318; min-height: 1.3em; } .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #0b0f19;
+      --surface: #111827;
+      --surface-raised: #172033;
+      --surface-hover: #1a2332;
+      --border: #263348;
+      --text: #e2e8f0;
+      --muted: #8a98ad;
+      --accent: #60a5fa;
+      --accent-strong: #3b82f6;
+      --accent-bg: rgba(59, 130, 246, .14);
+      --success: #4ade80;
+      --success-bg: rgba(34, 197, 94, .12);
+      --warning: #fbbf24;
+      --warning-bg: rgba(245, 158, 11, .12);
+      --danger: #f87171;
+      --danger-bg: rgba(239, 68, 68, .12);
+      --radius: 12px;
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+      --z-sticky: 100;
+      --z-menu: 1000;
+      --z-drawer: 1100;
+      --z-modal: 1200;
+      --z-toast: 1400;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow-x: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 var(--font);
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .65; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    a { color: var(--accent); }
+    code, .mono { font-family: var(--mono); }
+    .page { width: min(1180px, 100%); margin: 0 auto; padding: 28px 24px 48px; }
+    .page-header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 20px; padding-bottom: 24px; border-bottom: 1px solid var(--border);
+    }
+    .eyebrow {
+      margin: 0 0 5px; color: var(--accent); font: 700 11px/1.2 var(--mono);
+      letter-spacing: .11em; text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(1.45rem, 2vw, 1.85rem); letter-spacing: -.025em; }
+    .lede { max-width: 680px; margin: 8px 0 0; color: var(--muted); }
+    .back-link { white-space: nowrap; margin-top: 8px; }
+    .summary {
+      display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+      padding: 16px 0 18px; color: var(--muted); font-size: 13px;
+    }
+    .summary strong { color: var(--text); font-size: 18px; }
+    .summary-item { display: inline-flex; align-items: center; gap: 7px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .dot.success { background: var(--success); }
+    .dot.warning { background: var(--warning); }
+    .toolbar {
+      display: flex; flex-wrap: wrap; align-items: end; gap: 10px;
+      padding: 14px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .field { display: grid; gap: 5px; min-width: 0; }
+    .field label, .field-label {
+      color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .01em;
+    }
+    .toolbar .search-field { flex: 1 1 260px; }
+    input, select {
+      width: 100%; min-height: 40px; padding: 8px 11px; color: var(--text);
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    }
+    input::placeholder { color: #6b7890; }
+    input:hover, select:hover { border-color: #3b4a63; }
+    .toolbar select { min-width: 150px; }
+    .button {
+      min-height: 40px; padding: 8px 14px; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); background: var(--surface-raised);
+      font-weight: 650; white-space: nowrap;
+    }
+    .button:hover { background: var(--surface-hover); border-color: #40516d; }
+    .button.primary { color: #fff; border-color: var(--accent-strong); background: var(--accent-strong); }
+    .button.primary:hover { background: #2563eb; }
+    .button.subtle { background: transparent; }
+    .button.danger { color: var(--danger); }
+    .button.small { min-height: 32px; padding: 5px 10px; font-size: 13px; }
+    .refreshing { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; color: var(--muted); font-size: 12px; }
+    .refreshing[hidden] { display: none; }
+    .spinner { width: 13px; height: 13px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .table-shell { border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); overflow: hidden; background: var(--surface); }
+    .table-scroll { max-height: min(62vh, 680px); overflow: auto; }
+    table { width: 100%; min-width: 680px; border-collapse: collapse; }
+    caption { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    th {
+      position: sticky; top: 0; z-index: var(--z-sticky); padding: 11px 16px;
+      color: var(--muted); background: var(--surface-raised); border-bottom: 1px solid var(--border);
+      font: 700 11px/1.3 var(--mono); letter-spacing: .08em; text-align: left; text-transform: uppercase;
+    }
+    td { padding: 13px 16px; border-bottom: 1px solid rgba(38, 51, 72, .72); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: var(--surface-hover); }
+    .name-cell { min-width: 220px; font-weight: 650; overflow-wrap: anywhere; }
+    .chat-cell { min-width: 210px; color: var(--muted); overflow-wrap: anywhere; }
+    .status-cell { white-space: nowrap; }
+    .status { display: inline-flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .status.enabled { color: var(--success); background: var(--success-bg); }
+    .status.disabled { color: var(--muted); background: rgba(124, 138, 160, .12); }
+    .status .dot { width: 6px; height: 6px; }
+    .status.enabled .dot { background: var(--success); }
+    .actions { display: flex; justify-content: flex-end; gap: 7px; min-width: 190px; }
+    .row-toggle { color: var(--accent); }
+    .overflow-menu { position: relative; display: none; }
+    .overflow-menu summary {
+      display: grid; place-items: center; width: 34px; height: 34px; list-style: none;
+      border: 1px solid var(--border); border-radius: 8px; color: var(--text); cursor: pointer;
+    }
+    .overflow-menu summary::-webkit-details-marker { display: none; }
+    .overflow-menu[open] summary { background: var(--surface-hover); }
+    .menu {
+      position: absolute; right: 0; top: calc(100% + 5px); z-index: var(--z-menu);
+      display: grid; min-width: 155px; padding: 5px; background: var(--surface-raised);
+      border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 12px 30px rgba(0,0,0,.35);
+    }
+    .menu button { padding: 9px 10px; border: 0; border-radius: 6px; color: var(--text); background: transparent; text-align: left; }
+    .menu button:hover { background: var(--surface-hover); }
+    .menu .danger { color: var(--danger); }
+    .empty, .error-state { padding: 52px 22px; text-align: center; }
+    .empty h2, .error-state h2 { margin: 0 0 7px; font-size: 1.05rem; }
+    .empty p, .error-state p { max-width: 480px; margin: 0 auto 17px; color: var(--muted); }
+    .error-state { color: var(--danger); }
+    .error-state p { color: var(--muted); }
+    .skeleton-row td { height: 58px; }
+    .skeleton { display: block; width: 70%; height: 13px; border-radius: 5px; background: linear-gradient(90deg, #1b2638, #283750, #1b2638); background-size: 200% 100%; animation: shimmer 1.3s ease-in-out infinite; }
+    .skeleton.short { width: 35%; }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+    .notice {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+      margin: 14px 0 0; padding: 11px 13px; color: var(--warning); background: var(--warning-bg);
+      border: 1px solid rgba(245,158,11,.28); border-radius: 8px; font-size: 13px;
+    }
+    .notice[hidden] { display: none; }
+    .drawer-backdrop {
+      position: fixed; inset: 0; z-index: var(--z-drawer); background: rgba(2, 6, 23, .62);
+      opacity: 0; pointer-events: none; transition: opacity .15s;
+    }
+    .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .inspector {
+      position: fixed; inset-block: 0; inset-inline-end: 0; z-index: var(--z-drawer);
+      display: flex; flex-direction: column; width: min(420px, 100vw); padding: 24px;
+      background: var(--surface); border-inline-start: 1px solid var(--border);
+      box-shadow: -18px 0 55px rgba(0,0,0,.3); transform: translateX(100%); transition: transform .15s;
+    }
+    .inspector.open { transform: translateX(0); }
+    .inspector-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+    .inspector h2 { margin: 0; font-size: 1.2rem; }
+    .inspector-body { flex: 1; overflow-y: auto; padding-top: 22px; }
+    .editor-form { display: grid; gap: 18px; }
+    .editor-form .field { gap: 7px; }
+    .editor-form input { min-height: 44px; }
+    .check-field { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+    .check-field input { width: 18px; height: 18px; min-height: 0; margin: 2px 0 0; accent-color: var(--accent-strong); }
+    .check-field label { display: grid; gap: 2px; color: var(--text); font-weight: 650; }
+    .help { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .field.invalid input { border-color: var(--danger); }
+    .field-error { min-height: 17px; color: var(--danger); font-size: 12px; }
+    .form-summary { padding: 10px 12px; color: var(--danger); background: var(--danger-bg); border: 1px solid rgba(239,68,68,.28); border-radius: 8px; font-size: 13px; }
+    .form-summary[hidden], .field-error:empty { display: none; }
+    .inspector-footer { display: flex; justify-content: flex-end; gap: 9px; padding-top: 19px; border-top: 1px solid var(--border); }
+    .dialog-backdrop {
+      position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center;
+      padding: 20px; background: rgba(2, 6, 23, .72); opacity: 0; pointer-events: none; transition: opacity .15s;
+    }
+    .dialog-backdrop.open { opacity: 1; pointer-events: auto; }
+    .dialog { width: min(440px, 100%); padding: 22px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 18px 60px rgba(0,0,0,.45); }
+    .dialog h2 { margin: 0 0 10px; font-size: 1.1rem; }
+    .dialog p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+    .dialog-footer { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+    .toast {
+      position: fixed; right: 20px; bottom: 20px; z-index: var(--z-toast); max-width: min(390px, calc(100vw - 40px));
+      padding: 12px 15px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border);
+      border-radius: 9px; box-shadow: 0 12px 32px rgba(0,0,0,.3);
+    }
+    .toast.success { border-color: rgba(34,197,94,.4); }
+    .toast.error { border-color: rgba(239,68,68,.4); color: var(--danger); }
+    .toast[hidden] { display: none; }
+    @media (max-width: 700px) {
+      .page { padding: 20px 14px 36px; }
+      .page-header { display: block; }
+      .back-link { display: inline-block; margin-top: 15px; }
+      .toolbar { align-items: stretch; }
+      .toolbar .search-field, .toolbar select, .toolbar .button { flex-basis: 100%; }
+      .refreshing { min-height: 28px; }
+      .actions > .desktop-actions { display: none; }
+      .overflow-menu { display: block; }
+      .inspector { width: 100%; padding: 20px 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
   </style>
 </head>
 <body>
-  <header><h1>Telegram users</h1><a href="/">Status dashboard</a></header>
-  <p>Informational directory only. Backup destinations remain configured by <code>TG_CHAT_ID_N</code>.</p>
-  <form id="user-form">
-    <input id="name" placeholder="Display name" required>
-    <input id="chat-id" placeholder="Chat ID or @channelusername" required>
-    <label><input id="enabled" type="checkbox" checked> Enabled</label>
-    <div class="actions"><button type="submit" id="submit-user">Add user</button><button type="button" id="cancel" hidden>Cancel edit</button></div>
-    <div class="error" id="error" role="alert"></div>
-  </form>
-  <table>
-    <thead><tr><th>Name</th><th>Chat ID</th><th>Enabled</th><th>Actions</th></tr></thead>
-    <tbody id="users"></tbody>
-  </table>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Directory</p>
+        <h1>Telegram users</h1>
+        <p class="lede">Manage the informational user directory. Backup recipients remain configured by <code>TG_CHAT_ID_N</code>.</p>
+      </div>
+      <a class="back-link" href="/">Status dashboard</a>
+    </header>
+
+    <section class="summary" aria-label="Directory summary">
+      <span class="summary-item"><strong id="total-count">0</strong> <span id="total-label">users</span></span>
+      <span class="summary-item"><span class="dot success" aria-hidden="true"></span><span id="enabled-summary">0 enabled</span></span>
+      <span class="summary-item"><span class="dot warning" aria-hidden="true"></span><span id="disabled-summary">0 disabled</span></span>
+    </section>
+
+    <section aria-label="User directory">
+      <div class="toolbar">
+        <div class="field search-field">
+          <label for="search">Search users</label>
+          <input id="search" type="search" autocomplete="off" placeholder="Name or chat ID">
+        </div>
+        <div class="field">
+          <label for="status-filter">Status</label>
+          <select id="status-filter">
+            <option value="all">All users</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+        <button class="button primary" id="add-user" type="button">Add user</button>
+        <span class="refreshing" id="refreshing" hidden><span class="spinner" aria-hidden="true"></span>Refreshing</span>
+      </div>
+      <div class="notice" id="refresh-notice" hidden>
+        <span id="refresh-notice-text"></span><button class="button small subtle" id="retry-refresh" type="button">Retry</button>
+      </div>
+      <div class="table-shell">
+        <div class="table-scroll" id="table-scroll" aria-busy="false">
+          <table>
+            <caption>Telegram user directory</caption>
+            <thead><tr><th scope="col">Name</th><th scope="col">Chat ID</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+            <tbody id="users"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <aside class="inspector" id="inspector" role="dialog" aria-modal="true" aria-labelledby="editor-title" aria-hidden="true">
+    <div class="inspector-header">
+      <div><p class="eyebrow">User record</p><h2 id="editor-title">Add user</h2></div>
+      <button class="button small subtle" id="close-editor" type="button" aria-label="Close user editor">Close</button>
+    </div>
+    <div class="inspector-body">
+      <form class="editor-form" id="user-form" novalidate>
+        <div class="form-summary" id="form-summary" role="alert" hidden></div>
+        <div class="field" id="name-field">
+          <label for="name">Display name</label>
+          <input id="name" name="name" autocomplete="name" aria-describedby="name-error" required>
+          <div class="field-error" id="name-error" aria-live="polite"></div>
+        </div>
+        <div class="field" id="chat-id-field">
+          <label for="chat-id">Chat ID</label>
+          <input id="chat-id" name="chat_id" class="mono" autocomplete="off" aria-describedby="chat-id-error" required>
+          <div class="field-error" id="chat-id-error" aria-live="polite"></div>
+        </div>
+        <div class="check-field">
+          <input id="enabled" name="enabled" type="checkbox" checked>
+          <label for="enabled">Enabled <span class="help">Disabled records remain in the directory but are not active.</span></label>
+        </div>
+      </form>
+    </div>
+    <div class="inspector-footer">
+      <button class="button subtle" id="cancel-editor" type="button">Cancel</button>
+      <button class="button primary" id="submit-user" type="submit" form="user-form">Add user</button>
+    </div>
+  </aside>
+
+  <div class="dialog-backdrop" id="delete-backdrop">
+    <section class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
+      <h2 id="delete-title">Delete user?</h2>
+      <p id="delete-description"></p>
+      <div class="dialog-footer">
+        <button class="button" id="cancel-delete" type="button">Cancel</button>
+        <button class="button danger" id="confirm-delete" type="button">Delete user</button>
+      </div>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
 <script>
-  let editing = null, users = [];
+  let users = [];
+  let loading = false;
+  let loadError = null;
+  let editing = null;
+  let deleteTarget = null;
+  let lastFocus = null;
+  let toastTimer = null;
+  const state = { query: '', status: 'all' };
   const $ = id => document.getElementById(id);
-  async function request(url, options) {
-    const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Request failed (${response.status})`);
-    return response.status === 204 ? null : response.json();
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+  }
+  function pluralize(count, singular, plural = singular + 's') { return `${count} ${count === 1 ? singular : plural}`; }
+  function sortedUsers(list) {
+    return list.map((user, index) => ({ user, index })).sort((a, b) => {
+      const nameOrder = String(a.user.name).localeCompare(String(b.user.name), undefined, { sensitivity: 'base', numeric: true });
+      return nameOrder || String(a.user.chat_id).localeCompare(String(b.user.chat_id), undefined, { sensitivity: 'base', numeric: true }) || a.index - b.index;
+    }).map(item => item.user);
+  }
+  function visibleUsers() {
+    const query = state.query.trim().toLocaleLowerCase();
+    return sortedUsers(users.filter(user => {
+      const matchesQuery = !query || `${user.name} ${user.chat_id}`.toLocaleLowerCase().includes(query);
+      const matchesStatus = state.status === 'all' || (state.status === 'enabled' ? user.enabled : !user.enabled);
+      return matchesQuery && matchesStatus;
+    }));
+  }
+  function setText(id, text) { $(id).textContent = text; }
+  function showToast(message, kind = 'success') {
+    const toast = $('toast');
+    clearTimeout(toastTimer);
+    toast.textContent = message; toast.className = `toast ${kind}`; toast.hidden = false;
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
+  }
+  function renderSummary() {
+    const enabled = users.filter(user => user.enabled).length;
+    setText('total-count', users.length);
+    setText('total-label', users.length === 1 ? 'user' : 'users');
+    setText('enabled-summary', pluralize(enabled, 'enabled'));
+    setText('disabled-summary', pluralize(users.length - enabled, 'disabled'));
+  }
+  function renderRows() {
+    const body = $('users');
+    if (loading && !users.length) {
+      body.innerHTML = Array.from({length: 5}, (_, i) => `<tr class="skeleton-row"><td><span class="skeleton"></span></td><td><span class="skeleton"></span></td><td><span class="skeleton short"></span></td><td><span class="skeleton short"></span></td></tr>`).join('');
+      return;
+    }
+    if (loadError && !users.length) {
+      body.innerHTML = `<tr><td colspan="4"><div class="error-state"><h2>Users could not be loaded</h2><p>${escapeHtml(loadError)}</p><button class="button" type="button" data-action="retry">Try again</button></div></td></tr>`;
+      return;
+    }
+    const filtered = visibleUsers();
+    if (!filtered.length) {
+      const filteredState = users.length > 0 && (state.query.trim() || state.status !== 'all');
+      body.innerHTML = `<tr><td colspan="4"><div class="empty"><h2>${filteredState ? 'No matching users' : 'No users yet'}</h2><p>${filteredState ? 'Try a different search or clear the active filters.' : 'Add a user to keep an easy-to-scan directory for operators.'}</p><button class="button ${filteredState ? '' : 'primary'}" type="button" data-action="${filteredState ? 'clear-filters' : 'add'}">${filteredState ? 'Clear filters' : 'Add your first user'}</button></div></td></tr>`;
+      return;
+    }
+    body.innerHTML = filtered.map(user => {
+      return `<tr>
+        <td class="name-cell">${escapeHtml(user.name)}</td>
+        <td class="chat-cell mono">${escapeHtml(user.chat_id)}</td>
+        <td class="status-cell"><span class="status ${user.enabled ? 'enabled' : 'disabled'}"><span class="dot" aria-hidden="true"></span>${user.enabled ? 'Enabled' : 'Disabled'}</span></td>
+        <td><div class="actions">
+          <span class="desktop-actions"><button class="button small row-toggle" type="button" data-action="toggle" data-chat-id="${escapeHtml(user.chat_id)}">${user.enabled ? 'Disable' : 'Enable'}</button> <button class="button small" type="button" data-action="edit" data-chat-id="${escapeHtml(user.chat_id)}">Edit</button> <button class="button small danger" type="button" data-action="delete" data-chat-id="${escapeHtml(user.chat_id)}">Delete</button></span>
+          <details class="overflow-menu"><summary aria-label="More actions for ${escapeHtml(user.name)}">•••</summary><span class="menu"><button type="button" data-action="toggle" data-chat-id="${escapeHtml(user.chat_id)}">${user.enabled ? 'Disable' : 'Enable'}</button><button type="button" data-action="edit" data-chat-id="${escapeHtml(user.chat_id)}">Edit</button><button class="danger" type="button" data-action="delete" data-chat-id="${escapeHtml(user.chat_id)}">Delete</button></span></details>
+        </div></td>
+      </tr>`;
+    }).join('');
   }
   function render() {
-    $('users').innerHTML = users.map((u, i) => `<tr>
-      <td>${escapeHtml(u.name)}</td><td><code>${escapeHtml(u.chat_id)}</code></td>
-      <td>${u.enabled ? 'Yes' : 'No'}</td><td class="actions">
-        <button onclick="editUser(${i})">Edit</button>
-        <button onclick="removeUser(${i})">Delete</button></td></tr>`).join('');
+    renderSummary(); renderRows();
+    $('refreshing').hidden = !loading || !users.length;
+    $('table-scroll').setAttribute('aria-busy', String(loading && !users.length));
   }
-  function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c])); }
-  function editUser(i) {
-    const u = users[i]; editing = u.chat_id; $('name').value = u.name; $('chat-id').value = u.chat_id;
-    $('chat-id').disabled = false; $('enabled').checked = u.enabled; $('submit-user').textContent = 'Save changes'; $('cancel').hidden = false;
+  async function request(url, options = {}) {
+    const response = await fetch(url, { headers: {'Content-Type': 'application/json', ...(options.headers || {})}, ...options });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Request failed (${response.status})`);
+    }
+    if (response.status === 204) return null;
+    return response.json();
   }
-  async function removeUser(i) {
-    if (!confirm(`Delete ${users[i].name}?`)) return;
-    try { await request(`/api/telegram-users/${encodeURIComponent(users[i].chat_id)}`, {method: 'DELETE'}); await load(); }
-    catch (e) { $('error').textContent = e.message; }
-  }
-  async function load() { users = await request('/api/telegram-users'); render(); }
-  $('user-form').addEventListener('submit', async e => {
-    e.preventDefault(); $('error').textContent = '';
-    const body = {name: $('name').value, chat_id: $('chat-id').value, enabled: $('enabled').checked};
+  async function loadUsers({ initial = false } = {}) {
+    if (initial) { loading = true; loadError = null; render(); }
+    else { loading = true; $('refreshing').hidden = !users.length; }
     try {
-      await request(editing ? `/api/telegram-users/${encodeURIComponent(editing)}` : '/api/telegram-users',
-        {method: editing ? 'PUT' : 'POST', body: JSON.stringify(body)});
-      editing = null; $('user-form').reset(); $('enabled').checked = true; $('cancel').hidden = true;
-      $('submit-user').textContent = 'Add user'; await load();
-    } catch (e) { $('error').textContent = e.message; }
+      const next = await request('/api/telegram-users');
+      users = Array.isArray(next) ? next : [];
+      loadError = null;
+      $('refresh-notice').hidden = true;
+    } catch (error) {
+      loadError = error.message;
+      if (users.length) { setText('refresh-notice-text', `Refresh failed: ${error.message}`); $('refresh-notice').hidden = false; }
+    } finally { loading = false; render(); }
+  }
+  function findUser(chatId) { return users.find(user => user.chat_id === chatId); }
+  function clearFieldErrors() {
+    ['name', 'chat-id'].forEach(field => { $(`${field}-field`).classList.remove('invalid'); setText(`${field}-error`, ''); });
+    $('form-summary').hidden = true; setText('form-summary', '');
+  }
+  function validateForm() {
+    const errors = {};
+    if (!$('name').value.trim()) errors.name = 'Display name is required.';
+    if (!$('chat-id').value.trim()) errors['chat-id'] = 'Chat ID is required.';
+    clearFieldErrors();
+    Object.entries(errors).forEach(([field, message]) => { $(`${field}-field`).classList.add('invalid'); setText(`${field}-error`, message); });
+    if (Object.keys(errors).length) {
+      setText('form-summary', `${Object.keys(errors).length} field${Object.keys(errors).length === 1 ? '' : 's'} need attention.`);
+      $('form-summary').hidden = false;
+      const first = errors.name ? $('name') : $('chat-id'); first.focus();
+      return false;
+    }
+    return true;
+  }
+  function resetEditor() {
+    editing = null; $('user-form').reset(); $('enabled').checked = true; clearFieldErrors();
+    setText('editor-title', 'Add user'); setText('submit-user', 'Add user');
+  }
+  function closeEditor() {
+    $('inspector').classList.remove('open'); $('inspector').setAttribute('aria-hidden', 'true'); $('drawer-backdrop').classList.remove('open');
+    resetEditor(); if (lastFocus) { lastFocus.focus(); lastFocus = null; }
+  }
+  function openEditor(user = null, opener = null) {
+    lastFocus = opener || document.activeElement; editing = user ? user.chat_id : null;
+    $('name').value = user ? user.name : ''; $('chat-id').value = user ? user.chat_id : ''; $('enabled').checked = user ? user.enabled : true;
+    setText('editor-title', user ? 'Edit user' : 'Add user'); setText('submit-user', user ? 'Save changes' : 'Add user'); clearFieldErrors();
+    $('inspector').classList.add('open'); $('inspector').setAttribute('aria-hidden', 'false'); $('drawer-backdrop').classList.add('open');
+    $('name').focus();
+  }
+  function openDelete(user, opener) {
+    deleteTarget = user; lastFocus = opener || document.activeElement;
+    setText('delete-description', `Delete ${user.name} (${user.chat_id})? This removes the directory record and cannot be undone.`);
+    $('delete-backdrop').classList.add('open'); $('cancel-delete').focus();
+  }
+  function closeDelete() {
+    $('delete-backdrop').classList.remove('open'); deleteTarget = null;
+    if (lastFocus) { lastFocus.focus(); lastFocus = null; }
+  }
+  async function saveUser(event) {
+    event.preventDefault(); if (!validateForm()) return;
+    const body = { name: $('name').value, chat_id: $('chat-id').value, enabled: $('enabled').checked };
+    const editingId = editing;
+    const button = $('submit-user'); button.disabled = true;
+    try {
+      await request(editingId ? `/api/telegram-users/${encodeURIComponent(editingId)}` : '/api/telegram-users', { method: editingId ? 'PUT' : 'POST', body: JSON.stringify(body) });
+      closeEditor(); showToast(editingId ? 'User updated.' : 'User added.'); await loadUsers();
+    } catch (error) { setText('form-summary', error.message); $('form-summary').hidden = false; showToast(error.message, 'error'); }
+    finally { button.disabled = false; }
+  }
+  async function toggleUser(user) {
+    const body = { name: user.name, chat_id: user.chat_id, enabled: !user.enabled };
+    try { await request(`/api/telegram-users/${encodeURIComponent(user.chat_id)}`, { method: 'PUT', body: JSON.stringify(body) }); showToast(`${user.name} ${body.enabled ? 'enabled' : 'disabled'}.`); await loadUsers(); }
+    catch (error) { showToast(error.message, 'error'); }
+  }
+  async function deleteUser() {
+    if (!deleteTarget) return;
+    const target = deleteTarget; $('confirm-delete').disabled = true;
+    try { await request(`/api/telegram-users/${encodeURIComponent(target.chat_id)}`, { method: 'DELETE' }); closeDelete(); showToast('User deleted.'); await loadUsers(); }
+    catch (error) { closeDelete(); showToast(error.message, 'error'); }
+    finally { $('confirm-delete').disabled = false; }
+  }
+  function clearFilters() { state.query = ''; state.status = 'all'; $('search').value = ''; $('status-filter').value = 'all'; renderRows(); }
+  function closeMenus() { document.querySelectorAll('.overflow-menu[open]').forEach(menu => { menu.open = false; }); }
+  function trapFocus(event, container) {
+    if (event.key !== 'Tab') return;
+    const focusable = [...container.querySelectorAll('button, input, select, [href], [tabindex]:not([tabindex="-1"])')].filter(node => !node.disabled && node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+  $('search').addEventListener('input', event => { state.query = event.target.value; renderRows(); });
+  $('status-filter').addEventListener('change', event => { state.status = event.target.value; renderRows(); });
+  $('add-user').addEventListener('click', event => openEditor(null, event.currentTarget));
+  $('retry-refresh').addEventListener('click', () => loadUsers());
+  $('user-form').addEventListener('submit', saveUser);
+  ['name', 'chat-id'].forEach(id => $(id).addEventListener('blur', validateForm));
+  $('cancel-editor').addEventListener('click', closeEditor); $('close-editor').addEventListener('click', closeEditor); $('drawer-backdrop').addEventListener('click', closeEditor);
+  $('cancel-delete').addEventListener('click', closeDelete); $('confirm-delete').addEventListener('click', deleteUser);
+  $('users').addEventListener('click', event => {
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    if (!action) return;
+    const user = findUser(event.target.closest('[data-chat-id]')?.dataset.chatId);
+    closeMenus();
+    if (action === 'retry') return loadUsers({ initial: true });
+    if (action === 'clear-filters') return clearFilters();
+    if (action === 'add') return openEditor(null, event.target);
+    if (!user) return;
+    if (action === 'edit') openEditor(user, event.target);
+    if (action === 'toggle') toggleUser(user);
+    if (action === 'delete') openDelete(user, event.target);
   });
-  $('cancel').onclick = () => { editing = null; $('user-form').reset(); $('enabled').checked = true; $('cancel').hidden = true; $('submit-user').textContent = 'Add user'; };
-  load().catch(e => $('error').textContent = e.message);
+  document.addEventListener('keydown', event => {
+    if ($('delete-backdrop').classList.contains('open')) { if (event.key === 'Escape') closeDelete(); else trapFocus(event, $('delete-backdrop')); return; }
+    if ($('inspector').classList.contains('open')) { if (event.key === 'Escape') closeEditor(); else trapFocus(event, $('inspector')); }
+  });
+  window.escapeHtml = escapeHtml;
+  window.sortedUsers = sortedUsers;
+  window.visibleUsers = visibleUsers;
+  window.renderRows = renderRows;
+  window.validateForm = validateForm;
+  window.request = request;
+  loadUsers({ initial: true });
 </script>
 </body>
 </html>

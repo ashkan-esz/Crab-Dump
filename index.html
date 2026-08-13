@@ -637,6 +637,17 @@
         .btn:hover { background: var(--bg-hover); }
         .btn.primary { border-color: var(--accent); color: var(--accent); }
         .btn.primary:hover { background: rgba(59,130,246,.10); }
+        .users-nav {
+            margin-top: .9rem;
+            text-decoration: none;
+        }
+        .users-nav::after {
+            content: '↗';
+            font-size: .95rem;
+            line-height: 1;
+            transition: transform .2s;
+        }
+        .users-nav:hover::after { transform: translate(2px, -2px); }
         .spinner {
             display: inline-block;
             width: 14px; height: 14px;
@@ -678,7 +689,7 @@
     <!-- Header -->
     <div class="header">
         <h1><span class="dot"></span>crab-dump</h1>
-        <a href="/users" style="color:var(--accent);font-size:.8rem;">Telegram users</a>
+        <a class="btn primary users-nav" href="/users" aria-label="Manage Telegram users">Telegram users</a>
         <p>Backup pipeline dashboard &middot; PostgreSQL → Telegram</p>
     </div>
 
