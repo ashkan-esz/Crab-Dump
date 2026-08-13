@@ -112,8 +112,8 @@ cat mydb_20260812T031500Z.sql.zst.part* | zstd -d | psql
 
 ## Dashboard-managed routing
 
-VMess/VLESS share profiles are stored as owner-only plaintext in
-`data/v2ray_profiles.json` and are changed only through administrator-only
+VMess, VLESS, Shadowsocks, and Trojan share profiles are stored as owner-only
+plaintext in `data/routing_profiles.json` and are changed only through administrator-only
 dashboard actions. API responses expose summaries, never URLs or credentials.
 The bundled `sing-box` executable listens on a managed local SOCKS5 port;
 Telegram requests use the shared `reqwest` client rebuilt for that listener.

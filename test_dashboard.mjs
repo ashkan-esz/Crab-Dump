@@ -219,6 +219,7 @@ console.log('Telegram users workspace contract OK');
 
 const routingHtml = readFileSync(new URL('./routing.html', import.meta.url), 'utf8');
 assert.match(routingHtml, /disableRouting/);
-assert.match(routingHtml, /api\/v2ray\/disable/);
+assert.match(routingHtml, /api\/routing\/disable/);
+assert.match(routingHtml, /ss:\/\/|trojan:\/\//);
 assert.match(routingHtml, /Saved profiles will remain available/);
 console.log('Routing disable workspace contract OK');

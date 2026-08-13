@@ -29,9 +29,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
+use crate::routing::{ProfileInput, ProfileStore, RouteManager};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
-use crate::v2ray::{ProfileInput, ProfileStore, RouteManager};
 
 // ===========================================================================
 // Global status atoms (Telegram service — single value)
@@ -1335,18 +1335,18 @@ async fn delete_telegram_user(
     }
 }
 
-async fn api_v2ray_profiles(store: web::Data<Arc<ProfileStore>>) -> impl Responder {
+async fn api_routing_profiles(store: web::Data<Arc<ProfileStore>>) -> impl Responder {
     HttpResponse::Ok().json(store.list())
 }
 
-async fn create_v2ray_profile(
+async fn create_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
     payload: web::Json<ProfileInput>,
 ) -> impl Responder {
     match store.create(payload.into_inner()) {
         Ok(summary) => {
-            audit_action(&req, "v2ray_profile_create", &summary.id, "ok");
+            audit_action(&req, "routing_profile_create", &summary.id, "ok");
             HttpResponse::Created().json(summary)
         }
         Err(_) => {
@@ -1355,7 +1355,7 @@ async fn create_v2ray_profile(
     }
 }
 
-async fn update_v2ray_profile(
+async fn update_routing_profile(
     req: HttpRequest,
     path: web::Path<String>,
     store: web::Data<Arc<ProfileStore>>,
@@ -1363,7 +1363,7 @@ async fn update_v2ray_profile(
 ) -> impl Responder {
     match store.update(&path.into_inner(), payload.into_inner()) {
         Ok(Some(summary)) => {
-            audit_action(&req, "v2ray_profile_update", &summary.id, "ok");
+            audit_action(&req, "routing_profile_update", &summary.id, "ok");
             HttpResponse::Ok().json(summary)
         }
         Ok(None) => {
@@ -1375,7 +1375,7 @@ async fn update_v2ray_profile(
     }
 }
 
-async fn delete_v2ray_profile(
+async fn delete_routing_profile(
     req: HttpRequest,
     path: web::Path<String>,
     store: web::Data<Arc<ProfileStore>>,
@@ -1383,7 +1383,7 @@ async fn delete_v2ray_profile(
     let id = path.into_inner();
     match store.delete(&id) {
         Ok(true) => {
-            audit_action(&req, "v2ray_profile_delete", &id, "ok");
+            audit_action(&req, "routing_profile_delete", &id, "ok");
             HttpResponse::NoContent().finish()
         }
         Ok(false) => {
@@ -1394,7 +1394,7 @@ async fn delete_v2ray_profile(
     }
 }
 
-async fn test_v2ray_profile(
+async fn test_routing_profile(
     store: web::Data<Arc<ProfileStore>>,
     route: web::Data<Arc<RouteManager>>,
     path: web::Path<String>,
@@ -1415,7 +1415,7 @@ async fn test_v2ray_profile(
     }
 }
 
-async fn apply_v2ray_profile(
+async fn apply_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
     route: web::Data<Arc<RouteManager>>,
@@ -1445,7 +1445,7 @@ async fn apply_v2ray_profile(
     {
         Ok(Ok(client)) => client,
         _ => {
-            route.stop();
+            route.rollback();
             return HttpResponse::BadGateway()
                 .json(serde_json::json!({"error": "routing profile could not be applied"}));
         }
@@ -1454,18 +1454,24 @@ async fn apply_v2ray_profile(
         let mut current = client.write().expect("Telegram client lock poisoned");
         std::mem::replace(&mut *current, new_client)
     };
-    let _ = client_drop_tx.send(old_client);
     if store.set_active(&id).is_err() {
-        route.stop();
+        let failed_client = {
+            let mut current = client.write().expect("Telegram client lock poisoned");
+            std::mem::replace(&mut *current, old_client)
+        };
+        let _ = client_drop_tx.send(failed_client);
+        route.rollback();
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": "profile storage unavailable"}));
     }
-    audit_action(&req, "v2ray_profile_apply", &id, "ok");
+    let _ = client_drop_tx.send(old_client);
+    route.commit();
+    audit_action(&req, "routing_profile_apply", &id, "ok");
     let _ = proxy;
     HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
 }
 
-async fn disable_v2ray(
+async fn disable_routing(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
     route: web::Data<Arc<RouteManager>>,
@@ -1511,14 +1517,14 @@ async fn disable_v2ray(
         std::mem::replace(&mut *current, new_client)
     };
     let _ = client_drop_tx.send(old_client);
-    audit_action(&req, "v2ray_disable", "routing", "ok");
+    audit_action(&req, "routing_disable", "routing", "ok");
     HttpResponse::Ok().json(serde_json::json!({
         "active": false,
         "message": "Routing disabled"
     }))
 }
 
-async fn select_v2ray_profile(
+async fn select_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
     path: web::Path<String>,
@@ -1526,7 +1532,7 @@ async fn select_v2ray_profile(
     let id = path.into_inner();
     match store.set_active(&id) {
         Ok(true) => {
-            audit_action(&req, "v2ray_profile_select", &id, "ok");
+            audit_action(&req, "routing_profile_select", &id, "ok");
             HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
         }
         Ok(false) => {
@@ -1586,7 +1592,7 @@ pub async fn start_server(
     operator_credentials: Option<(String, String)>,
     viewer_credentials: Option<(String, String)>,
     telegram_users: Arc<TelegramUserStore>,
-    v2ray_profiles: Arc<ProfileStore>,
+    routing_profiles: Arc<ProfileStore>,
     route_manager: Arc<RouteManager>,
     telegram_client: Arc<RwLock<Arc<Client>>>,
     client_drop_tx: Sender<Arc<Client>>,
@@ -1602,7 +1608,7 @@ pub async fn start_server(
         viewer_credentials,
     ));
     let users_data = web::Data::new(telegram_users);
-    let profiles_data = web::Data::new(v2ray_profiles);
+    let profiles_data = web::Data::new(routing_profiles);
     let route_data = web::Data::new(route_manager);
     let client_data = web::Data::new(telegram_client);
     let client_drop_data = web::Data::new(client_drop_tx);
@@ -1646,28 +1652,31 @@ pub async fn start_server(
                 "/api/telegram-users/{chat_id}",
                 web::delete().to(delete_telegram_user),
             )
-            .route("/api/v2ray/profiles", web::get().to(api_v2ray_profiles))
-            .route("/api/v2ray/profiles", web::post().to(create_v2ray_profile))
+            .route("/api/routing/profiles", web::get().to(api_routing_profiles))
             .route(
-                "/api/v2ray/profiles/{id}",
-                web::put().to(update_v2ray_profile),
+                "/api/routing/profiles",
+                web::post().to(create_routing_profile),
             )
             .route(
-                "/api/v2ray/profiles/{id}",
-                web::delete().to(delete_v2ray_profile),
+                "/api/routing/profiles/{id}",
+                web::put().to(update_routing_profile),
             )
             .route(
-                "/api/v2ray/profiles/{id}/test",
-                web::post().to(test_v2ray_profile),
+                "/api/routing/profiles/{id}",
+                web::delete().to(delete_routing_profile),
             )
             .route(
-                "/api/v2ray/profiles/{id}/apply",
-                web::post().to(apply_v2ray_profile),
+                "/api/routing/profiles/{id}/test",
+                web::post().to(test_routing_profile),
             )
-            .route("/api/v2ray/disable", web::post().to(disable_v2ray))
             .route(
-                "/api/v2ray/profiles/{id}/select",
-                web::post().to(select_v2ray_profile),
+                "/api/routing/profiles/{id}/apply",
+                web::post().to(apply_routing_profile),
+            )
+            .route("/api/routing/disable", web::post().to(disable_routing))
+            .route(
+                "/api/routing/profiles/{id}/select",
+                web::post().to(select_routing_profile),
             )
             .route("/api/info", web::get().to(api_config))
             .route("/", web::get().to(serve_dashboard))

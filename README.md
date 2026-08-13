@@ -71,16 +71,16 @@ export SOCKS_PROXY=socks5h://127.0.0.1:2080
 Use the `socks5h://` scheme (the `h` resolves DNS through the proxy) to
 avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
 
-### 3a. Dashboard-managed VMess/VLESS routing
+### 3a. Dashboard-managed routing profiles
 
 Docker releases bundle a pinned `sing-box` executable. Local Cargo builds need
 the supported `sing-box` executable installed separately, or can set
 `SING_BOX_PATH` to its path. Log in as the dashboard administrator and use the
-VMess/VLESS routing section to create, test, select, and explicitly apply a
-share URL. Operators and viewers can neither modify profiles nor see their
-URLs or credentials.
+the routing section to create, test, select, and explicitly apply VMess,
+VLESS, Shadowsocks SIP002, or Trojan share URLs. Operators and viewers can
+neither modify profiles nor see their URLs or credentials.
 
-Profiles and the active selection are stored in `./data/v2ray_profiles.json`.
+Profiles and the active selection are stored in `./data/routing_profiles.json`.
 The file and generated `sing-box` configuration are written atomically with
 owner-only permissions. `SOCKS_PROXY` remains supported for legacy deployments,
 but startup rejects it when a dashboard profile is active. Applying a new

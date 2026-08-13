@@ -1,4 +1,4 @@
-//! Dashboard-managed VMess/VLESS share profiles and the bundled sing-box core.
+//! Dashboard-managed routing share profiles and the bundled sing-box core.
 //!
 //! Secrets live only in the restricted profile file and the generated config
 //! file. Public summaries and all errors intentionally omit URLs and
@@ -16,13 +16,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SING_BOX_PATH: &str = "/usr/local/bin/sing-box";
 const CONFIG_FILE: &str = "sing-box.json";
-const PROFILES_FILE: &str = "v2ray_profiles.json";
+const PROFILES_FILE: &str = "routing_profiles.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileKind {
     Vmess,
     Vless,
+    Shadowsocks,
+    Trojan,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -56,6 +58,8 @@ pub struct ParsedProfile {
     pub address: String,
     pub port: u16,
     pub uuid: String,
+    pub password: Option<String>,
+    pub method: Option<String>,
     pub alter_id: u16,
     pub security: String,
     pub transport: String,
@@ -74,6 +78,8 @@ impl std::fmt::Debug for ParsedProfile {
             .field("address", &"[REDACTED]")
             .field("port", &self.port)
             .field("uuid", &"[REDACTED]")
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("method", &self.method)
             .field("alter_id", &self.alter_id)
             .field("security", &self.security)
             .field("transport", &self.transport)
@@ -111,9 +117,9 @@ impl ProfileStore {
     pub fn load(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let path = data_dir.into().join(PROFILES_FILE);
         let state = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).context("reading V2Ray profiles")?,
+            Ok(contents) => serde_json::from_str(&contents).context("reading routing profiles")?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProfileFile::default(),
-            Err(error) => return Err(error).context("opening V2Ray profiles"),
+            Err(error) => return Err(error).context("opening routing profiles"),
         };
         Ok(Self {
             path,
@@ -270,18 +276,18 @@ impl ProfileStore {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).context("creating profile data directory")?;
         let tmp = self.path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(state).context("serializing V2Ray profiles")?;
+        let bytes = serde_json::to_vec_pretty(state).context("serializing routing profiles")?;
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&tmp)
-            .context("writing temporary V2Ray profiles")?;
+            .context("writing temporary routing profiles")?;
         restrict(&file)?;
-        file.write_all(&bytes).context("writing V2Ray profiles")?;
-        file.sync_all().context("flushing V2Ray profiles")?;
+        file.write_all(&bytes).context("writing routing profiles")?;
+        file.sync_all().context("flushing routing profiles")?;
         drop(file);
-        fs::rename(&tmp, &self.path).context("atomically replacing V2Ray profiles")?;
+        fs::rename(&tmp, &self.path).context("atomically replacing routing profiles")?;
         restrict_path(&self.path)?;
         Ok(())
     }
@@ -299,6 +305,7 @@ pub struct RouteManager {
     sing_box_path: PathBuf,
     work_dir: PathBuf,
     active: Mutex<Option<ActiveCore>>,
+    pending_previous: Mutex<Option<ActiveCore>>,
 }
 
 impl RouteManager {
@@ -307,6 +314,7 @@ impl RouteManager {
             sing_box_path: sing_box_path.into(),
             work_dir: work_dir.into(),
             active: Mutex::new(None),
+            pending_previous: Mutex::new(None),
         }
     }
 
@@ -366,20 +374,55 @@ impl RouteManager {
             proxy: proxy.clone(),
         });
         drop(active);
-        if let Some(mut old) = previous {
-            let _ = old.child.kill();
-            let _ = old.child.wait();
-            let _ = fs::remove_file(old.config_path);
-        }
+        *self
+            .pending_previous
+            .lock()
+            .expect("route manager lock poisoned") = previous;
         Ok(proxy)
+    }
+
+    pub fn commit(&self) {
+        if let Some(previous) = self
+            .pending_previous
+            .lock()
+            .expect("route manager lock poisoned")
+            .take()
+        {
+            cleanup_core(previous);
+        }
+    }
+
+    pub fn rollback(&self) {
+        let previous = self
+            .pending_previous
+            .lock()
+            .expect("route manager lock poisoned")
+            .take();
+        let failed = self
+            .active
+            .lock()
+            .expect("route manager lock poisoned")
+            .take();
+        if let Some(failed) = failed {
+            cleanup_core(failed);
+        }
+        if let Some(previous) = previous {
+            *self.active.lock().expect("route manager lock poisoned") = Some(previous);
+        }
     }
 
     pub fn stop(&self) {
         let mut active = self.active.lock().expect("route manager lock poisoned");
-        if let Some(mut core) = active.take() {
-            let _ = core.child.kill();
-            let _ = core.child.wait();
-            let _ = fs::remove_file(core.config_path);
+        if let Some(core) = active.take() {
+            cleanup_core(core);
+        }
+        if let Some(previous) = self
+            .pending_previous
+            .lock()
+            .expect("route manager lock poisoned")
+            .take()
+        {
+            cleanup_core(previous);
         }
     }
 }
@@ -390,11 +433,21 @@ impl Drop for RouteManager {
     }
 }
 
+fn cleanup_core(mut core: ActiveCore) {
+    let _ = core.child.kill();
+    let _ = core.child.wait();
+    let _ = fs::remove_file(core.config_path);
+}
+
 pub fn parse_share_url(input: &str) -> Result<ParsedProfile> {
     if input.starts_with("vmess://") {
         parse_vmess(input)
     } else if input.starts_with("vless://") {
         parse_vless(input)
+    } else if input.starts_with("ss://") {
+        parse_shadowsocks(input)
+    } else if input.starts_with("trojan://") {
+        parse_trojan(input)
     } else {
         anyhow::bail!("unsupported routing profile format")
     }
@@ -432,6 +485,8 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile> {
         address,
         port,
         uuid,
+        password: None,
+        method: None,
         alter_id: string("aid").parse().unwrap_or(0),
         security: if string("scy").is_empty() {
             "auto"
@@ -484,6 +539,8 @@ fn parse_vless(input: &str) -> Result<ParsedProfile> {
         address: address.to_string(),
         port,
         uuid: uuid.to_string(),
+        password: None,
+        method: None,
         alter_id: 0,
         security: security.to_string(),
         transport: transport.to_string(),
@@ -494,24 +551,129 @@ fn parse_vless(input: &str) -> Result<ParsedProfile> {
     })
 }
 
+fn parse_shadowsocks(input: &str) -> Result<ParsedProfile> {
+    let value = input
+        .strip_prefix("ss://")
+        .ok_or_else(|| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    let (value, name) = value.split_once('#').unwrap_or((value, ""));
+    let (authority, _) = value.split_once('?').unwrap_or((value, ""));
+    let (encoded_user, host_port) = authority
+        .rsplit_once('@')
+        .ok_or_else(|| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    let user = String::from_utf8(base64_decode(&percent_decode(encoded_user))?)
+        .map_err(|_| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    let (method, password) = user
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    let (address, port) = host_port
+        .trim_end_matches('/')
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid Shadowsocks profile"))?;
+    if method.is_empty() || password.is_empty() || address.is_empty() || port == 0 {
+        anyhow::bail!("Shadowsocks profile is missing required fields");
+    }
+    Ok(ParsedProfile {
+        kind: ProfileKind::Shadowsocks,
+        name: percent_decode(name),
+        address: percent_decode(address),
+        port,
+        uuid: String::new(),
+        alter_id: 0,
+        password: Some(percent_decode(password)),
+        method: Some(percent_decode(method)),
+        security: String::new(),
+        transport: String::new(),
+        host: None,
+        path: None,
+        tls: false,
+        sni: None,
+    })
+}
+
+fn parse_trojan(input: &str) -> Result<ParsedProfile> {
+    let value = input
+        .strip_prefix("trojan://")
+        .ok_or_else(|| anyhow::anyhow!("invalid Trojan profile"))?;
+    let (value, name) = value.split_once('#').unwrap_or((value, ""));
+    let (authority, query) = value.split_once('?').unwrap_or((value, ""));
+    let (password, host_port) = authority
+        .split_once('@')
+        .ok_or_else(|| anyhow::anyhow!("invalid Trojan profile"))?;
+    let (address, port) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid Trojan profile"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid Trojan profile"))?;
+    let params = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect::<std::collections::HashMap<_, _>>();
+    let security = params.get("security").copied().unwrap_or("tls");
+    if security != "tls" {
+        anyhow::bail!("unsupported Trojan security");
+    }
+    if password.is_empty() || address.is_empty() || port == 0 {
+        anyhow::bail!("Trojan profile is missing required fields");
+    }
+    Ok(ParsedProfile {
+        kind: ProfileKind::Trojan,
+        name: percent_decode(name),
+        address: percent_decode(address),
+        port,
+        uuid: String::new(),
+        alter_id: 0,
+        password: Some(percent_decode(password)),
+        method: None,
+        security: security.to_string(),
+        transport: "tcp".to_string(),
+        host: None,
+        path: None,
+        tls: true,
+        sni: params.get("sni").map(|value| percent_decode(value)),
+    })
+}
+
 fn generate_config(profile: &ParsedProfile, port: u16) -> Result<serde_json::Value> {
     let outbound_type = match profile.kind {
         ProfileKind::Vmess => "vmess",
         ProfileKind::Vless => "vless",
+        ProfileKind::Shadowsocks => "shadowsocks",
+        ProfileKind::Trojan => "trojan",
     };
-    let mut outbound = serde_json::json!({
-        "type": outbound_type,
-        "tag": "proxy",
-        "server": profile.address,
-        "server_port": profile.port,
-        "uuid": profile.uuid,
-        "security": profile.security,
-        "transport": {
-            "type": profile.transport,
-            "path": profile.path,
-            "headers": profile.host.as_ref().map(|host| serde_json::json!({"Host": host}))
-        }
-    });
+    let mut outbound = match profile.kind {
+        ProfileKind::Shadowsocks => serde_json::json!({
+            "type": outbound_type,
+            "tag": "proxy",
+            "server": profile.address,
+            "server_port": profile.port,
+            "method": profile.method,
+            "password": profile.password,
+        }),
+        ProfileKind::Trojan => serde_json::json!({
+            "type": outbound_type,
+            "tag": "proxy",
+            "server": profile.address,
+            "server_port": profile.port,
+            "password": profile.password,
+        }),
+        _ => serde_json::json!({
+            "type": outbound_type,
+            "tag": "proxy",
+            "server": profile.address,
+            "server_port": profile.port,
+            "uuid": profile.uuid,
+            "security": profile.security,
+            "transport": {
+                "type": profile.transport,
+                "path": profile.path,
+                "headers": profile.host.as_ref().map(|host| serde_json::json!({"Host": host}))
+            }
+        }),
+    };
     if profile.kind == ProfileKind::Vmess {
         outbound["alter_id"] = serde_json::json!(profile.alter_id);
     }
@@ -678,14 +840,55 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_incomplete_profiles() {
-        assert!(parse_share_url("trojan://secret@example.com:443").is_err());
+        assert!(parse_share_url("trojan://secret@example.com").is_err());
         assert!(parse_share_url("vless://uuid@example.com").is_err());
         assert!(parse_share_url("vmess://not-base64").is_err());
     }
 
     #[test]
+    fn parses_shadowsocks_sip002_without_exposing_secret() {
+        let profile =
+            parse_share_url("ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388#office").unwrap();
+        assert_eq!(profile.kind, ProfileKind::Shadowsocks);
+        assert_eq!(profile.method.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(profile.password.as_deref(), Some("secret"));
+        assert_eq!(profile.name, "office");
+        assert!(!format!("{profile:?}").contains("secret"));
+    }
+
+    #[test]
+    fn parses_trojan_with_tls_sni() {
+        let profile =
+            parse_share_url("trojan://secret@example.com:443?security=tls&sni=cdn.example#edge")
+                .unwrap();
+        assert_eq!(profile.kind, ProfileKind::Trojan);
+        assert_eq!(profile.password.as_deref(), Some("secret"));
+        assert_eq!(profile.sni.as_deref(), Some("cdn.example"));
+        assert!(profile.tls);
+    }
+
+    #[test]
+    fn generates_protocol_specific_sing_box_outbounds() {
+        let shadowsocks =
+            parse_share_url("ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388").unwrap();
+        let shadowsocks_config = generate_config(&shadowsocks, 12345).unwrap();
+        let shadowsocks_outbound = &shadowsocks_config["outbounds"][0];
+        assert_eq!(shadowsocks_outbound["type"], "shadowsocks");
+        assert_eq!(shadowsocks_outbound["method"], "aes-256-gcm");
+        assert_eq!(shadowsocks_outbound["password"], "secret");
+        assert!(shadowsocks_outbound.get("uuid").is_none());
+
+        let trojan = parse_share_url("trojan://secret@example.com:443").unwrap();
+        let trojan_config = generate_config(&trojan, 12345).unwrap();
+        let trojan_outbound = &trojan_config["outbounds"][0];
+        assert_eq!(trojan_outbound["type"], "trojan");
+        assert_eq!(trojan_outbound["password"], "secret");
+        assert_eq!(trojan_outbound["tls"]["enabled"], true);
+    }
+
+    #[test]
     fn persists_atomically_with_restrictive_permissions() {
-        let root = std::env::temp_dir().join(format!("crab-v2ray-{}", epoch()));
+        let root = std::env::temp_dir().join(format!("crab-routing-{}", epoch()));
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::load(&root).unwrap();
         store
@@ -704,13 +907,13 @@ mod tests {
         assert!(!store.list()[0].name.is_empty());
         let raw = fs::read_to_string(root.join(PROFILES_FILE)).unwrap();
         assert!(raw.contains("11111111"));
-        assert!(!root.join("v2ray_profiles.json.tmp").exists());
+        assert!(!root.join("routing_profiles.json.tmp").exists());
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn clear_active_preserves_profiles_and_persists_disabled_state() {
-        let root = std::env::temp_dir().join(format!("crab-v2ray-clear-{}", epoch()));
+        let root = std::env::temp_dir().join(format!("crab-routing-clear-{}", epoch()));
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::load(&root).unwrap();
         let created = store

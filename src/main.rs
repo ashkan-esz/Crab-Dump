@@ -27,16 +27,16 @@ mod database_state;
 mod dump;
 mod encrypt;
 mod history;
+mod routing;
 mod telegram;
 mod telegram_users;
-mod v2ray;
 mod web;
 
 use chunk::ChunkWriter;
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
-use v2ray::{ProfileStore, RouteManager, DEFAULT_SING_BOX_PATH};
+use routing::{ProfileStore, RouteManager, DEFAULT_SING_BOX_PATH};
 
 type ClientHandle = Arc<RwLock<Arc<Client>>>;
 
@@ -96,13 +96,13 @@ fn main() -> Result<()> {
         telegram_users::TelegramUserStore::load(data_dir.join("telegram_users.toml"))
             .context("loading Telegram users directory")?,
     );
-    let v2ray_profiles =
+    let routing_profiles =
         Arc::new(ProfileStore::load(&data_dir).context("loading routing profiles")?);
     let route_manager = Arc::new(RouteManager::new(
         shared_cfg.work_dir.join("sing-box"),
         std::env::var("SING_BOX_PATH").unwrap_or_else(|_| DEFAULT_SING_BOX_PATH.to_string()),
     ));
-    if let Some(active_url) = v2ray_profiles.active_url() {
+    if let Some(active_url) = routing_profiles.active_url() {
         if shared_cfg.socks_proxy.is_some() {
             anyhow::bail!(
                 "SOCKS_PROXY cannot be combined with an active dashboard routing profile"
@@ -141,7 +141,7 @@ fn main() -> Result<()> {
         .clone()
         .zip(shared_cfg.dashboard_viewer_password.clone());
     let dashboard_users = Arc::clone(&telegram_users);
-    let dashboard_profiles = Arc::clone(&v2ray_profiles);
+    let dashboard_profiles = Arc::clone(&routing_profiles);
     let dashboard_route = Arc::clone(&route_manager);
     let dashboard_client = Arc::clone(&telegram_client);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
