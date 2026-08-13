@@ -12,9 +12,9 @@
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::SystemTime;
 
 use crate::database_state::DatabaseStateStore;
@@ -99,6 +99,91 @@ static DUMP_STATUSES: LazyLock<RwLock<HashMap<String, DbStatus>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static DATABASE_STATES: LazyLock<RwLock<Option<std::sync::Arc<DatabaseStateStore>>>> =
     LazyLock::new(|| RwLock::new(None));
+
+/// Process-wide handoff between dashboard requests and the blocking scheduler.
+///
+/// Pending and active names are kept together so a manual request cannot be
+/// accepted twice, and scheduled execution can use the same active-run guard.
+#[derive(Debug, Default)]
+struct ManualBackupState {
+    pending: VecDeque<String>,
+    pending_set: HashSet<String>,
+    active: HashSet<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ManualBackupController {
+    state: Mutex<ManualBackupState>,
+    wake: Condvar,
+}
+
+impl ManualBackupController {
+    pub fn request(&self, name: &str) -> bool {
+        let mut state = self.state.lock().expect("manual backup lock poisoned");
+        if state.active.contains(name) || !state.pending_set.insert(name.to_string()) {
+            return false;
+        }
+        state.pending.push_back(name.to_string());
+        self.wake.notify_one();
+        true
+    }
+
+    pub fn take_pending(&self) -> Vec<String> {
+        let mut state = self.state.lock().expect("manual backup lock poisoned");
+        let mut names = Vec::with_capacity(state.pending.len());
+        while let Some(name) = state.pending.pop_front() {
+            state.pending_set.remove(&name);
+            state.active.insert(name.clone());
+            names.push(name);
+        }
+        names
+    }
+
+    pub fn claim_scheduled(&self, name: &str) -> bool {
+        let mut state = self.state.lock().expect("manual backup lock poisoned");
+        if state.active.contains(name) || state.pending_set.contains(name) {
+            return false;
+        }
+        state.active.insert(name.to_string());
+        true
+    }
+
+    pub fn finish(&self, name: &str) {
+        self.state
+            .lock()
+            .expect("manual backup lock poisoned")
+            .active
+            .remove(name);
+    }
+
+    pub fn wait_for_wake(&self, timeout: std::time::Duration) -> bool {
+        let state = self.state.lock().expect("manual backup lock poisoned");
+        if !state.pending.is_empty() {
+            return true;
+        }
+        let (state, _) = self
+            .wake
+            .wait_timeout(state, timeout)
+            .expect("manual backup lock poisoned");
+        !state.pending.is_empty()
+    }
+
+    #[cfg(test)]
+    fn is_active(&self, name: &str) -> bool {
+        self.state
+            .lock()
+            .expect("manual backup lock poisoned")
+            .active
+            .contains(name)
+    }
+}
+
+static MANUAL_BACKUPS: LazyLock<Arc<ManualBackupController>> =
+    LazyLock::new(|| Arc::new(ManualBackupController::default()));
+
+pub fn manual_backup_controller() -> Arc<ManualBackupController> {
+    Arc::clone(&MANUAL_BACKUPS)
+}
 
 // ===========================================================================
 // Public API — Telegram service status
@@ -240,6 +325,13 @@ pub fn fail_db(db_name: &str, detail: impl Into<String>) {
 fn get_dump_status(db_name: &str) -> Option<u8> {
     let statuses = DUMP_STATUSES.read().expect("dump status lock poisoned");
     statuses.get(db_name).map(|s| s.code)
+}
+
+fn known_database(db_name: &str) -> bool {
+    DUMP_STATUSES
+        .read()
+        .expect("dump status lock poisoned")
+        .contains_key(db_name)
 }
 
 /// Compute the aggregated dump status across all tracked databases.
@@ -536,11 +628,34 @@ async fn api_databases_list() -> impl Responder {
     HttpResponse::Ok().json(entries)
 }
 
-async fn api_database_toggle(
+async fn api_database_action(
     path: web::Path<(String, String)>,
     history: web::Data<std::sync::Arc<HistoryStore>>,
 ) -> impl Responder {
     let (name, action) = path.into_inner();
+    if action == "backup" {
+        if !known_database(&name) {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": format!("Unknown database: {name}")}));
+        }
+        if !database_state_store().is_enabled(&name) {
+            return HttpResponse::Conflict()
+                .json(serde_json::json!({"error": "Database is disabled"}));
+        }
+        if !manual_backup_controller().request(&name) {
+            return HttpResponse::Conflict().json(
+                serde_json::json!({"error": "Database backup is already running or queued"}),
+            );
+        }
+        set_db_status(
+            &name,
+            1,
+            "queued",
+            "Manual backup queued — waiting to start",
+        );
+        return HttpResponse::Accepted()
+            .json(serde_json::json!({"name": name, "status": "queued"}));
+    }
     if !matches!(action.as_str(), "enable" | "disable") {
         return HttpResponse::NotFound()
             .json(serde_json::json!({"error": "Unknown database action"}));
@@ -571,6 +686,7 @@ async fn api_database_toggle(
         ended_at: now,
         database_index: 0,
         database_name: name.clone(),
+        source: "scheduled".into(),
         status: action,
         error: None,
         dump_bytes: 0,
@@ -648,7 +764,7 @@ pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> s
             .route("/api/status/databases", web::get().to(api_databases_list))
             .route(
                 "/api/status/database/{name}/{action}",
-                web::post().to(api_database_toggle),
+                web::post().to(api_database_action),
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
             .route("/api/info", web::get().to(api_config))
@@ -749,5 +865,17 @@ mod tests {
         set_db_transfer("test-absent", 1, 2, 3.0);
         let statuses = DUMP_STATUSES.read().expect("dump status lock poisoned");
         assert!(statuses.get("test-absent").is_none());
+    }
+
+    #[test]
+    fn manual_controller_rejects_duplicate_and_active_names() {
+        let controller = ManualBackupController::default();
+        assert!(controller.request("app"));
+        assert!(!controller.request("app"));
+        assert_eq!(controller.take_pending(), vec!["app"]);
+        assert!(controller.is_active("app"));
+        assert!(!controller.request("app"));
+        controller.finish("app");
+        assert!(controller.request("app"));
     }
 }

@@ -183,8 +183,13 @@ fn main() -> Result<()> {
 
     // ── One-shot mode ───────────────────────────────────────────────────────
     web::set_cycle_running(true);
-    let (results, failures) =
-        run_cycle(&shared_cfg, &databases, cli.no_encryption, &telegram_client);
+    let (results, failures) = run_cycle(
+        &shared_cfg,
+        &databases,
+        cli.no_encryption,
+        &telegram_client,
+        BackupSource::OneShot,
+    );
     web::set_cycle_running(false);
 
     // A partial run must not look like a clean one to cron/systemd, but the
@@ -232,6 +237,7 @@ fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: 
                 occurrence,
                 "history upload",
                 web::set_next_history_run_in,
+                &web::ManualBackupController::default(),
             );
             if let Err(error) = upload_active_history(
                 &history, &work_dir, chunk_size, &client, &bot_token, &chat_ids,
@@ -353,11 +359,30 @@ fn run_scheduled(
     }
     web::set_schedule_label(schedule_label(schedule));
 
+    let controller = web::manual_backup_controller();
+    let mut next_interval = None;
     for cycle in 1u64.. {
+        if run_manual_requests(cfg, databases, no_encryption, client, &controller) {
+            continue;
+        }
+
         // A cron schedule has to reach its first matching time before the first
         // cycle; an interval schedule backs up straight away.
         if let Schedule::Cron(expr) = schedule {
-            sleep_until_cron(expr, cycle, "backup", web::set_next_backup_run_in);
+            if sleep_until_cron(
+                expr,
+                cycle,
+                "backup",
+                web::set_next_backup_run_in,
+                &controller,
+            ) {
+                continue;
+            }
+        } else if let Some(remaining) = next_interval.take() {
+            web::set_next_backup_run_in(remaining);
+            if controller.wait_for_wake(remaining) {
+                continue;
+            }
         }
 
         let cycle_started = std::time::Instant::now();
@@ -373,7 +398,13 @@ fn run_scheduled(
             );
         }
 
-        let (results, failures) = run_cycle(cfg, databases, no_encryption, client);
+        let (results, failures) = run_cycle(
+            cfg,
+            databases,
+            no_encryption,
+            client,
+            BackupSource::Scheduled,
+        );
         web::set_cycle_running(false);
 
         // A failing database is reported and then forgotten: the next cycle
@@ -404,7 +435,7 @@ fn run_scheduled(
                         "sleeping until the next backup cycle",
                     );
                     web::set_next_backup_run_in(remaining);
-                    std::thread::sleep(remaining);
+                    next_interval = Some(remaining);
                 }
                 None => tracing::warn!(
                     cycle,
@@ -416,6 +447,42 @@ fn run_scheduled(
             }
         }
     }
+}
+
+/// Drain all dashboard requests that arrived while the scheduler was asleep
+/// or while a scheduled cycle was running.
+fn run_manual_requests(
+    cfg: &SharedConfig,
+    databases: &[DatabaseConfig],
+    no_encryption: bool,
+    client: &Arc<Client>,
+    controller: &Arc<web::ManualBackupController>,
+) -> bool {
+    let names = controller.take_pending();
+    if names.is_empty() {
+        return false;
+    }
+    let indices = names
+        .iter()
+        .filter_map(|name| databases.iter().position(|db| db.display_name() == *name))
+        .collect::<Vec<_>>();
+    if !indices.is_empty() {
+        web::set_cycle_running(true);
+        let _ = execute_database_indices(
+            cfg,
+            databases,
+            &indices,
+            no_encryption,
+            client,
+            BackupSource::Manual,
+            true,
+        );
+        web::set_cycle_running(false);
+    }
+    for name in names {
+        controller.finish(&name);
+    }
+    true
 }
 
 /// Sleep until the next local time matching `expr`.
@@ -434,7 +501,8 @@ fn sleep_until_cron(
     cycle: u64,
     schedule_name: &str,
     set_next_run: fn(std::time::Duration),
-) {
+    controller: &web::ManualBackupController,
+) -> bool {
     let now = chrono::Local::now().naive_local();
     // `Cron::parse` rejects expressions that can never fire, so `None` here
     // would mean the clock has run past the four-year search window. Fire now
@@ -446,7 +514,7 @@ fn sleep_until_cron(
             "cannot determine the next firing time from the current clock; \
              running this schedule immediately",
         );
-        return;
+        return false;
     };
 
     tracing::info!(
@@ -463,8 +531,11 @@ fn sleep_until_cron(
     }
 
     while let Some(slice) = sleep_slice(chrono::Local::now().naive_local(), target) {
-        std::thread::sleep(slice);
+        if controller.wait_for_wake(slice) {
+            return true;
+        }
     }
+    false
 }
 
 /// How the dashboard should describe the schedule it is running on.
@@ -520,13 +591,28 @@ fn run_cycle(
     databases: &[DatabaseConfig],
     no_encryption: bool,
     client: &Arc<Client>,
+    source: BackupSource,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
+    let controller = web::manual_backup_controller();
     let active = databases
         .iter()
-        .filter(|db| web::database_state_store().is_enabled(&db.display_name()))
-        .cloned()
+        .enumerate()
+        .filter(|(_, db)| {
+            web::database_state_store().is_enabled(&db.display_name())
+                && (source == BackupSource::OneShot
+                    || controller.claim_scheduled(&db.display_name()))
+        })
+        .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let (results, failures) = execute_all_databases(cfg, &active, no_encryption, client);
+    let (results, failures) = execute_database_indices(
+        cfg,
+        databases,
+        &active,
+        no_encryption,
+        client,
+        source,
+        source == BackupSource::Scheduled,
+    );
 
     print_manifest(&results, &failures);
 
@@ -537,6 +623,23 @@ fn run_cycle(
     );
 
     (results, failures)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackupSource {
+    Manual,
+    Scheduled,
+    OneShot,
+}
+
+impl BackupSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Scheduled => "scheduled",
+            Self::OneShot => "one-shot",
+        }
+    }
 }
 
 /// Result produced by a single database backup pipeline.
@@ -668,6 +771,7 @@ fn run_database(
     db_index: usize,
     no_encryption: bool,
     client: &Client,
+    source: BackupSource,
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
@@ -709,6 +813,7 @@ fn run_database(
                 ended_at: history::timestamp(ended),
                 database_index: db_index,
                 database_name: db_name.clone(),
+                source: source.as_str().into(),
                 status: "success".into(),
                 error: None,
                 dump_bytes: metrics.dump_bytes,
@@ -731,6 +836,7 @@ fn run_database(
                 ended_at: history::timestamp(ended),
                 database_index: db_index,
                 database_name: db_name.clone(),
+                source: source.as_str().into(),
                 status: "failure".into(),
                 error: Some(history::sanitize_error(
                     &format!("{error:#}"),
@@ -1005,7 +1111,7 @@ fn rate(bytes: u64, since: &SystemTime) -> f64 {
     }
 }
 
-/// Execute backups for all configured databases.
+/// Execute selected databases with the existing bounded worker pool.
 ///
 /// Runs at most `cfg.max_parallel_databases` pipelines at the same time; the
 /// rest wait for a free slot. Individual failures never cancel other databases
@@ -1014,18 +1120,24 @@ fn rate(bytes: u64, since: &SystemTime) -> f64 {
 ///
 /// Returns the successes and the per-database failures; the caller reports both
 /// and decides the exit code.
-fn execute_all_databases(
+fn execute_database_indices(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
+    indices: &[usize],
     no_encryption: bool,
     client: &Arc<Client>,
+    source: BackupSource,
+    already_claimed: bool,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
     // Never start more workers than there is work for them. With a single
     // database this is one worker, which is the sequential path — no special
     // case needed, and no path that skips failure collection.
-    let workers = cfg.max_parallel_databases.min(databases.len()).max(1);
+    if indices.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let workers = cfg.max_parallel_databases.min(indices.len()).max(1);
     tracing::info!(
-        count = databases.len(),
+        count = indices.len(),
         max_parallel = cfg.max_parallel_databases,
         workers,
         "spawning parallel database backups"
@@ -1035,17 +1147,29 @@ fn execute_all_databases(
     // taking the next queued database as soon as it frees up. A panic inside a
     // pipeline is caught here so the remaining databases keep going and the
     // failure is still attributed to the database that caused it.
-    let outcomes = run_bounded(databases, workers, |i, db| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_database(cfg, db, i, no_encryption, client)
-        }))
+    let outcomes = run_bounded(indices, workers, |job_index, db_index| {
+        let db = &databases[*db_index];
+        let name = db.display_name();
+        if !already_claimed && !web::manual_backup_controller().claim_scheduled(&name) {
+            return None;
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_database(cfg, db, *db_index, no_encryption, client, source)
+        }));
+        if !already_claimed || source == BackupSource::Scheduled {
+            web::manual_backup_controller().finish(&name);
+        }
+        Some((job_index, outcome))
     });
+
+    let outcomes = outcomes.into_iter().flatten().collect::<Vec<_>>();
 
     // Collect results, tracking successes and failures independently.
     let mut results = Vec::new();
     let mut errors: Vec<DatabaseFailure> = Vec::new();
 
-    for (i, outcome) in outcomes.into_iter().enumerate() {
+    for (job_index, outcome) in outcomes {
+        let i = indices[job_index];
         let db_name = databases[i].display_name();
         match outcome {
             Ok(Ok(result)) => {
@@ -1095,6 +1219,7 @@ fn execute_all_databases(
                         ended_at: history::timestamp(now),
                         database_index: i,
                         database_name: databases[i].display_name(),
+                        source: source.as_str().into(),
                         status: "failure".into(),
                         error: Some(history::sanitize_error(
                             &format!("panicked: {panic_msg}"),

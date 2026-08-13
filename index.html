@@ -298,6 +298,7 @@
         .history-table .success { color: var(--up); } .history-table .failure { color: var(--err); }
         .history-table .action { color: var(--text-muted); }
         .history-table .action-disable { color: var(--warn); }
+        .history-table .manual-source { color: var(--accent); font-weight: 650; }
         .db-card.disabled {
             opacity: .86;
             border-style: dashed;
@@ -392,6 +393,22 @@
             text-align: right;
         }
         .db-toggle-error[hidden] { display: none; }
+        .db-backup {
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            background: transparent;
+            color: var(--accent);
+            cursor: pointer;
+            padding: .38rem .65rem;
+            font-size: .68rem;
+            font-weight: 650;
+            font-family: var(--font);
+            white-space: nowrap;
+        }
+        .db-backup:hover { background: rgba(59,130,246,.10); }
+        .db-backup:disabled { cursor: wait; opacity: .7; }
+        .db-backup-error { max-width: 180px; color: var(--err); font-size: .64rem; line-height: 1.3; text-align: right; }
+        .db-backup-error[hidden] { display: none; }
         .history-error { color: var(--err); white-space: normal; min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
         .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
         .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
@@ -897,6 +914,8 @@
     const expandedDatabases = new Set();
     const togglingDatabases = new Set();
     const toggleErrors = new Map();
+    const manualRequests = new Set();
+    const backupErrors = new Map();
 
     /**
      * Derive display state from the backend's (state, stage) pair.
@@ -956,7 +975,9 @@
                         <span class="toggle-track" aria-hidden="true"></span>
                         <span class="db-toggle-label">On</span>
                     </button>
+                    <button class="db-backup" type="button">Backup now</button>
                     <span class="db-toggle-error" role="alert" hidden></span>
+                    <span class="db-backup-error" role="alert" hidden></span>
                 </div>
             </div>
             <section class="db-history" hidden aria-live="polite"></section>`;
@@ -1018,6 +1039,31 @@
             event.stopPropagation();
             toggleDatabase(db.name, !enabled);
         };
+        const backup = el.querySelector('.db-backup');
+        if (manualRequests.has(db.name) && (db.stage === 'done' || db.state === 'DOWN')) {
+            manualRequests.delete(db.name);
+            backupErrors.delete(db.name);
+            historyCache.delete(db.name);
+            if (expandedDatabases.has(db.name)) {
+                queueMicrotask(() => {
+                    const current = dbCards.get(db.name);
+                    if (current) loadHistory(current, true);
+                });
+            }
+        }
+        const busy = manualRequests.has(db.name) || db.state === 'DEGRADED';
+        backup.hidden = !enabled;
+        backup.disabled = !enabled || busy;
+        backup.textContent = manualRequests.has(db.name)
+            ? (db.state === 'DEGRADED' ? 'Running...' : 'Queued...')
+            : 'Backup now';
+        backup.onclick = event => {
+            event.stopPropagation();
+            backupDatabase(db.name);
+        };
+        const backupError = el.querySelector('.db-backup-error');
+        backupError.textContent = backupErrors.get(db.name) || '';
+        backupError.hidden = !backupErrors.has(db.name);
         const toggleError = el.querySelector('.db-toggle-error');
         toggleError.textContent = toggleErrors.get(db.name) || '';
         toggleError.hidden = !toggleErrors.has(db.name);
@@ -1096,6 +1142,7 @@
         const rows = (data.records || []).map(record => `
             <tr>
                 <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
+                <td class="${record.source === 'manual' ? 'manual-source' : ''}">${record.source === 'manual' ? 'Manual' : escapeHtml(record.source || 'Scheduled')}</td>
                 <td class="${['disable', 'disabled'].includes(record.status) ? 'action-disable' : (['enable', 'enabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure'))}">${escapeHtml(record.status)}</td>
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
@@ -1111,7 +1158,7 @@
             </div>
             <div class="history-stats">${stats}</div>
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
-                <thead><tr><th>Started</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <thead><tr><th>Started</th><th>Source</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>` : '<div class="history-muted">No backup history yet.</div>'}`;
     }
@@ -1280,6 +1327,37 @@
                 currentToggle.removeAttribute('aria-busy');
                 currentToggle.disabled = false;
             }
+        }
+    }
+
+    async function backupDatabase(name) {
+        const el = dbCards.get(name);
+        const button = el?.querySelector('.db-backup');
+        manualRequests.add(name);
+        backupErrors.delete(name);
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Queuing...';
+        }
+        try {
+            const res = await fetch(`/api/status/database/${encodeURIComponent(name)}/backup`, { method: 'POST' });
+            if (!res.ok) {
+                const error = new Error(`HTTP ${res.status}`);
+                error.status = res.status;
+                throw error;
+            }
+            await res.json();
+            await refreshDashboard();
+            if (expandedDatabases.has(name)) {
+                const current = dbCards.get(name);
+                if (current) await loadHistory(current, true);
+            }
+        } catch (error) {
+            manualRequests.delete(name);
+            backupErrors.set(name, error.status === 409
+                ? 'Backup already running or queued.'
+                : 'Could not queue backup. Try again.');
+            await refreshDashboard();
         }
     }
 

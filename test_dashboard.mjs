@@ -26,6 +26,8 @@ const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinati
 assert.doesNotMatch(body, /<button class="db-summary"/);
 assert.match(body, /class="db-summary-main"/);
 assert.match(body, /role="switch"/);
+assert.match(body, /class="db-backup"/);
+assert.match(body, /Backup now/);
 assert.match(html, /history-table \.action \{ color: var\(--text-muted\); \}/);
 assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/);
 assert.match(body, /'disable', 'disabled'/);
@@ -109,6 +111,11 @@ const actionHistory = historyMarkup({
         { started_at: '2026-08-13T00:00:00Z', status: 'disable' },
     ],
 });
+const manualHistory = historyMarkup({
+    stats: {},
+    records: [{ started_at: '2026-08-13T00:00:00Z', source: 'manual', status: 'success' }],
+});
+assert.match(manualHistory, /<td class="manual-source">Manual<\/td>/);
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
 assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);
 expandedDatabases.add('app');

@@ -25,6 +25,10 @@ pub struct HistoryRecord {
     pub ended_at: String,
     pub database_index: usize,
     pub database_name: String,
+    /// Origin of the backup attempt. Older JSONL records omit this field and
+    /// deserialize as scheduled attempts for backward compatibility.
+    #[serde(default = "default_source")]
+    pub source: String,
     pub status: String,
     pub error: Option<String>,
     pub dump_bytes: u64,
@@ -36,6 +40,10 @@ pub struct HistoryRecord {
     pub upload_duration_secs: f64,
     pub upload_attempts: u64,
     pub upload_retries: u64,
+}
+
+fn default_source() -> String {
+    "scheduled".into()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,6 +400,7 @@ mod tests {
             ended_at: started_at.into(),
             database_index: 0,
             database_name: "app".into(),
+            source: "scheduled".into(),
             status: "success".into(),
             error: None,
             dump_bytes: 10,
@@ -415,6 +424,7 @@ mod tests {
             "ended_at",
             "database_index",
             "database_name",
+            "source",
             "status",
             "error",
             "dump_bytes",
@@ -432,6 +442,14 @@ mod tests {
         success.status = "failure".into();
         success.error = Some("bad dump".into());
         assert_eq!(serde_json::to_value(success).unwrap()["status"], "failure");
+    }
+
+    #[test]
+    fn old_records_without_source_deserialize_as_scheduled() {
+        let mut value = serde_json::to_value(record("2026-08-01T00:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("source");
+        let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.source, "scheduled");
     }
 
     #[test]
@@ -529,6 +547,9 @@ mod tests {
                 format!("2026-09-{:02}T00:00:00Z", ordinal - 28)
             };
             let mut item = record(&timestamp);
+            if ordinal == 1 {
+                item.source = "manual".into();
+            }
             item.status = if ordinal % 5 == 0 {
                 "failure"
             } else {
