@@ -282,7 +282,6 @@
             padding: 1.05rem 1.15rem; display: flex; flex-direction: column;
             gap: .8rem; text-align: left; font: inherit; cursor: pointer;
         }
-        .db-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
         .db-history { border-top: 1px solid var(--border); padding: 1rem 1.15rem 1.15rem; }
         .db-history[hidden] { display: none; }
         .history-heading { display: flex; justify-content: space-between; gap: .75rem; align-items: baseline; margin-bottom: .8rem; }
@@ -297,14 +296,126 @@
         .history-table th { color: var(--text-muted); font-weight: 600; text-align: left; padding: .4rem .45rem; border-bottom: 1px solid var(--border); }
         .history-table td { padding: .48rem .45rem; border-bottom: 1px solid rgba(30,41,59,.65); font-family: var(--mono); vertical-align: top; }
         .history-table .success { color: var(--up); } .history-table .failure { color: var(--err); }
-        .history-table .action { color: var(--accent); }
-        .db-card.disabled { opacity: .78; }
-        .db-toggle { margin-left: auto; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; padding: .25rem .45rem; font-size: .65rem; }
+        .history-table .action { color: var(--text-muted); }
+        .history-table .action-disable { color: var(--warn); }
+        .db-card.disabled {
+            opacity: .86;
+            border-style: dashed;
+            border-left-color: var(--idle);
+            background: rgba(124,138,160,.055);
+        }
+        .db-card.disabled .db-badge {
+            background: var(--idle-bg);
+            color: var(--text-muted);
+            border-color: var(--idle-border);
+        }
+        .db-summary {
+            flex-direction: row;
+            align-items: flex-start;
+        }
+        .db-summary-main {
+            flex: 1;
+            min-width: 0;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            padding: 0;
+            text-align: left;
+            font: inherit;
+            cursor: pointer;
+        }
+        .db-summary-main:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+            border-radius: 6px;
+        }
+        .db-actions {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: .3rem;
+            margin-left: .8rem;
+        }
+        .db-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: .45rem;
+            min-height: 32px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg);
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: .22rem .55rem .22rem .3rem;
+            font-size: .68rem;
+            font-weight: 650;
+            font-family: var(--font);
+            white-space: nowrap;
+            transition: border-color .2s, color .2s, background .2s;
+        }
         .db-toggle:hover { color: var(--text); border-color: var(--accent); }
+        .db-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .db-toggle:disabled { cursor: wait; opacity: .7; }
+        .db-toggle[aria-checked="true"] { color: var(--up); border-color: var(--up-border); }
+        .db-toggle[aria-checked="false"] { color: var(--text-muted); }
+        .toggle-track {
+            position: relative;
+            width: 28px;
+            height: 16px;
+            border-radius: 999px;
+            background: var(--border);
+            transition: background .2s;
+        }
+        .toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: transform .2s, background .2s;
+        }
+        .db-toggle[aria-checked="true"] .toggle-track { background: rgba(34,197,94,.28); }
+        .db-toggle[aria-checked="true"] .toggle-track::after {
+            transform: translateX(12px);
+            background: var(--up);
+        }
+        .db-toggle-label { min-width: 2.8rem; text-align: left; }
+        .db-toggle-error {
+            max-width: 180px;
+            color: var(--err);
+            font-size: .64rem;
+            line-height: 1.3;
+            text-align: right;
+        }
+        .db-toggle-error[hidden] { display: none; }
         .history-error { color: var(--err); white-space: normal; min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
         .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
         .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
         .history-skeleton { display: grid; gap: .55rem; }
+        .db-group { display: flex; flex-direction: column; gap: .8rem; }
+        .db-group-list { display: flex; flex-direction: column; gap: 1rem; }
+        .db-group[hidden] { display: none; }
+        .db-group-heading {
+            display: flex;
+            align-items: baseline;
+            gap: .55rem;
+            margin-top: .2rem;
+            color: var(--text-muted);
+            font-size: .7rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .db-group-heading::after {
+            content: '';
+            height: 1px;
+            flex: 1;
+            background: var(--border);
+        }
         @media (max-width: 720px) { .history-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
         /* State accents — border-color first, then the left edge overrides it */
@@ -334,9 +445,7 @@
             font-size: .92rem;
             font-weight: 600;
             color: var(--text);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            overflow-wrap: anywhere;
         }
         .db-badge {
             flex-shrink: 0;
@@ -557,14 +666,14 @@
 
     <!-- Server info bar -->
     <div class="info-bar">
-        <span class="info-chip"><span class="icon">&#x1f310;</span> Host: <strong id="infoHost">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f3e2;</span> Port: <strong id="infoPort">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f5d3;</span> Backup: <strong id="infoBackupSchedule">—</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f4c5;</span> History upload: <strong id="infoHistorySchedule">—</strong></span>
-        <span class="info-chip" id="infoPhaseChip"><span class="icon">&#x1f504;</span> State: <strong id="infoPhase">—</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f310;</span> Host: <strong id="infoHost">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f3e2;</span> Port: <strong id="infoPort">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f5d3;</span> Backup: <strong id="infoBackupSchedule">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f4c5;</span> History upload: <strong id="infoHistorySchedule">-</strong></span>
+        <span class="info-chip" id="infoPhaseChip"><span class="icon">&#x1f504;</span> State: <strong id="infoPhase">-</strong></span>
     </div>
 
     <!-- Main status grid (Telegram + aggregated dump) -->
@@ -607,7 +716,16 @@
             <span class="hint">dump → package → upload</span>
         </div>
         <div class="summary-row" id="dbSummary"></div>
-        <div class="db-grid" id="dbGrid"></div>
+        <div class="db-grid" id="dbGrid">
+            <div class="db-group" id="activeDbGroup">
+                <div class="db-group-heading">Active databases</div>
+                <div class="db-group-list" id="activeDbList"></div>
+            </div>
+            <div class="db-group" id="disabledDbGroup" hidden>
+                <div class="db-group-heading">Disabled databases</div>
+                <div class="db-group-list" id="disabledDbList"></div>
+            </div>
+        </div>
     </div>
 
     <!-- Controls -->
@@ -663,7 +781,7 @@
 
     /** Format throughput; a dash when nothing is moving. */
     function fmtSpeed(bps) {
-        return bps > 0 ? `${fmtBytes(bps)}/s` : '—';
+        return bps > 0 ? `${fmtBytes(bps)}/s` : '-';
     }
 
     function telegramDestinationText(count) {
@@ -777,6 +895,8 @@
     const dbCards = new Map();
     const historyCache = new Map();
     const expandedDatabases = new Set();
+    const togglingDatabases = new Set();
+    const toggleErrors = new Map();
 
     /**
      * Derive display state from the backend's (state, stage) pair.
@@ -812,27 +932,35 @@
         const el = document.createElement('article');
         el.className = 'db-card';
         el.innerHTML = `
-            <button class="db-summary" type="button" aria-expanded="false">
-                <div class="db-top">
-                    <span class="db-dot"></span>
-                    <span class="db-name"></span>
-                    <span class="db-badge"></span>
-                    <button class="db-toggle" type="button"></button>
+            <div class="db-summary">
+                <button class="db-summary-main" type="button" aria-expanded="false">
+                    <div class="db-top">
+                        <span class="db-dot"></span>
+                        <span class="db-name"></span>
+                        <span class="db-badge"></span>
+                    </div>
+                    <div class="db-step"><span class="step-icon"></span><span class="step-text"></span></div>
+                    <div class="db-transfer" hidden>
+                        <div class="tr-bar"><span></span></div>
+                        <div class="tr-meta"><span class="tr-size"></span><span class="tr-speed"></span></div>
+                    </div>
+                    <div class="db-size" hidden></div>
+                    <div class="db-timeline">
+                        ${STAGES.map((s, i) => `${i ? '<span class="tl-bar"></span>' : ''}
+                        <span class="tl-stage"><span class="tl-node"></span><span class="tl-label">${s}</span></span>`).join('')}
+                    </div>
+                    <div class="db-foot"><span class="db-stage"></span><span class="db-updated"></span></div>
+                </button>
+                <div class="db-actions">
+                    <button class="db-toggle" type="button" role="switch" aria-checked="true">
+                        <span class="toggle-track" aria-hidden="true"></span>
+                        <span class="db-toggle-label">On</span>
+                    </button>
+                    <span class="db-toggle-error" role="alert" hidden></span>
                 </div>
-                <div class="db-step"><span class="step-icon"></span><span class="step-text"></span></div>
-                <div class="db-transfer" hidden>
-                    <div class="tr-bar"><span></span></div>
-                    <div class="tr-meta"><span class="tr-size"></span><span class="tr-speed"></span></div>
-                </div>
-                <div class="db-size" hidden></div>
-                <div class="db-timeline">
-                    ${STAGES.map((s, i) => `${i ? '<span class="tl-bar"></span>' : ''}
-                    <span class="tl-stage"><span class="tl-node"></span><span class="tl-label">${s}</span></span>`).join('')}
-                </div>
-                <div class="db-foot"><span class="db-stage"></span><span class="db-updated"></span></div>
-            </button>
+            </div>
             <section class="db-history" hidden aria-live="polite"></section>`;
-        el.querySelector('.db-summary').addEventListener('click', () => toggleHistory(el));
+        el.querySelector('.db-summary-main').addEventListener('click', () => toggleHistory(el));
         return el;
     }
 
@@ -876,25 +1004,36 @@
 
         const name = el.querySelector('.db-name');
         name.textContent = db.name;
-        name.title = db.name;
+        name.removeAttribute('title');
         el.querySelector('.db-badge').textContent = v.badge;
         const toggle = el.querySelector('.db-toggle');
-        toggle.textContent = db.enabled === false ? 'Enable' : 'Disable';
+        const enabled = db.enabled !== false;
+        const toggling = togglingDatabases.has(db.name);
+        toggle.setAttribute('aria-checked', String(enabled));
+        toggle.setAttribute('aria-label', `${enabled ? 'Disable' : 'Enable'} ${db.name}`);
+        toggle.disabled = toggling;
+        toggle.querySelector('.db-toggle-label').textContent =
+            toggling ? 'Saving...' : (enabled ? 'On' : 'Off');
         toggle.onclick = event => {
             event.stopPropagation();
-            toggleDatabase(db.name, db.enabled === false);
+            toggleDatabase(db.name, !enabled);
         };
+        const toggleError = el.querySelector('.db-toggle-error');
+        toggleError.textContent = toggleErrors.get(db.name) || '';
+        toggleError.hidden = !toggleErrors.has(db.name);
 
-        el.querySelector('.step-icon').textContent = db.enabled === false ? '⏸' : (STEP_ICON[db.stage] || '○');
+        el.querySelector('.step-icon').textContent = !enabled ? '⏸' : (STEP_ICON[db.stage] || '○');
         const step = el.querySelector('.step-text');
-        step.textContent = db.detail || '—';
-        step.title = db.detail || '';   // full text for clamped/long errors
+        step.textContent = !enabled
+            ? 'Backups are paused. Enable this database to include it in the next cycle.'
+            : (db.detail || '-');
+        step.removeAttribute('title');
 
         // Upload size + speed. Hidden until packaging reports the total, since
         // the dump is streamed and its final size is unknown before then.
         const transfer = el.querySelector('.db-transfer');
         const total = db.bytes_total || 0;
-        transfer.hidden = db.enabled === false || total <= 0;
+        transfer.hidden = !enabled || total <= 0;
         if (total > 0) {
             const done = Math.min(db.bytes_done || 0, total);
             transfer.querySelector('.tr-bar span').style.width = `${(done / total) * 100}%`;
@@ -906,10 +1045,10 @@
         // Logical dump size — grows live during the dump stage, then stays put.
         const size = el.querySelector('.db-size');
         const sizeHtml = sizeLine(db);
-        size.hidden = db.enabled === false || !sizeHtml;
+        size.hidden = !enabled || !sizeHtml;
         size.innerHTML = sizeHtml;
 
-        const tl = db.enabled === false ? { nodes: STAGES.map(() => ''), bars: STAGES.slice(1).map(() => '') } : timelineClasses(v);
+        const tl = !enabled ? { nodes: STAGES.map(() => ''), bars: STAGES.slice(1).map(() => '') } : timelineClasses(v);
         el.querySelectorAll('.tl-stage').forEach((node, i) => {
             node.className = `tl-stage ${tl.nodes[i]}`;
         });
@@ -918,7 +1057,7 @@
         });
 
         el.querySelector('.db-stage').textContent =
-            v.idx >= 0 && v.idx < STAGES.length
+            !enabled ? 'paused' : v.idx >= 0 && v.idx < STAGES.length
                 ? `step ${v.idx + 1}/${STAGES.length} · ${db.stage}`
                 : db.stage;
 
@@ -945,8 +1084,8 @@
         const stats = [
             ['Attempts', `${s.successes || 0}/${s.attempts || 0} success`],
             ['Success rate', `${historyValue(s.success_rate)}%`],
-            ['Last run', s.last_run ? new Date(s.last_run).toLocaleString() : '—'],
-            ['Last success', s.last_success ? new Date(s.last_success).toLocaleString() : '—'],
+            ['Last run', s.last_run ? new Date(s.last_run).toLocaleString() : '-'],
+            ['Last success', s.last_success ? new Date(s.last_success).toLocaleString() : '-'],
             ['Avg duration', `${historyValue(s.average_duration_secs)}s`],
             ['Avg dump', fmtBytes(s.average_dump_bytes)],
             ['Avg packaged', fmtBytes(s.average_packaged_bytes)],
@@ -957,13 +1096,13 @@
         const rows = (data.records || []).map(record => `
             <tr>
                 <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
-                <td class="${['enabled', 'disabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure')}">${escapeHtml(record.status)}</td>
+                <td class="${['disable', 'disabled'].includes(record.status) ? 'action-disable' : (['enable', 'enabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure'))}">${escapeHtml(record.status)}</td>
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
                 <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
                 <td>${record.chunk_count || 0}</td>
                 <td>${record.upload_retries || 0}</td>
-                <td class="history-error">${escapeHtml(record.error || '—')}</td>
+                <td class="history-error">${escapeHtml(record.error || '-')}</td>
             </tr>`).join('');
         return `
             <div class="history-heading">
@@ -1013,9 +1152,16 @@
         const open = !expandedDatabases.has(name);
         if (open) expandedDatabases.add(name);
         else expandedDatabases.delete(name);
-        el.querySelector('.db-summary').setAttribute('aria-expanded', String(open));
+        el.querySelector('.db-summary-main').setAttribute('aria-expanded', String(open));
         el.querySelector('.db-history').hidden = !open;
         if (open) loadHistory(el);
+    }
+
+    function databaseOrder(databases) {
+        return [...databases].sort((a, b) =>
+            Number(a.enabled === false) - Number(b.enabled === false) ||
+            a.name.localeCompare(b.name)
+        );
     }
 
     /**
@@ -1024,12 +1170,16 @@
      */
     function renderDatabases(databases) {
         const section = document.getElementById('dbSection');
-        const grid = document.getElementById('dbGrid');
+        const activeGroup = document.getElementById('activeDbGroup');
+        const disabledGroup = document.getElementById('disabledDbGroup');
+        const activeList = document.getElementById('activeDbList');
+        const disabledList = document.getElementById('disabledDbList');
         const summary = document.getElementById('dbSummary');
 
         if (!databases || databases.length === 0) {
             section.style.display = 'none';
-            grid.innerHTML = '';
+            activeList.innerHTML = '';
+            disabledList.innerHTML = '';
             dbCards.clear();
             return;
         }
@@ -1038,22 +1188,25 @@
         // Create-or-update each card, counting states and transfer totals.
         const count = { queued: 0, running: 0, done: 0, failed: 0, disabled: 0 };
         let bytesDone = 0, bytesTotal = 0, speed = 0;
-        databases.forEach(db => {
+        const ordered = databaseOrder(databases);
+        ordered.forEach(db => {
             let el = dbCards.get(db.name);
             if (!el) {
                 el = buildDbCard();
                 dbCards.set(db.name, el);
-                grid.appendChild(el);
             }
             if (expandedDatabases.has(db.name)) {
-                el.querySelector('.db-summary').setAttribute('aria-expanded', 'true');
+                el.querySelector('.db-summary-main').setAttribute('aria-expanded', 'true');
                 el.querySelector('.db-history').hidden = false;
             }
             count[updateDbCard(el, db).cls]++;
+            (db.enabled === false ? disabledList : activeList).appendChild(el);
             bytesDone  += db.bytes_done  || 0;
             bytesTotal += db.bytes_total || 0;
             speed      += db.speed_bps   || 0;   // databases upload in parallel
         });
+        activeGroup.hidden = count.queued + count.running + count.done + count.failed === 0;
+        disabledGroup.hidden = count.disabled === 0;
 
         // Drop cards for databases no longer present in the payload.
         const live = new Set(databases.map(db => db.name));
@@ -1089,8 +1242,18 @@
 
     async function toggleDatabase(name, enable) {
         const action = enable ? 'enable' : 'disable';
+        const el = dbCards.get(name);
+        const toggle = el?.querySelector('.db-toggle');
+        togglingDatabases.add(name);
+        toggleErrors.delete(name);
+        if (toggle) {
+            toggle.disabled = true;
+            toggle.setAttribute('aria-busy', 'true');
+            toggle.querySelector('.db-toggle-label').textContent = 'Saving...';
+        }
         try {
             await fetchStatus(`/api/status/database/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+            togglingDatabases.delete(name);
             historyCache.delete(name);
             await refreshDashboard();
             if (expandedDatabases.has(name)) {
@@ -1098,7 +1261,25 @@
                 if (el) await loadHistory(el, true);
             }
         } catch (error) {
-            alert(`Could not ${action} database: ${error.message}`);
+            toggleErrors.set(name, `Could not ${action} database. Try again.`);
+            if (el) {
+                const currentToggle = el.querySelector('.db-toggle');
+                currentToggle.removeAttribute('aria-busy');
+                currentToggle.disabled = false;
+                currentToggle.setAttribute('aria-checked', String(!enable));
+                currentToggle.setAttribute('aria-label', `${enable ? 'Enable' : 'Disable'} ${name}`);
+                currentToggle.querySelector('.db-toggle-label').textContent = enable ? 'Off' : 'On';
+                const errorEl = el.querySelector('.db-toggle-error');
+                errorEl.textContent = toggleErrors.get(name);
+                errorEl.hidden = false;
+            }
+        } finally {
+            togglingDatabases.delete(name);
+            const currentToggle = dbCards.get(name)?.querySelector('.db-toggle');
+            if (currentToggle) {
+                currentToggle.removeAttribute('aria-busy');
+                currentToggle.disabled = false;
+            }
         }
     }
 

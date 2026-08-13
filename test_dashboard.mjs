@@ -19,9 +19,18 @@ const stubs = {
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule } = load(...Object.values(stubs));
+
+assert.doesNotMatch(body, /<button class="db-summary"/);
+assert.match(body, /class="db-summary-main"/);
+assert.match(body, /role="switch"/);
+assert.match(html, /history-table \.action \{ color: var\(--text-muted\); \}/);
+assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/);
+assert.match(body, /'disable', 'disabled'/);
+assert.match(body, /'enable', 'enabled'/);
+assert.match(html, /\.db-group-list \{ display: flex; flex-direction: column; gap: 1rem; \}/);
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 
@@ -54,6 +63,16 @@ check({ state: 'DOWN', stage: 'upload' },  'FAILED', ['completed', 'completed', 
 check({ state: 'DOWN', stage: 'queued' }, 'FAILED', ['failed', '', ''], ['', '']);
 check({ enabled: false, state: 'UP', stage: 'disabled' }, 'DISABLED', ['', '', ''], ['', '']);
 
+assert.deepEqual(
+    databaseOrder([
+        { name: 'zeta', enabled: false },
+        { name: 'beta', enabled: true },
+        { name: 'alpha', enabled: true },
+        { name: 'aardvark', enabled: false },
+    ]).map(db => db.name),
+    ['alpha', 'beta', 'aardvark', 'zeta'],
+);
+
 // Upload size / speed formatting.
 assert.equal(fmtBytes(0), '0 B');
 assert.equal(fmtBytes(512), '512 B');
@@ -61,7 +80,7 @@ assert.equal(fmtBytes(1024), '1.0 KiB');
 assert.equal(fmtBytes(1536), '1.5 KiB');
 assert.equal(fmtBytes(10 * 1024), '10 KiB');
 assert.equal(fmtBytes(2.5 * 1024 ** 3), '2.5 GiB');
-assert.equal(fmtSpeed(0), '—');                     // idle, not "0 B/s"
+assert.equal(fmtSpeed(0), '-');                     // idle, not "0 B/s"
 assert.equal(fmtSpeed(4 * 1024 ** 2), '4.0 MiB/s');
 
 assert.equal(telegramDestinationText(0), '0 destinations');
@@ -83,6 +102,15 @@ assert.match(historyMarkup({
         average_upload_retries: .5 },
     records: [],
 }), /No backup history yet\./);
+const actionHistory = historyMarkup({
+    stats: {},
+    records: [
+        { started_at: '2026-08-13T00:00:00Z', status: 'enable' },
+        { started_at: '2026-08-13T00:00:00Z', status: 'disable' },
+    ],
+});
+assert.match(actionHistory, /<td class="action">enable<\/td>/);
+assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);
 expandedDatabases.add('app');
 assert.equal(expandedDatabases.has('app'), true);
 expandedDatabases.delete('app');
