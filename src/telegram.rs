@@ -37,11 +37,46 @@ pub fn format_backup_summary(
     parts: usize,
     encrypted: bool,
 ) -> String {
+    format_backup_summary_with_label(
+        "📦 <b>Manual backup ready</b>",
+        database,
+        filename,
+        total_bytes,
+        parts,
+        encrypted,
+    )
+}
+
+pub fn format_scheduled_backup_summary(
+    database: &str,
+    filename: &str,
+    total_bytes: u64,
+    parts: usize,
+    encrypted: bool,
+) -> String {
+    format_backup_summary_with_label(
+        "📦 <b>Scheduled backup ready</b>",
+        database,
+        filename,
+        total_bytes,
+        parts,
+        encrypted,
+    )
+}
+
+fn format_backup_summary_with_label(
+    label: &str,
+    database: &str,
+    filename: &str,
+    total_bytes: u64,
+    parts: usize,
+    encrypted: bool,
+) -> String {
     let part_label = if parts == 1 { "part" } else { "parts" };
     let encryption = if encrypted { "age enabled" } else { "disabled" };
     let size_mb = total_bytes as f64 / (1024.0 * 1024.0);
     format!(
-        "📦 <b>Manual backup ready</b>\n\n\
+        "{label}\n\n\
          🗄️ <b>Database:</b> <code>{}</code>\n\
          📄 <b>File:</b> <code>{}</code>\n\
          📏 <b>Packaged size:</b> <code>{size_mb:.2} MB</code>\n\
@@ -54,8 +89,31 @@ pub fn format_backup_summary(
 }
 
 pub fn format_backup_completion(database: &str, filename: &str, parts: usize) -> String {
+    format_backup_completion_with_label(
+        "✅ <b>Manual backup uploaded</b>",
+        database,
+        filename,
+        parts,
+    )
+}
+
+pub fn format_scheduled_backup_completion(database: &str, filename: &str, parts: usize) -> String {
+    format_backup_completion_with_label(
+        "✅ <b>Scheduled backup uploaded</b>",
+        database,
+        filename,
+        parts,
+    )
+}
+
+fn format_backup_completion_with_label(
+    label: &str,
+    database: &str,
+    filename: &str,
+    parts: usize,
+) -> String {
     format!(
-        "✅ <b>Manual backup uploaded</b>\n\n\
+        "{label}\n\n\
          🗄️ <b>Database:</b> <code>{}</code>\n\
          📄 <b>File:</b> <code>{}</code>\n\
          🎉 All <code>{parts}</code> parts uploaded successfully.",
@@ -353,5 +411,30 @@ mod tests {
         assert!(message.contains("analytics"));
         assert!(message.contains("All <code>3</code> parts"));
         assert!(message.contains("uploaded"));
+    }
+
+    #[test]
+    fn scheduled_messages_are_distinguishable_and_include_multipart_details() {
+        let summary = format_scheduled_backup_summary(
+            "analytics",
+            "analytics_20260812T031500Z.sql.zst.age",
+            100_000_000,
+            3,
+            true,
+        );
+        assert!(summary.contains("Scheduled backup ready"));
+        assert!(summary.contains("analytics"));
+        assert!(summary.contains("95.37 MB"));
+        assert!(summary.contains("3 parts"));
+        assert!(summary.contains("zstd"));
+        assert!(summary.contains("age"));
+
+        let completion = format_scheduled_backup_completion(
+            "analytics",
+            "analytics_20260812T031500Z.sql.zst.age",
+            3,
+        );
+        assert!(completion.contains("Scheduled backup uploaded"));
+        assert!(completion.contains("All <code>3</code> parts"));
     }
 }

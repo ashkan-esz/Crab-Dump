@@ -697,8 +697,16 @@ impl BackupSource {
         }
     }
 
-    fn sends_manual_notifications(self) -> bool {
-        self == Self::Manual
+    fn sends_notifications(self) -> bool {
+        matches!(self, Self::Manual | Self::Scheduled)
+    }
+
+    fn notification_chat_ids(self, options: &BackupOptions) -> &[String] {
+        match self {
+            Self::Scheduled => &options.chat_ids,
+            Self::Manual => options.chat_ids.get(..1).unwrap_or_default(),
+            Self::OneShot => &[],
+        }
     }
 }
 
@@ -1097,21 +1105,32 @@ fn backup_pipeline(
         "pipeline complete; uploading",
     );
 
-    if source.sends_manual_notifications() {
-        if let Some(chat_id) = options.chat_ids.first() {
-            let message = telegram::format_backup_summary(
+    if source.sends_notifications() {
+        let message = if source == BackupSource::Scheduled {
+            telegram::format_scheduled_backup_summary(
                 db_name,
                 base_name,
                 total_bytes,
                 chunks_count,
                 encrypted,
-            );
+            )
+        } else {
+            telegram::format_backup_summary(
+                db_name,
+                base_name,
+                total_bytes,
+                chunks_count,
+                encrypted,
+            )
+        };
+        for chat_id in source.notification_chat_ids(options) {
             if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
             {
                 tracing::warn!(
                     db = db_name,
                     error = %error,
-                    "failed to send manual backup summary; continuing upload",
+                    source = source.as_str(),
+                    "failed to send backup summary; continuing upload",
                 );
             }
         }
@@ -1153,15 +1172,20 @@ fn backup_pipeline(
     metrics.upload_retries += upload_stats.retries;
     metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
 
-    if source.sends_manual_notifications() && chunks_count > 1 {
-        if let Some(chat_id) = options.chat_ids.first() {
-            let message = telegram::format_backup_completion(db_name, base_name, chunks_count);
+    if source.sends_notifications() && chunks_count > 1 {
+        let message = if source == BackupSource::Scheduled {
+            telegram::format_scheduled_backup_completion(db_name, base_name, chunks_count)
+        } else {
+            telegram::format_backup_completion(db_name, base_name, chunks_count)
+        };
+        for chat_id in source.notification_chat_ids(options) {
             if let Err(error) = telegram::send_message(client, &cfg.tg_bot_token, chat_id, &message)
             {
                 tracing::warn!(
                     db = db_name,
                     error = %error,
-                    "failed to send manual backup completion notice; backup succeeded",
+                    source = source.as_str(),
+                    "failed to send backup completion notice; backup succeeded",
                 );
             }
         }
@@ -1768,10 +1792,27 @@ mod tests {
     }
 
     #[test]
-    fn manual_source_is_the_only_notification_source() {
-        assert!(BackupSource::Manual.sends_manual_notifications());
-        assert!(!BackupSource::Scheduled.sends_manual_notifications());
-        assert!(!BackupSource::OneShot.sends_manual_notifications());
+    fn notification_eligibility_is_separate_from_one_shot_behavior() {
+        assert!(BackupSource::Manual.sends_notifications());
+        assert!(BackupSource::Scheduled.sends_notifications());
+        assert!(!BackupSource::OneShot.sends_notifications());
+
+        let options = BackupOptions {
+            chat_ids: vec!["primary".into(), "archive".into()],
+            recipient: None,
+            no_encryption: false,
+        };
+        assert_eq!(
+            BackupSource::Manual.notification_chat_ids(&options),
+            &["primary".to_string()]
+        );
+        assert_eq!(
+            BackupSource::Scheduled.notification_chat_ids(&options),
+            &["primary".to_string(), "archive".to_string()]
+        );
+        assert!(BackupSource::OneShot
+            .notification_chat_ids(&options)
+            .is_empty());
     }
 
     fn upload_test_chunks(label: &str, count: usize) -> (PathBuf, Vec<PathBuf>) {
