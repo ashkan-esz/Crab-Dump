@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>crab-dump · Telegram Users</title>
+  <style>
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; font: 16px system-ui, sans-serif; color: #172033; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+    a, button { color: #0758bd; } form { display: grid; gap: .7rem; margin: 1.5rem 0; }
+    input, button { font: inherit; padding: .5rem; } table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: .65rem; border-bottom: 1px solid #ccd3df; }
+    .error { color: #b42318; min-height: 1.3em; } .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <header><h1>Telegram users</h1><a href="/">Status dashboard</a></header>
+  <p>Informational directory only. Backup destinations remain configured by <code>TG_CHAT_ID_N</code>.</p>
+  <form id="user-form">
+    <input id="name" placeholder="Display name" required>
+    <input id="chat-id" placeholder="Chat ID or @channelusername" required>
+    <label><input id="enabled" type="checkbox" checked> Enabled</label>
+    <div class="actions"><button type="submit" id="submit-user">Add user</button><button type="button" id="cancel" hidden>Cancel edit</button></div>
+    <div class="error" id="error" role="alert"></div>
+  </form>
+  <table>
+    <thead><tr><th>Name</th><th>Chat ID</th><th>Enabled</th><th>Actions</th></tr></thead>
+    <tbody id="users"></tbody>
+  </table>
+<script>
+  let editing = null, users = [];
+  const $ = id => document.getElementById(id);
+  async function request(url, options) {
+    const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Request failed (${response.status})`);
+    return response.status === 204 ? null : response.json();
+  }
+  function render() {
+    $('users').innerHTML = users.map((u, i) => `<tr>
+      <td>${escapeHtml(u.name)}</td><td><code>${escapeHtml(u.chat_id)}</code></td>
+      <td>${u.enabled ? 'Yes' : 'No'}</td><td class="actions">
+        <button onclick="editUser(${i})">Edit</button>
+        <button onclick="removeUser(${i})">Delete</button></td></tr>`).join('');
+  }
+  function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c])); }
+  function editUser(i) {
+    const u = users[i]; editing = u.chat_id; $('name').value = u.name; $('chat-id').value = u.chat_id;
+    $('chat-id').disabled = false; $('enabled').checked = u.enabled; $('submit-user').textContent = 'Save changes'; $('cancel').hidden = false;
+  }
+  async function removeUser(i) {
+    if (!confirm(`Delete ${users[i].name}?`)) return;
+    try { await request(`/api/telegram-users/${encodeURIComponent(users[i].chat_id)}`, {method: 'DELETE'}); await load(); }
+    catch (e) { $('error').textContent = e.message; }
+  }
+  async function load() { users = await request('/api/telegram-users'); render(); }
+  $('user-form').addEventListener('submit', async e => {
+    e.preventDefault(); $('error').textContent = '';
+    const body = {name: $('name').value, chat_id: $('chat-id').value, enabled: $('enabled').checked};
+    try {
+      await request(editing ? `/api/telegram-users/${encodeURIComponent(editing)}` : '/api/telegram-users',
+        {method: editing ? 'PUT' : 'POST', body: JSON.stringify(body)});
+      editing = null; $('user-form').reset(); $('enabled').checked = true; $('cancel').hidden = true;
+      $('submit-user').textContent = 'Add user'; await load();
+    } catch (e) { $('error').textContent = e.message; }
+  });
+  $('cancel').onclick = () => { editing = null; $('user-form').reset(); $('enabled').checked = true; $('cancel').hidden = true; $('submit-user').textContent = 'Add user'; };
+  load().catch(e => $('error').textContent = e.message);
+</script>
+</body>
+</html>

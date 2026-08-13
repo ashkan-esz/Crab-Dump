@@ -14,6 +14,7 @@
 //! shared defaults for their respective server.
 
 use std::env;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +79,7 @@ pub enum Schedule {
 // ===========================================================================
 
 /// Shared settings loaded once and inherited by every database backup.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SharedConfig {
     /// Telegram bot token from @BotFather.
     pub tg_bot_token: String,
@@ -93,6 +94,14 @@ pub struct SharedConfig {
     pub work_dir: PathBuf,
     /// Port for the HTTP status dashboard.
     pub api_port: u16,
+    /// Address for the HTTP status dashboard.
+    pub dashboard_host: String,
+    /// Basic Auth username for the dashboard.
+    pub dashboard_username: String,
+    /// Basic Auth password for the dashboard.
+    pub dashboard_password: String,
+    /// Persistent Telegram user directory file.
+    pub telegram_users_file: PathBuf,
     /// Optional SOCKS5 proxy URL (`socks5://` or `socks5h://`).
     pub socks_proxy: Option<String>,
     /// How many database backups may run at the same time (≥ 1). Databases
@@ -117,6 +126,36 @@ impl SharedConfig {
     /// Chunk size expressed in bytes.
     pub fn chunk_size_bytes(&self) -> u64 {
         self.chunk_size_mb * 1024 * 1024
+    }
+}
+
+impl fmt::Debug for SharedConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedConfig")
+            .field("tg_bot_token", &"[REDACTED]")
+            .field("tg_chat_ids", &"[REDACTED]")
+            .field(
+                "age_recipient",
+                &self.age_recipient.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("chunk_size_mb", &self.chunk_size_mb)
+            .field("work_dir", &self.work_dir)
+            .field("api_port", &self.api_port)
+            .field("dashboard_host", &self.dashboard_host)
+            .field("dashboard_username", &self.dashboard_username)
+            .field("dashboard_password", &"[REDACTED]")
+            .field("telegram_users_file", &self.telegram_users_file)
+            .field(
+                "socks_proxy",
+                &self.socks_proxy.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("max_parallel_databases", &self.max_parallel_databases)
+            .field("keep_failed_dumps", &self.keep_failed_dumps)
+            .field("backup_schedule", &self.backup_schedule)
+            .field("history_upload_schedule", &self.history_upload_schedule)
+            .field("history", &"[HistoryStore]")
+            .finish()
     }
 }
 
@@ -189,6 +228,12 @@ impl Config {
         });
         raw.tg_chat_ids = scan_indexed_chat_ids(std::env::vars())?;
         let shared = build_shared_config(&raw)?;
+        if shared.dashboard_username.trim().is_empty() {
+            bail!("DASHBOARD_USERNAME is required");
+        }
+        if shared.dashboard_password.is_empty() {
+            bail!("DASHBOARD_PASSWORD is required");
+        }
 
         // Shared pg_dump args, from either source — the default each database
         // inherits unless it declares its own.
@@ -321,6 +366,10 @@ struct RawConfigFile {
     history_dir: Option<String>,
     history_retention_months: Option<u32>,
     api_port: Option<u16>,
+    dashboard_host: Option<String>,
+    dashboard_username: Option<String>,
+    dashboard_password: Option<String>,
+    telegram_users_file: Option<String>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
     keep_failed_dumps: Option<bool>,
@@ -402,6 +451,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         .ok_or_else(|| {
             anyhow!("at least one indexed TG_CHAT_ID_N is required (set in environment)")
         })?;
+
     if let Some((index, _)) = tg_chat_ids
         .iter()
         .enumerate()
@@ -492,6 +542,17 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         chunk_size_mb,
         work_dir,
         api_port: raw.api_port.unwrap_or(8080),
+        dashboard_host: raw
+            .dashboard_host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".into()),
+        dashboard_username: raw.dashboard_username.clone().unwrap_or_default(),
+        dashboard_password: raw.dashboard_password.clone().unwrap_or_default(),
+        telegram_users_file: raw
+            .telegram_users_file
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("telegram_users.toml")),
         socks_proxy,
         max_parallel_databases,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
@@ -590,6 +651,10 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         api_port: env("API_PORT")
             .and_then(|v| v.parse().ok())
             .or(raw.api_port),
+        dashboard_host: env("DASHBOARD_HOST").or(raw.dashboard_host),
+        dashboard_username: env("DASHBOARD_USERNAME").or(raw.dashboard_username),
+        dashboard_password: env("DASHBOARD_PASSWORD").or(raw.dashboard_password),
+        telegram_users_file: env("TELEGRAM_USERS_FILE").or(raw.telegram_users_file),
         socks_proxy: env("SOCKS_PROXY").or(raw.socks_proxy),
         max_parallel_databases: env("MAX_PARALLEL_DATABASES")
             .and_then(|v| v.parse().ok())
@@ -895,6 +960,10 @@ mod tests {
             chunk_size_mb: 49,
             work_dir: std::env::temp_dir(),
             api_port: 8080,
+            dashboard_host: "127.0.0.1".into(),
+            dashboard_username: String::new(),
+            dashboard_password: String::new(),
+            telegram_users_file: PathBuf::from("telegram_users.toml"),
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
             keep_failed_dumps: false,

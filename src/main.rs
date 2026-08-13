@@ -28,6 +28,7 @@ mod dump;
 mod encrypt;
 mod history;
 mod telegram;
+mod telegram_users;
 mod web;
 
 use chunk::ChunkWriter;
@@ -89,11 +90,19 @@ fn main() -> Result<()> {
         &names,
     ));
     web::set_database_state_store(Arc::clone(&database_states));
+    let telegram_users = Arc::new(
+        telegram_users::TelegramUserStore::load(&shared_cfg.telegram_users_file)
+            .context("loading Telegram users directory")?,
+    );
 
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
     // because actix_web::HttpServer is not Send.
     let dashboard_port = shared_cfg.api_port;
+    let dashboard_host = shared_cfg.dashboard_host.clone();
+    let dashboard_username = shared_cfg.dashboard_username.clone();
+    let dashboard_password = shared_cfg.dashboard_password.clone();
+    let dashboard_users = Arc::clone(&telegram_users);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -104,7 +113,16 @@ fn main() -> Result<()> {
             .build()
             .expect("create tokio runtime for web server");
         rt.block_on(async move {
-            if let Err(e) = web::start_server(dashboard_port, dashboard_history).await {
+            if let Err(e) = web::start_server(
+                &dashboard_host,
+                dashboard_port,
+                dashboard_history,
+                dashboard_username,
+                dashboard_password,
+                dashboard_users,
+            )
+            .await
+            {
                 eprintln!("web server error: {e}");
             }
         });

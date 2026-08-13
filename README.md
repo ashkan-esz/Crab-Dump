@@ -129,6 +129,10 @@ directory yourself).
 | `MAX_PARALLEL_DATABASES` | no   | `4`            | how many databases back up at the same time (≥ 1)  |
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
 | `TG_CHAT_ID_0`, `_1`, … | yes |                | contiguous numeric IDs or `@channelusername` values |
+| `TELEGRAM_USERS_FILE` | no | `telegram_users.toml` | persistent dashboard-managed Telegram user directory |
+| `DASHBOARD_HOST`     | no       | `127.0.0.1`    | bind address; use `0.0.0.0` for remote/container access |
+| `DASHBOARD_USERNAME` | yes      |                | HTTP Basic Auth username for the dashboard |
+| `DASHBOARD_PASSWORD` | yes     |                | HTTP Basic Auth password for the dashboard |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
 | `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
@@ -147,6 +151,12 @@ with contiguous indices, or one or more `[[databases]]` entries in
 `config.toml`. Telegram destinations are the exception: configure one or more
 contiguous `TG_CHAT_ID_N` variables in the environment; the removed scalar
 `TG_CHAT_ID` and TOML `tg_chat_id` settings are not supported.
+
+The dashboard and every dashboard API require HTTP Basic Auth. The Telegram
+user directory is informational/manageable only; backup uploads continue to
+use only the indexed `TG_CHAT_ID_N` destinations. Visit `/users` to add,
+edit, enable/disable, or delete directory entries. Changes are persisted
+atomically to `TELEGRAM_USERS_FILE`.
 
 ### Multiple databases
 
@@ -239,6 +249,8 @@ docker run --rm \
   -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID_0="..." \
+  -e DASHBOARD_USERNAME="admin" \
+  -e DASHBOARD_PASSWORD="change-me" \
   crab-dump
 
 # One-shot backup (with encryption):
@@ -248,6 +260,8 @@ docker run --rm \
   -e TG_CHAT_ID_0="..." \
   -e AGE_RECIPIENT="age1..." \
   -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
+  -e DASHBOARD_USERNAME="admin" \
+  -e DASHBOARD_PASSWORD="change-me" \
   crab-dump
 
 # Or with docker-compose (uses a .env file)

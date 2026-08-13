@@ -10,7 +10,11 @@
 //!
 //! The dashboard polls these endpoints every 4 seconds and updates the UI.
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{dev::ServiceRequest, web, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web_httpauth::{
+    extractors::basic::{BasicAuth, Config as BasicConfig},
+    middleware::HttpAuthentication,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -19,6 +23,7 @@ use std::time::SystemTime;
 
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
+use crate::telegram_users::{TelegramUser, TelegramUserStore};
 
 // ===========================================================================
 // Global status atoms (Telegram service — single value)
@@ -721,6 +726,117 @@ async fn api_history(
         }
     }
 }
+
+#[derive(Clone)]
+pub struct DashboardAuth {
+    username: String,
+    password: String,
+}
+
+async fn dashboard_auth(
+    req: ServiceRequest,
+    credentials: BasicAuth,
+) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+    let expected = req
+        .app_data::<web::Data<DashboardAuth>>()
+        .expect("dashboard auth state not initialized");
+    if credentials.user_id() == expected.username
+        && credentials
+            .password()
+            .is_some_and(|password| password == expected.password)
+    {
+        Ok(req)
+    } else {
+        let config = BasicConfig::default().realm("crab-dump");
+        Err((
+            actix_web_httpauth::extractors::AuthenticationError::from(config).into(),
+            req,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+struct TelegramUserPayload {
+    name: String,
+    chat_id: String,
+    enabled: bool,
+}
+
+async fn api_telegram_users(store: web::Data<Arc<TelegramUserStore>>) -> impl Responder {
+    HttpResponse::Ok().json(store.list())
+}
+
+async fn create_telegram_user(
+    store: web::Data<Arc<TelegramUserStore>>,
+    payload: web::Json<TelegramUserPayload>,
+) -> impl Responder {
+    let user = TelegramUser {
+        name: payload.name.clone(),
+        chat_id: payload.chat_id.clone(),
+        enabled: payload.enabled,
+    };
+    match store.create(user.clone()) {
+        Ok(()) => HttpResponse::Created().json(user),
+        Err(error) if error.to_string().contains("already exists") => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": "chat ID already exists"}))
+        }
+        Err(error) if error.to_string().contains("must not be blank") => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to persist Telegram user");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Telegram user directory unavailable"}))
+        }
+    }
+}
+
+async fn update_telegram_user(
+    path: web::Path<String>,
+    store: web::Data<Arc<TelegramUserStore>>,
+    payload: web::Json<TelegramUserPayload>,
+) -> impl Responder {
+    let chat_id = path.into_inner();
+    let user = TelegramUser {
+        name: payload.name.clone(),
+        chat_id: payload.chat_id.clone(),
+        enabled: payload.enabled,
+    };
+    match store.update(&chat_id, user.clone()) {
+        Ok(true) => HttpResponse::Ok().json(user),
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Telegram user not found"}))
+        }
+        Err(error) if error.to_string().contains("already exists") => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": "chat ID already exists"}))
+        }
+        Err(error) if error.to_string().contains("must not be blank") => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to persist Telegram user");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Telegram user directory unavailable"}))
+        }
+    }
+}
+
+async fn delete_telegram_user(
+    path: web::Path<String>,
+    store: web::Data<Arc<TelegramUserStore>>,
+) -> impl Responder {
+    match store.delete(&path.into_inner()) {
+        Ok(true) => HttpResponse::NoContent().finish(),
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Telegram user not found"}))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to persist Telegram user deletion");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Telegram user directory unavailable"}))
+        }
+    }
+}
 /// Resolve the local hostname; fall back to "unknown" on failure.
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
@@ -736,6 +852,12 @@ async fn serve_dashboard() -> impl Responder {
         .body(include_str!("../index.html"))
 }
 
+async fn serve_users() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../users.html"))
+}
+
 /// Start the HTTP server and block until it stops.
 ///
 /// Serves:
@@ -749,14 +871,26 @@ async fn serve_dashboard() -> impl Responder {
 /// - `/api/status/databases` — returns all tracked database statuses as an array
 ///
 /// All status endpoints return JSON with `state`, `message`, and `timestamp` fields.
-pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> std::io::Result<()> {
+pub async fn start_server(
+    host: &str,
+    port: u16,
+    history: std::sync::Arc<HistoryStore>,
+    username: String,
+    password: String,
+    telegram_users: Arc<TelegramUserStore>,
+) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
+    let auth_data = web::Data::new(DashboardAuth { username, password });
+    let users_data = web::Data::new(telegram_users);
 
     HttpServer::new(move || {
+        let auth = HttpAuthentication::basic(dashboard_auth);
         App::new()
             .app_data(port_data.clone())
             .app_data(web::Data::new(history.clone()))
+            .app_data(auth_data.clone())
+            .app_data(users_data.clone())
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
             .route("/api/status/process", web::get().to(api_process_status))
@@ -767,11 +901,23 @@ pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> s
                 web::post().to(api_database_action),
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
+            .route("/api/telegram-users", web::get().to(api_telegram_users))
+            .route("/api/telegram-users", web::post().to(create_telegram_user))
+            .route(
+                "/api/telegram-users/{chat_id}",
+                web::put().to(update_telegram_user),
+            )
+            .route(
+                "/api/telegram-users/{chat_id}",
+                web::delete().to(delete_telegram_user),
+            )
             .route("/api/info", web::get().to(api_config))
             .route("/", web::get().to(serve_dashboard))
             .route("/index.html", web::get().to(serve_dashboard))
+            .route("/users", web::get().to(serve_users))
+            .wrap(auth)
     })
-    .bind(format!("127.0.0.1:{port}"))?
+    .bind((host, port))?
     // Dashboard runs on a background thread; actix's own SIGINT handler would
     // swallow Ctrl+C and leave the main thread hanging forever.
     .disable_signals()
@@ -782,6 +928,9 @@ pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::http::header;
+    use actix_web::test as aw_test;
+    use std::path::PathBuf;
 
     /// Read one entry's fields. Tests use distinct database names because
     /// `DUMP_STATUSES` is process-global and tests run in parallel.
@@ -877,5 +1026,88 @@ mod tests {
         assert!(!controller.request("app"));
         controller.finish("app");
         assert!(controller.request("app"));
+    }
+
+    fn users_test_store() -> Arc<TelegramUserStore> {
+        let path = std::env::temp_dir().join(format!(
+            "crab-dashboard-users-{}-{}.toml",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let _ = std::fs::remove_file(&path);
+        Arc::new(TelegramUserStore::load(PathBuf::from(path)).unwrap())
+    }
+
+    #[actix_web::test]
+    async fn telegram_users_require_auth_and_support_crud() {
+        let store = users_test_store();
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(DashboardAuth {
+                    username: "admin".into(),
+                    password: "secret".into(),
+                }))
+                .app_data(web::Data::new(store))
+                .route("/api/telegram-users", web::get().to(api_telegram_users))
+                .route("/api/telegram-users", web::post().to(create_telegram_user))
+                .route(
+                    "/api/telegram-users/{chat_id}",
+                    web::put().to(update_telegram_user),
+                )
+                .route(
+                    "/api/telegram-users/{chat_id}",
+                    web::delete().to(delete_telegram_user),
+                )
+                .wrap(HttpAuthentication::basic(dashboard_auth)),
+        )
+        .await;
+
+        let missing = aw_test::TestRequest::get()
+            .uri("/api/telegram-users")
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, missing).await.status(), 401);
+
+        let invalid = aw_test::TestRequest::get()
+            .uri("/api/telegram-users")
+            .insert_header((header::AUTHORIZATION, "Basic d3Jvbmc6Y3JlZA=="))
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, invalid).await.status(), 401);
+
+        let create = aw_test::TestRequest::post()
+            .uri("/api/telegram-users")
+            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .set_json(serde_json::json!({
+                "name": "Alice",
+                "chat_id": "-1",
+                "enabled": true
+            }))
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, create).await.status(), 201);
+
+        let update = aw_test::TestRequest::put()
+            .uri("/api/telegram-users/-1")
+            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .set_json(serde_json::json!({
+                "name": "Alice updated",
+                "chat_id": "-1",
+                "enabled": false
+            }))
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, update).await.status(), 200);
+
+        let delete = aw_test::TestRequest::delete()
+            .uri("/api/telegram-users/-1")
+            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .to_request();
+        assert_eq!(aw_test::call_service(&app, delete).await.status(), 204);
+
+        let missing_delete = aw_test::TestRequest::delete()
+            .uri("/api/telegram-users/-1")
+            .insert_header((header::AUTHORIZATION, "Basic YWRtaW46c2VjcmV0"))
+            .to_request();
+        assert_eq!(
+            aw_test::call_service(&app, missing_delete).await.status(),
+            404
+        );
     }
 }
