@@ -97,12 +97,28 @@ struct DbStatus {
     bytes_total: u64,
     /// Upload throughput in bytes/second; 0 when nothing is in flight.
     speed_bps: f64,
+    /// One-based current chunk number, or 0 when no chunk is active.
+    current_chunk: usize,
+    /// Bytes streamed for the current chunk.
+    current_chunk_done: u64,
+    /// Total bytes in the current chunk.
+    current_chunk_total: u64,
+    /// Total number of chunks in the packaged upload.
+    chunk_count: usize,
     /// Uncompressed bytes read from `pg_dump` stdout this run — the logical
     /// size of the database as dumped. Grows live during the dump stage and
     /// is kept for the rest of the run.
     dump_bytes: u64,
     /// RFC 3339 timestamp of the last update to this entry.
     updated: String,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ChunkProgress {
+    pub number: usize,
+    pub count: usize,
+    pub done: u64,
+    pub total: u64,
 }
 
 /// Per-database dump statuses keyed by display name.
@@ -295,6 +311,10 @@ pub fn set_db_status(db_name: &str, code: u8, stage: &'static str, detail: impl 
             bytes_done: 0,
             bytes_total: 0,
             speed_bps: 0.0,
+            current_chunk: 0,
+            current_chunk_done: 0,
+            current_chunk_total: 0,
+            chunk_count: 0,
             dump_bytes,
             updated: chrono::Utc::now().to_rfc3339(),
         },
@@ -320,11 +340,32 @@ pub fn set_db_dump_bytes(db_name: &str, dump_bytes: u64) {
 /// the last [`set_db_status`] call set them. Does nothing for an unknown
 /// database.
 pub fn set_db_transfer(db_name: &str, bytes_done: u64, bytes_total: u64, speed_bps: f64) {
+    set_db_transfer_with_chunk(
+        db_name,
+        bytes_done,
+        bytes_total,
+        speed_bps,
+        ChunkProgress::default(),
+    );
+}
+
+/// Publish upload progress including the currently streaming chunk.
+pub fn set_db_transfer_with_chunk(
+    db_name: &str,
+    bytes_done: u64,
+    bytes_total: u64,
+    speed_bps: f64,
+    chunk: ChunkProgress,
+) {
     let mut statuses = DUMP_STATUSES.write().expect("dump status lock poisoned");
     if let Some(entry) = statuses.get_mut(db_name) {
         entry.bytes_done = bytes_done;
         entry.bytes_total = bytes_total;
         entry.speed_bps = speed_bps;
+        entry.current_chunk = chunk.number;
+        entry.chunk_count = chunk.count;
+        entry.current_chunk_done = chunk.done;
+        entry.current_chunk_total = chunk.total;
         entry.updated = chrono::Utc::now().to_rfc3339();
     }
 }
@@ -343,12 +384,18 @@ pub fn fail_db(db_name: &str, detail: impl Into<String>) {
         bytes_done: 0,
         bytes_total: 0,
         speed_bps: 0.0,
+        current_chunk: 0,
+        current_chunk_done: 0,
+        current_chunk_total: 0,
+        chunk_count: 0,
         dump_bytes: 0,
         updated: String::new(),
     });
     entry.code = 2;
     entry.detail = detail.into();
     entry.speed_bps = 0.0;
+    entry.current_chunk_done = 0;
+    entry.current_chunk_total = 0;
     entry.updated = chrono::Utc::now().to_rfc3339();
 }
 
@@ -650,6 +697,14 @@ struct DatabaseResponse {
     bytes_total: u64,
     /// Upload throughput in bytes/second; 0 when idle.
     speed_bps: f64,
+    /// One-based current chunk number, or 0 when no chunk is active.
+    current_chunk: usize,
+    /// Bytes streamed for the current chunk.
+    current_chunk_done: u64,
+    /// Total bytes in the current chunk.
+    current_chunk_total: u64,
+    /// Total number of chunks in the packaged upload.
+    chunk_count: usize,
     /// Uncompressed bytes read from `pg_dump` this run; 0 while unknown.
     dump_bytes: u64,
     /// RFC 3339 timestamp of the last status update.
@@ -674,6 +729,10 @@ async fn api_databases_list() -> impl Responder {
             bytes_done: s.bytes_done,
             bytes_total: s.bytes_total,
             speed_bps: s.speed_bps,
+            current_chunk: s.current_chunk,
+            current_chunk_done: s.current_chunk_done,
+            current_chunk_total: s.current_chunk_total,
+            chunk_count: s.chunk_count,
             dump_bytes: s.dump_bytes,
             timestamp: s.updated.clone(),
         })
@@ -1632,14 +1691,23 @@ mod tests {
     use actix_web::http::header;
     use actix_web::test as aw_test;
     use actix_web_httpauth::middleware::HttpAuthentication;
-    use std::path::PathBuf;
 
     /// Read one entry's fields. Tests use distinct database names because
     /// `DUMP_STATUSES` is process-global and tests run in parallel.
-    fn snapshot(name: &str) -> (u8, &'static str, u64, u64, f64) {
+    fn snapshot(name: &str) -> (u8, &'static str, u64, u64, f64, usize, u64, u64, usize) {
         let statuses = DUMP_STATUSES.read().expect("dump status lock poisoned");
         let s = statuses.get(name).expect("database not tracked");
-        (s.code, s.stage, s.bytes_done, s.bytes_total, s.speed_bps)
+        (
+            s.code,
+            s.stage,
+            s.bytes_done,
+            s.bytes_total,
+            s.speed_bps,
+            s.current_chunk,
+            s.current_chunk_done,
+            s.current_chunk_total,
+            s.chunk_count,
+        )
     }
 
     #[test]
@@ -1650,7 +1718,10 @@ mod tests {
 
         // The stage it died on drives the red node in the dashboard timeline,
         // and the byte counts show how far the upload got.
-        assert_eq!(snapshot("test-fail"), (2, "upload", 40, 100, 0.0));
+        assert_eq!(
+            snapshot("test-fail"),
+            (2, "upload", 40, 100, 0.0, 0, 0, 0, 0)
+        );
     }
 
     #[test]
@@ -1659,7 +1730,35 @@ mod tests {
         set_db_transfer("test-reset", 40, 100, 20.0);
         set_db_status("test-reset", 1, "dump", "dumping");
 
-        assert_eq!(snapshot("test-reset"), (1, "dump", 0, 0, 0.0));
+        assert_eq!(snapshot("test-reset"), (1, "dump", 0, 0, 0.0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn current_chunk_progress_is_published_and_reset_with_stage() {
+        set_db_status("test-chunk-progress", 1, "upload", "uploading");
+        set_db_transfer_with_chunk(
+            "test-chunk-progress",
+            49,
+            100,
+            12.5,
+            ChunkProgress {
+                number: 2,
+                count: 3,
+                done: 25,
+                total: 50,
+            },
+        );
+
+        assert_eq!(
+            snapshot("test-chunk-progress"),
+            (1, "upload", 49, 100, 12.5, 2, 25, 50, 3)
+        );
+
+        set_db_status("test-chunk-progress", 0, "done", "done");
+        assert_eq!(
+            snapshot("test-chunk-progress"),
+            (0, "done", 0, 0, 0.0, 0, 0, 0, 0)
+        );
     }
 
     /// Read the dump size for one entry.
@@ -1780,7 +1879,7 @@ mod tests {
             now_epoch_secs()
         ));
         let _ = std::fs::remove_file(&path);
-        Arc::new(TelegramUserStore::load(PathBuf::from(path)).unwrap())
+        Arc::new(TelegramUserStore::load(path).unwrap())
     }
 
     #[actix_web::test]

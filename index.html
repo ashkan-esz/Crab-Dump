@@ -671,6 +671,12 @@
         .tr-speed { color: var(--warn); }
         .db-card.done   .tr-speed { color: var(--up); }
         .db-card.failed .tr-speed { color: var(--err); }
+        .tr-chunk {
+            color: var(--text-muted);
+            font-family: var(--mono);
+            font-size: .66rem;
+        }
+        .tr-chunk strong { color: var(--text); font-weight: 600; }
 
         /* Row 4: dumped size + compression ratio (hidden until bytes arrive) */
         .db-size {
@@ -1142,6 +1148,7 @@
                     <div class="db-transfer" hidden>
                         <div class="tr-bar"><span></span></div>
                         <div class="tr-meta"><span class="tr-size"></span><span class="tr-speed"></span></div>
+                        <div class="tr-chunk"></div>
                     </div>
                     <div class="db-size" hidden></div>
                     <div class="db-timeline">
@@ -1272,6 +1279,14 @@
             transfer.querySelector('.tr-size').innerHTML =
                 `<strong>${fmtBytes(done)}</strong> / ${fmtBytes(total)}`;
             transfer.querySelector('.tr-speed').textContent = fmtSpeed(db.speed_bps || 0);
+            const chunkDone = db.current_chunk_done || 0;
+            const chunkTotal = db.current_chunk_total || 0;
+            const chunkNumber = db.current_chunk || 0;
+            const chunkCount = db.chunk_count || 0;
+            transfer.querySelector('.tr-chunk').innerHTML =
+                chunkTotal > 0 && chunkNumber > 0
+                    ? `chunk ${chunkNumber}/${chunkCount} · <strong>${fmtBytes(Math.min(chunkDone, chunkTotal))}</strong> / ${fmtBytes(chunkTotal)}`
+                    : '';
         }
 
         // Logical dump size — grows live during the dump stage, then stays put.

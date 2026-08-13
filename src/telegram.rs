@@ -1,7 +1,9 @@
 //! Telegram Bot API upload (chunked `sendDocument`) with retries.
 
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -28,6 +30,25 @@ static UPLOAD_LOCK: Mutex<()> = Mutex::new(());
 pub struct UploadStats {
     pub attempts: u64,
     pub retries: u64,
+}
+
+pub type UploadProgress = Arc<dyn Fn(u64) + Send + Sync>;
+
+struct ProgressReader {
+    file: File,
+    sent: u64,
+    progress: UploadProgress,
+}
+
+impl Read for ProgressReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read(buf)?;
+        if read > 0 {
+            self.sent += read as u64;
+            (self.progress)(self.sent);
+        }
+        Ok(read)
+    }
 }
 
 pub fn format_backup_summary(
@@ -155,6 +176,17 @@ pub fn send_document(
     path: &Path,
     stats: &mut UploadStats,
 ) -> Result<()> {
+    send_document_with_progress(client, bot_token, chat_id, path, stats, None)
+}
+
+pub fn send_document_with_progress(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    path: &Path,
+    stats: &mut UploadStats,
+    progress: Option<UploadProgress>,
+) -> Result<()> {
     // The guard protects no data, so a poisoned lock is safe to adopt.
     let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -169,11 +201,31 @@ pub fn send_document(
     loop {
         attempt += 1;
         stats.attempts += 1;
-        let part = multipart::Part::file(path)
-            .with_context(|| format!("opening chunk {}", path.display()))?
+        let part = if let Some(progress) = progress.clone() {
+            let file =
+                File::open(path).with_context(|| format!("opening chunk {}", path.display()))?;
+            let length = file
+                .metadata()
+                .with_context(|| format!("reading chunk metadata {}", path.display()))?
+                .len();
+            multipart::Part::reader_with_length(
+                ProgressReader {
+                    file,
+                    sent: 0,
+                    progress,
+                },
+                length,
+            )
             .file_name(file_name.clone())
             .mime_str("application/octet-stream")
-            .context("setting mime")?;
+            .context("setting mime")?
+        } else {
+            multipart::Part::file(path)
+                .with_context(|| format!("opening chunk {}", path.display()))?
+                .file_name(file_name.clone())
+                .mime_str("application/octet-stream")
+                .context("setting mime")?
+        };
         let form = multipart::Form::new()
             .text("chat_id", chat_id.to_string())
             // Disable TG-side server preview to keep the chat clean.

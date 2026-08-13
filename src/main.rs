@@ -1186,31 +1186,71 @@ fn backup_pipeline(
     // Each chunk is retained until every currently active destination has been
     // attempted. A failed destination is skipped for subsequent chunks.
     let upload_started = SystemTime::now();
-    let mut sent_bytes: u64 = 0;
+    let sent_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut upload_stats = telegram::UploadStats::default();
     upload_chunks_to_destinations(
         &chunks,
         &options.chat_ids,
         |chat_id, path, stats| {
             let client_guard = client.read().expect("Telegram client lock poisoned");
-            telegram::send_document(&client_guard, &cfg.tg_bot_token, chat_id, path, stats)
+            let Some(chunk_index) = chunks.iter().position(|chunk| chunk == path) else {
+                return Err(anyhow::anyhow!(
+                    "upload chunk {} is not part of the current backup",
+                    path.display()
+                ));
+            };
+            let chunk_total = std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let db_name = db_name.to_string();
+            let base_done = sent_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            web::set_db_transfer_with_chunk(
+                &db_name,
+                base_done,
+                total_bytes,
+                rate(base_done, &upload_started),
+                web::ChunkProgress {
+                    number: chunk_index + 1,
+                    count: chunks_count,
+                    done: 0,
+                    total: chunk_total,
+                },
+            );
+            let progress = std::sync::Arc::new(move |chunk_done| {
+                web::set_db_transfer_with_chunk(
+                    &db_name,
+                    base_done,
+                    total_bytes,
+                    rate(base_done + chunk_done, &upload_started),
+                    web::ChunkProgress {
+                        number: chunk_index + 1,
+                        count: chunks_count,
+                        done: chunk_done,
+                        total: chunk_total,
+                    },
+                );
+            });
+            telegram::send_document_with_progress(
+                &client_guard,
+                &cfg.tg_bot_token,
+                chat_id,
+                path,
+                stats,
+                Some(progress),
+            )
         },
         |i| {
             let path = &chunks[i];
             let chunk_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            sent_bytes += chunk_bytes;
+            sent_bytes.fetch_add(chunk_bytes, std::sync::atomic::Ordering::Relaxed);
+            let sent = sent_bytes.load(std::sync::atomic::Ordering::Relaxed);
             web::set_db_status(
                 db_name,
                 1,
                 "upload",
                 format!("Uploading to Telegram — {}/{chunks_count} chunks", i + 1),
             );
-            web::set_db_transfer(
-                db_name,
-                sent_bytes,
-                total_bytes,
-                rate(sent_bytes, &upload_started),
-            );
+            web::set_db_transfer(db_name, sent, total_bytes, rate(sent, &upload_started));
         },
         &mut upload_stats,
     )
