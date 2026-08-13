@@ -117,7 +117,8 @@ A new per-database endpoint exposes individual states:
 - **Global-only encryption**: All databases share the same `AGE_RECIPIENT`.
   Operators who need per-DB encryption toggles must fork or request v2.
 - **Shared chat constraint**: All uploads go to the same Telegram chat.  Future
-  versions may index `TG_CHAT_ID_N` per server to decouple this.
+  deployments may configure multiple contiguous `TG_CHAT_ID_N` destinations
+  globally to decouple delivery from database count.
 - **Concurrency cap**: Hard limit of 10 configured servers (`CRAB_MAX_DATABASES`)
   prevents runaway configuration; operators with many small databases will need
   batching.

@@ -333,10 +333,17 @@ fn parse_month_filename(name: &str) -> Option<i64> {
 }
 
 /// Redact credentials and configured secrets before an error enters history.
-pub fn sanitize_error(error: &str, database_url: &str, bot_token: &str, chat_id: &str) -> String {
+pub fn sanitize_error(
+    error: &str,
+    database_url: &str,
+    bot_token: &str,
+    chat_ids: &[String],
+) -> String {
     let mut sanitized = error.replace(database_url, "[REDACTED_DATABASE_URL]");
     sanitized = sanitized.replace(bot_token, "[REDACTED_BOT_TOKEN]");
-    sanitized = sanitized.replace(chat_id, "[REDACTED_CHAT_ID]");
+    for chat_id in chat_ids {
+        sanitized = sanitized.replace(chat_id, "[REDACTED_CHAT_ID]");
+    }
 
     for scheme in ["postgresql://", "postgres://"] {
         let mut rest = sanitized.as_str();
@@ -489,11 +496,23 @@ mod tests {
             "postgresql://alice:secret@db/app token=tok chat=chat",
             "unused",
             "tok",
-            "chat",
+            &["chat".to_string()],
         );
         assert!(!out.contains("secret"));
         assert!(!out.contains("tok"));
         assert!(!out.contains("chat"));
+    }
+
+    #[test]
+    fn sanitizer_redacts_all_chat_ids() {
+        let out = sanitize_error(
+            "first=-100111 second=@backup-channel",
+            "unused",
+            "unused-token",
+            &["-100111".into(), "@backup-channel".into()],
+        );
+        assert!(!out.contains("-100111"));
+        assert!(!out.contains("@backup-channel"));
     }
 
     #[test]

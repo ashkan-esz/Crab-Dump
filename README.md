@@ -128,7 +128,7 @@ directory yourself).
 | `CRAB_MAX_DATABASES` | no       | `10`           | refuses to start above this count                  |
 | `MAX_PARALLEL_DATABASES` | no   | `4`            | how many databases back up at the same time (≥ 1)  |
 | `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
-| `TG_CHAT_ID`         | yes      |                | numeric id or `@channelusername`                   |
+| `TG_CHAT_ID_0`, `_1`, … | yes |                | contiguous numeric IDs or `@channelusername` values |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
 | `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
@@ -144,8 +144,9 @@ directory yourself).
 
 \* At least one database is required: use `DATABASE_URL_0`, `DATABASE_URL_1`, …
 with contiguous indices, or one or more `[[databases]]` entries in
-`config.toml`. Every value in this table can also be set in `config.toml`; the
-environment wins where both define the same key.
+`config.toml`. Telegram destinations are the exception: configure one or more
+contiguous `TG_CHAT_ID_N` variables in the environment; the removed scalar
+`TG_CHAT_ID` and TOML `tg_chat_id` settings are not supported.
 
 ### Multiple databases
 
@@ -184,8 +185,11 @@ failure makes the run exit non-zero. At most
 `MAX_PARALLEL_DATABASES` (default `4`) run at a time — a database waits for a
 free slot, and a worker takes the next queued database as soon as it finishes,
 so a slow dump never idles the others. Set it to `1` for strictly sequential
-backups. Uploads are serialized process-wide because all databases share one
-`TG_CHAT_ID` and Telegram rate-limits per chat.
+backups. Uploads are serialized process-wide because Telegram rate-limits per
+chat. Each chunk is attempted for every destination still active. If one
+destination fails, it is skipped for the rest of that backup; the backup
+succeeds when at least one destination receives every chunk. A chunk remains
+on disk until all currently active destinations have been attempted.
 
 > **Disk:** each pipeline writes its entire compressed dump to `WORK_DIR`
 > before uploading its first chunk, so peak disk usage is the sum across the
@@ -234,14 +238,14 @@ thing you need to provide is configuration via environment variables.
 docker run --rm \
   -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
-  -e TG_CHAT_ID="..." \
+  -e TG_CHAT_ID_0="..." \
   crab-dump
 
 # One-shot backup (with encryption):
 docker run --rm \
   -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
-  -e TG_CHAT_ID="..." \
+  -e TG_CHAT_ID_0="..." \
   -e AGE_RECIPIENT="age1..." \
   -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
   crab-dump

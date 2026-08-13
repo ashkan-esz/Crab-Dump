@@ -19,10 +19,9 @@ const MAX_RETRY_AFTER_SECS: u64 = 300;
 
 /// Serializes every upload in the process.
 ///
-/// All databases upload to the same chat, and Telegram rate-limits per chat
-/// (~20 messages/minute), so concurrent uploads buy no throughput — they only
-/// convert into 429s. Queueing here costs nothing real and keeps the dump and
-/// packaging stages parallel.
+/// Telegram rate-limits per chat (~20 messages/minute), so concurrent uploads
+/// buy no throughput — they only convert into 429s. Queueing here costs
+/// nothing real and keeps the dump and packaging stages parallel.
 static UPLOAD_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, Default)]

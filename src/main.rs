@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDateTime;
 use clap::Parser;
 use reqwest::blocking::Client;
@@ -85,6 +85,7 @@ fn main() -> Result<()> {
     let dashboard_port = shared_cfg.api_port;
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
+    web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
     tracing::info!(port = dashboard_port, "spawning status dashboard server");
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -206,14 +207,14 @@ fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: 
     let work_dir = cfg.work_dir.clone();
     let chunk_size = cfg.chunk_size_bytes();
     let bot_token = cfg.tg_bot_token.clone();
-    let chat_id = cfg.tg_chat_id.clone();
+    let chat_ids = cfg.tg_chat_ids.clone();
     let cron = cron.clone();
     std::thread::spawn(move || {
         tracing::info!(cron = %cron, "history upload worker started");
         for occurrence in 1u64.. {
             sleep_until_cron(&cron, occurrence);
             if let Err(error) = upload_active_history(
-                &history, &work_dir, chunk_size, &client, &bot_token, &chat_id,
+                &history, &work_dir, chunk_size, &client, &bot_token, &chat_ids,
             ) {
                 tracing::error!(error = %error, "scheduled history upload failed");
             }
@@ -227,7 +228,7 @@ fn upload_active_history(
     chunk_size: u64,
     client: &Client,
     bot_token: &str,
-    chat_id: &str,
+    chat_ids: &[String],
 ) -> Result<()> {
     let Some(snapshot) = history.snapshot_active(work_dir)? else {
         tracing::info!("history upload skipped — active monthly history is empty");
@@ -250,12 +251,20 @@ fn upload_active_history(
             total_bytes,
             "uploading monthly history snapshot",
         );
-        for (index, part) in parts.iter().enumerate() {
-            let mut stats = telegram::UploadStats::default();
-            telegram::send_document(client, bot_token, chat_id, part, &mut stats)
-                .with_context(|| format!("uploading history part {}", index + 1))?;
-            chunk::remove(part);
-        }
+        let mut stats = telegram::UploadStats::default();
+        upload_chunks_to_destinations(
+            &parts,
+            chat_ids,
+            |chat_id, part, stats| telegram::send_document(client, bot_token, chat_id, part, stats),
+            |_index| {},
+            &mut stats,
+        )
+        .context("uploading history snapshot")?;
+        tracing::info!(
+            upload_attempts = stats.attempts,
+            upload_retries = stats.retries,
+            "monthly history snapshot uploaded",
+        );
         Ok(())
     })();
     chunk::cleanup_prefix(work_dir, &prefix);
@@ -526,6 +535,73 @@ struct AttemptMetrics {
     upload_retries: u64,
 }
 
+/// Upload every chunk to each destination that has not failed yet.
+///
+/// A destination is complete only if it receives every chunk. Failed
+/// destinations are removed from later attempts, but the current chunk stays
+/// on disk until all destinations still active for it have been attempted.
+fn upload_chunks_to_destinations<F, C>(
+    chunks: &[std::path::PathBuf],
+    chat_ids: &[String],
+    mut send: F,
+    mut after_chunk: C,
+    stats: &mut telegram::UploadStats,
+) -> Result<()>
+where
+    F: FnMut(&str, &std::path::Path, &mut telegram::UploadStats) -> Result<()>,
+    C: FnMut(usize),
+{
+    if chat_ids.is_empty() {
+        bail!("no Telegram destinations configured");
+    }
+
+    let mut active = vec![true; chat_ids.len()];
+    let mut completed = vec![true; chat_ids.len()];
+    let mut failures = Vec::new();
+
+    for (chunk_index, path) in chunks.iter().enumerate() {
+        if !active.iter().any(|is_active| *is_active) {
+            break;
+        }
+
+        for (destination, is_active) in active.iter_mut().enumerate() {
+            if !*is_active {
+                continue;
+            }
+            if let Err(error) = send(&chat_ids[destination], path, stats) {
+                *is_active = false;
+                completed[destination] = false;
+                failures.push(format!(
+                    "destination {} failed on chunk {}: {error:#}",
+                    destination,
+                    chunk_index + 1
+                ));
+                tracing::warn!(
+                    destination,
+                    chunk = chunk_index + 1,
+                    error = %error,
+                    "Telegram destination marked incomplete",
+                );
+            }
+        }
+
+        chunk::remove(path);
+        after_chunk(chunk_index);
+    }
+
+    if completed.iter().any(|is_complete| *is_complete) {
+        return Ok(());
+    }
+
+    let detail = failures
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "all destinations were incomplete".to_string());
+    Err(anyhow!(
+        "no Telegram destination received every chunk; {detail}"
+    ))
+}
+
 /// A database whose backup did not complete.
 ///
 /// Recorded so the manifest reports failures explicitly instead of only
@@ -545,7 +621,7 @@ struct DatabaseFailure {
 /// 1. Spawn `pg_dump` for this database with configured extra args.
 /// 2. Stream stdout through `[zstd → age?] → ChunkWriter` producing a bare
 ///    file when it fits, otherwise `.partNNNN` files.
-/// 3. Upload each chunk to Telegram (with retries), deleting it right after.
+/// 3. Upload each chunk to every active Telegram destination (with retries).
 /// 4. Return a [`BackupResult`] with metadata.
 ///
 /// Reports "running" / "done" / "error" status to the dashboard at each phase.
@@ -626,7 +702,7 @@ fn run_database(
                     &format!("{error:#}"),
                     &db.url,
                     &cfg.tg_bot_token,
-                    &cfg.tg_chat_id,
+                    &cfg.tg_chat_ids,
                 )),
                 dump_bytes: metrics.dump_bytes,
                 packaged_bytes: metrics.packaged_bytes,
@@ -807,50 +883,39 @@ fn backup_pipeline(
     );
 
     // ── Upload chunks to Telegram ──────────────────────────────────────────
-    // Each chunk is deleted the moment Telegram has it, so `work_dir` peaks at
-    // the chunks still pending instead of the whole compressed dump.
+    // Each chunk is retained until every currently active destination has been
+    // attempted. A failed destination is skipped for subsequent chunks.
     let upload_started = SystemTime::now();
     let mut sent_bytes: u64 = 0;
-    for (i, p) in chunks.iter().enumerate() {
-        // Read the size before uploading — the file is gone right after.
-        let chunk_bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        let mut upload_stats = telegram::UploadStats::default();
-        let upload_result = telegram::send_document(
-            client,
-            &cfg.tg_bot_token,
-            &cfg.tg_chat_id,
-            p,
-            &mut upload_stats,
-        )
-        .with_context(|| {
-            format!(
-                "uploading chunk {}/{} (db={})",
-                i + 1,
-                chunks_count,
-                db_name
-            )
-        });
-        metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
-        metrics.upload_attempts += upload_stats.attempts;
-        metrics.upload_retries += upload_stats.retries;
-        upload_result?;
-        chunk::remove(p);
-        // Report progress from the chunk sizes actually on disk; throughput is
-        // wall-clock over the upload stage, so retries and stalls show up in it.
-        sent_bytes += chunk_bytes;
-        web::set_db_status(
-            db_name,
-            1,
-            "upload",
-            format!("Uploading to Telegram — {}/{chunks_count} chunks", i + 1),
-        );
-        web::set_db_transfer(
-            db_name,
-            sent_bytes,
-            total_bytes,
-            rate(sent_bytes, &upload_started),
-        );
-    }
+    let mut upload_stats = telegram::UploadStats::default();
+    upload_chunks_to_destinations(
+        &chunks,
+        &cfg.tg_chat_ids,
+        |chat_id, path, stats| {
+            telegram::send_document(client, &cfg.tg_bot_token, chat_id, path, stats)
+        },
+        |i| {
+            let path = &chunks[i];
+            let chunk_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            sent_bytes += chunk_bytes;
+            web::set_db_status(
+                db_name,
+                1,
+                "upload",
+                format!("Uploading to Telegram — {}/{chunks_count} chunks", i + 1),
+            );
+            web::set_db_transfer(
+                db_name,
+                sent_bytes,
+                total_bytes,
+                rate(sent_bytes, &upload_started),
+            );
+        },
+        &mut upload_stats,
+    )
+    .with_context(|| format!("uploading backup chunks (db={db_name})"))?;
+    metrics.upload_attempts += upload_stats.attempts;
+    metrics.upload_retries += upload_stats.retries;
     metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
 
     // Mark database as done in the dashboard.
@@ -888,7 +953,7 @@ fn record_history(
             &error.to_string(),
             database_url,
             &cfg.tg_bot_token,
-            &cfg.tg_chat_id,
+            &cfg.tg_chat_ids,
         );
         tracing::warn!(error = %sanitized, "failed to write backup history; continuing");
     }
@@ -1001,7 +1066,7 @@ fn execute_all_databases(
                             &format!("panicked: {panic_msg}"),
                             &databases[i].url,
                             &cfg.tg_bot_token,
-                            &cfg.tg_chat_id,
+                            &cfg.tg_chat_ids,
                         )),
                         dump_bytes: 0,
                         packaged_bytes: 0,
@@ -1415,5 +1480,95 @@ mod tests {
         assert_eq!(format_secs(45), "45s");
         assert_eq!(format_secs(3_600), "1h");
         assert_eq!(format_secs(90_061), "1d 1h 1m 1s");
+    }
+
+    fn upload_test_chunks(label: &str, count: usize) -> (PathBuf, Vec<PathBuf>) {
+        let root =
+            std::env::temp_dir().join(format!("crab-dump-upload-{label}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = (0..count)
+            .map(|index| {
+                let path = root.join(format!("chunk-{index}"));
+                std::fs::write(&path, [index as u8]).unwrap();
+                path
+            })
+            .collect();
+        (root, paths)
+    }
+
+    #[test]
+    fn destinations_all_receive_all_chunks_and_stats_aggregate() {
+        let (root, chunks) = upload_test_chunks("all-success", 2);
+        let destinations = vec!["primary".into(), "backup".into()];
+        let mut stats = telegram::UploadStats::default();
+        let mut completed_chunks = Vec::new();
+        upload_chunks_to_destinations(
+            &chunks,
+            &destinations,
+            |_destination, _path, stats| {
+                stats.attempts += 1;
+                stats.retries += 1;
+                Ok(())
+            },
+            |index| completed_chunks.push(index),
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.attempts, 4);
+        assert_eq!(stats.retries, 4);
+        assert_eq!(completed_chunks, vec![0, 1]);
+        assert!(chunks.iter().all(|path| !path.exists()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_destination_is_skipped_while_peer_completes() {
+        let (root, chunks) = upload_test_chunks("one-fails", 3);
+        let destinations = vec!["primary".into(), "backup".into()];
+        let mut stats = telegram::UploadStats::default();
+        let mut calls = Vec::new();
+        upload_chunks_to_destinations(
+            &chunks,
+            &destinations,
+            |destination, _path, stats| {
+                calls.push(destination.to_string());
+                stats.attempts += 1;
+                if destination == "backup" {
+                    anyhow::bail!("unavailable");
+                }
+                Ok(())
+            },
+            |_| {},
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.attempts, 4);
+        assert_eq!(calls, vec!["primary", "backup", "primary", "primary"]);
+        assert!(chunks.iter().all(|path| !path.exists()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn all_destinations_failing_returns_error_after_cleanup_attempts() {
+        let (root, chunks) = upload_test_chunks("all-fail", 2);
+        let destinations = vec!["primary".into(), "backup".into()];
+        let mut stats = telegram::UploadStats::default();
+        let error = upload_chunks_to_destinations(
+            &chunks,
+            &destinations,
+            |_destination, _path, stats| {
+                stats.attempts += 1;
+                anyhow::bail!("unavailable");
+            },
+            |_| {},
+            &mut stats,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no Telegram destination"));
+        assert_eq!(stats.attempts, 2);
+        assert!(!chunks[0].exists());
+        assert!(chunks[1].exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

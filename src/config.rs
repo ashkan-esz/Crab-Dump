@@ -82,8 +82,8 @@ pub enum Schedule {
 pub struct SharedConfig {
     /// Telegram bot token from @BotFather.
     pub tg_bot_token: String,
-    /// Target chat for uploaded chunks (numeric ID or `@channelusername`).
-    pub tg_chat_id: String,
+    /// Target chats for uploaded chunks (numeric IDs or `@channelusername`).
+    pub tg_chat_ids: Vec<String>,
     /// age X25519 recipient public key (`age1…`). `None` → compressed but
     /// NOT encrypted.
     pub age_recipient: Option<String>,
@@ -180,13 +180,14 @@ impl Config {
         // ── Step 1: Parse config.toml once, merged with the environment ─────
         // Every step below reads from this single view, so a setting works
         // identically whether it came from the file or from an env var.
-        let raw = merge_raw_with_env(load_config_raw(), |key| {
+        let mut raw = merge_raw_with_env(load_config_raw(), |key| {
             if key == "HISTORY_UPLOAD_SCHEDULE" {
                 env::var(key).ok()
             } else {
                 get_env(key)
             }
         });
+        raw.tg_chat_ids = scan_indexed_chat_ids(std::env::vars())?;
         let shared = build_shared_config(&raw)?;
 
         // Shared pg_dump args, from either source — the default each database
@@ -313,7 +314,7 @@ fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
 struct RawConfigFile {
     pg_dump_extra_args: Option<String>,
     tg_bot_token: Option<String>,
-    tg_chat_id: Option<String>,
+    tg_chat_ids: Option<Vec<String>>,
     age_recipient: Option<String>,
     chunk_size_mb: Option<u64>,
     work_dir: Option<String>,
@@ -394,10 +395,20 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         .clone()
         .ok_or_else(|| anyhow!("TG_BOT_TOKEN is required (set in config.toml or environment)"))?;
 
-    let tg_chat_id = raw
-        .tg_chat_id
+    let tg_chat_ids = raw
+        .tg_chat_ids
         .clone()
-        .ok_or_else(|| anyhow!("TG_CHAT_ID is required (set in config.toml or environment)"))?;
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| {
+            anyhow!("at least one indexed TG_CHAT_ID_N is required (set in environment)")
+        })?;
+    if let Some((index, _)) = tg_chat_ids
+        .iter()
+        .enumerate()
+        .find(|(_, chat_id)| chat_id.trim().is_empty())
+    {
+        bail!("TG_CHAT_ID_{index} must not be blank");
+    }
 
     let age_recipient = match raw.age_recipient.clone() {
         Some(s) => {
@@ -476,7 +487,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
 
     Ok(SharedConfig {
         tg_bot_token,
-        tg_chat_id,
+        tg_chat_ids,
         age_recipient,
         chunk_size_mb,
         work_dir,
@@ -566,7 +577,7 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
     RawConfigFile {
         pg_dump_extra_args: env("PG_DUMP_EXTRA_ARGS").or(raw.pg_dump_extra_args),
         tg_bot_token: env("TG_BOT_TOKEN").or(raw.tg_bot_token),
-        tg_chat_id: env("TG_CHAT_ID").or(raw.tg_chat_id),
+        tg_chat_ids: raw.tg_chat_ids,
         age_recipient: env("AGE_RECIPIENT").or(raw.age_recipient),
         chunk_size_mb: env("CHUNK_SIZE_MB")
             .and_then(|v| v.parse().ok())
@@ -590,6 +601,46 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         history_upload_schedule: env("HISTORY_UPLOAD_SCHEDULE").or(raw.history_upload_schedule),
         databases: raw.databases, // TOML-only; never merged with env.
     }
+}
+
+/// Parse contiguous `TG_CHAT_ID_N` variables from an environment-like source.
+///
+/// Values are trimmed, blank IDs are rejected, and every index between zero
+/// and the highest configured index must be present. A missing index is an
+/// error rather than silently truncating the destination list.
+fn scan_indexed_chat_ids(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> Result<Option<Vec<String>>> {
+    let mut indexed = std::collections::BTreeMap::new();
+    for (key, value) in entries {
+        let Some(index) = key.strip_prefix("TG_CHAT_ID_") else {
+            continue;
+        };
+        if index.is_empty() || !index.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let index = index
+            .parse::<usize>()
+            .with_context(|| format!("invalid indexed chat ID variable `{key}`"))?;
+        indexed.insert(index, value);
+    }
+
+    let Some(&highest) = indexed.keys().next_back() else {
+        return Ok(None);
+    };
+
+    let mut chat_ids = Vec::with_capacity(highest + 1);
+    for index in 0..=highest {
+        let value = indexed.get(&index).ok_or_else(|| {
+            anyhow!("indexed chat IDs must be contiguous from 0: missing TG_CHAT_ID_{index}")
+        })?;
+        let value = value.trim();
+        if value.is_empty() {
+            bail!("TG_CHAT_ID_{index} must not be blank");
+        }
+        chat_ids.push(value.to_string());
+    }
+    Ok(Some(chat_ids))
 }
 
 /// Parse a boolean env var. Anything other than an explicit off value counts as
@@ -839,7 +890,7 @@ mod tests {
     fn chunk_size_bytes_computes_correctly() {
         let cfg = SharedConfig {
             tg_bot_token: "t".into(),
-            tg_chat_id: "c".into(),
+            tg_chat_ids: vec!["c".into()],
             age_recipient: None,
             chunk_size_mb: 49,
             work_dir: std::env::temp_dir(),
@@ -854,12 +905,55 @@ mod tests {
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
     }
 
+    #[test]
+    fn indexed_chat_ids_trim_and_require_contiguous_indices() {
+        let ids = scan_indexed_chat_ids([
+            ("TG_CHAT_ID_1".into(), " @backup ".into()),
+            ("TG_CHAT_ID_0".into(), " -100123 ".into()),
+        ])
+        .unwrap();
+        assert_eq!(ids, Some(vec!["-100123".into(), "@backup".into()]));
+    }
+
+    #[test]
+    fn indexed_chat_ids_reject_missing_zero_and_gaps() {
+        let missing_zero =
+            scan_indexed_chat_ids([("TG_CHAT_ID_1".into(), "backup".into())]).unwrap_err();
+        assert!(missing_zero.to_string().contains("TG_CHAT_ID_0"));
+
+        let gap = scan_indexed_chat_ids([
+            ("TG_CHAT_ID_0".into(), "primary".into()),
+            ("TG_CHAT_ID_2".into(), "backup".into()),
+        ])
+        .unwrap_err();
+        assert!(gap.to_string().contains("TG_CHAT_ID_1"));
+    }
+
+    #[test]
+    fn indexed_chat_ids_reject_blank_and_allow_none() {
+        let blank = scan_indexed_chat_ids([("TG_CHAT_ID_0".into(), "   ".into())]).unwrap_err();
+        assert!(blank.to_string().contains("must not be blank"));
+        assert_eq!(
+            scan_indexed_chat_ids(Vec::<(String, String)>::new()).unwrap(),
+            None
+        );
+        let empty = RawConfigFile {
+            tg_bot_token: Some("t".into()),
+            tg_chat_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(build_shared_config(&empty)
+            .unwrap_err()
+            .to_string()
+            .contains("at least one"));
+    }
+
     // -- Parallelism limit --
 
     fn shared_raw() -> RawConfigFile {
         RawConfigFile {
             tg_bot_token: Some("t".into()),
-            tg_chat_id: Some("c".into()),
+            tg_chat_ids: Some(vec!["c".into()]),
             ..Default::default()
         }
     }
@@ -1105,7 +1199,7 @@ mod tests {
     #[test]
     fn env_shadows_file_for_shared_scalars() {
         let raw = RawConfigFile {
-            tg_chat_id: Some("file-chat".into()),
+            tg_chat_ids: Some(vec!["file-chat".into()]),
             chunk_size_mb: Some(10),
             ..Default::default()
         };
@@ -1117,7 +1211,10 @@ mod tests {
 
         assert_eq!(merged.chunk_size_mb, Some(20));
         // Unset in the environment — the file value survives.
-        assert_eq!(merged.tg_chat_id.as_deref(), Some("file-chat"));
+        assert_eq!(
+            merged.tg_chat_ids.as_deref(),
+            Some(["file-chat".to_string()].as_slice())
+        );
     }
 
     // -- Shared pg_dump_extra_args inheritance (D4) --
@@ -1281,7 +1378,7 @@ mod tests {
     fn non_ascii_age_recipient_errors_without_panic() {
         let raw = RawConfigFile {
             tg_bot_token: Some("t".into()),
-            tg_chat_id: Some("c".into()),
+            tg_chat_ids: Some(vec!["c".into()]),
             // Byte index 12 lands inside a multi-byte char — the old byte-slice
             // excerpt panicked here instead of reporting the bad value.
             age_recipient: Some("a密码密码密码".into()),

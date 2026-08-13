@@ -2,7 +2,8 @@
 //!
 //! Serves `index.html` as a static page and provides API endpoints:
 //! - `GET /api/config` — returns `{ "port", "uptime_seconds", "hostname",
-//!   "max_parallel_databases", "schedule", "phase", "next_run_secs" }`
+//!   "max_parallel_databases", "telegram_chat_count", "schedule", "phase",
+//!   "next_run_secs" }`
 //! - `GET /api/status/service` — Telegram API connection status
 //! - `GET /api/status/process` — aggregated PostgreSQL dump status (max across DBs)
 //! - `GET /api/status/database/{name}` — per-database dump status
@@ -35,6 +36,9 @@ static START_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 /// Set once at startup by [`set_max_parallel_databases`]; 0 means "not yet
 /// reported", which the dashboard renders as unknown.
 static MAX_PARALLEL_DATABASES: AtomicU64 = AtomicU64::new(0);
+
+/// Number of configured Telegram destinations, published to the dashboard.
+static TELEGRAM_CHAT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a backup cycle is executing right now. Distinguishes "working" from
 /// "sleeping until the next slot", which the per-database cards alone cannot
@@ -226,6 +230,12 @@ pub fn set_max_parallel_databases(limit: usize) {
     MAX_PARALLEL_DATABASES.store(limit as u64, Ordering::SeqCst);
 }
 
+/// Publish the number of configured Telegram destinations so `/api/config` can
+/// report it without exposing any destination values.
+pub fn set_telegram_chat_count(count: usize) {
+    TELEGRAM_CHAT_COUNT.store(count as u64, Ordering::SeqCst);
+}
+
 /// Publish the schedule the process is running on, as the dashboard should
 /// show it — `"every 6h"`, `"cron 0 */4 * * *"`, or empty for one-shot.
 pub fn set_schedule_label(label: impl Into<String>) {
@@ -271,6 +281,8 @@ pub struct ConfigResponse {
     pub hostname: String,
     /// How many database backups may run at the same time.
     pub max_parallel_databases: u64,
+    /// Number of configured Telegram destinations.
+    pub telegram_chat_count: u64,
     /// The configured schedule, or an empty string in one-shot mode.
     pub schedule: String,
     /// `"running"` while a cycle is in flight, `"waiting"` between scheduled
@@ -312,6 +324,7 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
         uptime_seconds,
         hostname,
         max_parallel_databases: MAX_PARALLEL_DATABASES.load(Ordering::SeqCst),
+        telegram_chat_count: TELEGRAM_CHAT_COUNT.load(Ordering::SeqCst),
         phase: match (running, schedule.is_empty()) {
             (true, _) => "running",
             (false, false) => "waiting",

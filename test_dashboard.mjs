@@ -18,9 +18,9 @@ const stubs = {
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, historyValue, historyMarkup, expandedDatabases, STAGES };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, historyValue, historyMarkup, expandedDatabases, STAGES } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, STAGES } = load(...Object.values(stubs));
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 
@@ -61,6 +61,10 @@ assert.equal(fmtBytes(10 * 1024), '10 KiB');
 assert.equal(fmtBytes(2.5 * 1024 ** 3), '2.5 GiB');
 assert.equal(fmtSpeed(0), '—');                     // idle, not "0 B/s"
 assert.equal(fmtSpeed(4 * 1024 ** 2), '4.0 MiB/s');
+
+assert.equal(telegramDestinationText(0), '0 destinations');
+assert.equal(telegramDestinationText(1), '1 destination');
+assert.equal(telegramDestinationText(3), '3 destinations');
 
 // Dumped size line: hidden with no bytes, no ratio until the payload size is
 // known, ratio against the uploaded size once packaging reports it.

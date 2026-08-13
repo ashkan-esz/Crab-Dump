@@ -557,6 +557,7 @@
         <span class="info-chip"><span class="icon">&#x1f3e2;</span> Port: <strong id="infoPort">—</strong></span>
         <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">—</strong></span>
         <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">—</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">—</strong></span>
         <span class="info-chip"><span class="icon">&#x1f5d3;</span> Schedule: <strong id="infoSchedule">—</strong></span>
         <span class="info-chip" id="infoPhaseChip"><span class="icon">&#x1f504;</span> State: <strong id="infoPhase">—</strong></span>
     </div>
@@ -660,12 +661,18 @@
         return bps > 0 ? `${fmtBytes(bps)}/s` : '—';
     }
 
+    function telegramDestinationText(count) {
+        return `${count} destination${count === 1 ? '' : 's'}`;
+    }
+
     // ── Info bar ───────────────────────────────────────────────────
     async function loadConfig() {
         try {
             config = await fetchStatus('/api/config');
             document.getElementById('infoHost').textContent = config.hostname;
             document.getElementById('infoPort').textContent = config.port;
+            document.getElementById('infoTelegramChats').textContent =
+                telegramDestinationText(config.telegram_chat_count);
             // How many databases may dump at once — 0 means the backend has not
             // reported a limit yet, so leave the placeholder in place.
             const limit = config.max_parallel_databases;
