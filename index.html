@@ -287,6 +287,11 @@
         .history-heading { display: flex; justify-content: space-between; gap: .75rem; align-items: baseline; margin-bottom: .8rem; }
         .history-heading h3 { font-size: .82rem; font-weight: 650; }
         .history-refresh { color: var(--accent); font-size: .7rem; background: none; border: 0; cursor: pointer; }
+        .history-controls { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .8rem; color: var(--text-muted); font-size: .7rem; }
+        .history-controls select, .history-page-button { color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: .25rem .45rem; font: inherit; }
+        .history-page-button { cursor: pointer; }
+        .history-page-button:disabled { cursor: default; opacity: .45; }
+        .history-page-size { display: flex; align-items: center; gap: .4rem; }
         .history-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin-bottom: .85rem; }
         .history-stat { border: 1px solid var(--border); border-radius: 7px; padding: .5rem .6rem; min-width: 0; }
         .history-stat span { display: block; color: var(--text-muted); font-size: .61rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -1081,6 +1086,7 @@
     /** Card elements keyed by database name, so polling updates them in place. */
     const dbCards = new Map();
     const historyCache = new Map();
+    const historyPageState = new Map();
     const expandedDatabases = new Set();
     const togglingDatabases = new Set();
     const toggleErrors = new Map();
@@ -1214,7 +1220,7 @@
         if (manualRequests.has(db.name) && (db.stage === 'done' || db.state === 'DOWN')) {
             manualRequests.delete(db.name);
             backupErrors.delete(db.name);
-            historyCache.delete(db.name);
+            clearHistoryCache(db.name);
             if (expandedDatabases.has(db.name)) {
                 queueMicrotask(() => {
                     const current = dbCards.get(db.name);
@@ -1302,6 +1308,22 @@
         return Number(value || 0).toFixed(digits);
     }
 
+    function historyState(name) {
+        if (!historyPageState.has(name)) historyPageState.set(name, { page: 1, pageSize: 10 });
+        return historyPageState.get(name);
+    }
+
+    function historyCacheKey(name, page, pageSize) {
+        return `${name}\u0000${page}\u0000${pageSize}`;
+    }
+
+    function clearHistoryCache(name) {
+        const prefix = `${name}\u0000`;
+        for (const key of historyCache.keys()) {
+            if (key.startsWith(prefix)) historyCache.delete(key);
+        }
+    }
+
     function historyMarkup(data) {
         const s = data.stats || {};
         const stats = [
@@ -1329,6 +1351,12 @@
                 <td>${record.upload_retries || 0}</td>
                 <td class="history-error">${escapeHtml(record.error || '-')}</td>
             </tr>`).join('');
+        const page = data.page || 1;
+        const pageSize = data.page_size || 10;
+        const totalRecords = data.total_records ?? (data.records || []).length;
+        const totalPages = data.total_pages ?? (totalRecords ? Math.ceil(totalRecords / pageSize) : 0);
+        const rangeStart = totalRecords ? ((page - 1) * pageSize) + 1 : 0;
+        const rangeEnd = totalRecords ? rangeStart + (data.records || []).length - 1 : 0;
         return `
             <div class="history-heading">
                 <h3>Backup history</h3>
@@ -1338,30 +1366,65 @@
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
                 <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
-            </table></div>` : '<div class="history-muted">No backup history yet.</div>'}`;
+            </table></div>` : '<div class="history-muted">No backup history yet.</div>'}
+            <div class="history-controls">
+                <label class="history-page-size">Records per page
+                    <select class="history-page-size-select" aria-label="Records per page">
+                        <option value="10" ${pageSize === 10 ? 'selected' : ''}>10</option>
+                        <option value="20" ${pageSize === 20 ? 'selected' : ''}>20</option>
+                        <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                    </select>
+                </label>
+                <span class="history-page-status">${rangeStart}-${rangeEnd} of ${totalRecords} · Page ${page} of ${totalPages}</span>
+                <span>
+                    <button type="button" class="history-page-button history-prev" ${page <= 1 ? 'disabled' : ''}>Previous</button>
+                    <button type="button" class="history-page-button history-next" ${totalPages === 0 || page >= totalPages ? 'disabled' : ''}>Next</button>
+                </span>
+            </div>`;
     }
 
     function renderHistory(el, data) {
+        const name = el.querySelector('.db-name').textContent;
+        const state = historyState(name);
+        state.page = data.page || 1;
+        state.pageSize = data.page_size || state.pageSize;
         const panel = el.querySelector('.db-history');
         panel.innerHTML = historyMarkup(data);
         panel.querySelector('.history-refresh').addEventListener('click', event => {
             event.stopPropagation();
             loadHistory(el, true);
         });
+        panel.querySelector('.history-page-size-select').addEventListener('change', event => {
+            state.page = 1;
+            state.pageSize = Number(event.target.value);
+            loadHistory(el, true);
+        });
+        panel.querySelector('.history-prev').addEventListener('click', event => {
+            event.stopPropagation();
+            state.page = Math.max(1, state.page - 1);
+            loadHistory(el, true);
+        });
+        panel.querySelector('.history-next').addEventListener('click', event => {
+            event.stopPropagation();
+            state.page += 1;
+            loadHistory(el, true);
+        });
     }
 
     async function loadHistory(el, force = false) {
         const name = el.querySelector('.db-name').textContent;
-        if (!force && historyCache.has(name)) {
-            renderHistory(el, historyCache.get(name));
+        const state = historyState(name);
+        const key = historyCacheKey(name, state.page, state.pageSize);
+        if (!force && historyCache.has(key)) {
+            renderHistory(el, historyCache.get(key));
             return;
         }
         const panel = el.querySelector('.db-history');
         panel.hidden = false;
         panel.innerHTML = `<div class="history-skeleton"><div class="skeleton" style="width:35%"></div><div class="skeleton" style="width:100%"></div><div class="skeleton" style="width:90%"></div></div>`;
         try {
-            const data = await fetchStatus(`/api/history/${encodeURIComponent(name)}`);
-            historyCache.set(name, data);
+            const data = await fetchStatus(`/api/history/${encodeURIComponent(name)}?page=${state.page}&page_size=${state.pageSize}`);
+            historyCache.set(historyCacheKey(name, data.page || state.page, data.page_size || state.pageSize), data);
             renderHistory(el, data);
         } catch (error) {
             panel.innerHTML = `<div class="history-error-state"><span>Could not load backup history.</span><button type="button" class="history-refresh">Retry</button></div>`;
@@ -1525,7 +1588,7 @@
         try {
             await fetchStatus(`/api/status/database/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
             togglingDatabases.delete(name);
-            historyCache.delete(name);
+            clearHistoryCache(name);
             await refreshDashboard();
             if (expandedDatabases.has(name)) {
                 const el = dbCards.get(name);

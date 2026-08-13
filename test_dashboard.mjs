@@ -44,6 +44,8 @@ assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/)
 assert.match(body, /'disable', 'disabled'/);
 assert.match(body, /'enable', 'enabled'/);
 assert.match(html, /\.db-group-list \{ display: flex; flex-direction: column; gap: 1rem; \}/);
+assert.match(body, /page_size=\$\{state\.pageSize\}/);
+assert.match(body, /historyCacheKey\(name, state\.page, state\.pageSize\)/);
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 
@@ -131,6 +133,18 @@ assert.match(manualHistory, /<td>Alice<\/td>/);
 assert.match(manualHistory, /<th>Receiver<\/th>/);
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
 assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);
+const pagedHistory = historyMarkup({
+    page: 2, page_size: 20, total_records: 35, total_pages: 2,
+    stats: {}, records: Array.from({ length: 15 }, (_, i) => ({
+        started_at: `2026-08-${15 - i}T00:00:00Z`, status: 'success',
+    })),
+});
+assert.match(pagedHistory, /value="10"/);
+assert.match(pagedHistory, /value="20" selected/);
+assert.match(pagedHistory, /value="50"/);
+assert.match(pagedHistory, /21-35 of 35 · Page 2 of 2/);
+assert.match(pagedHistory, /class="history-page-button history-prev"/);
+assert.match(pagedHistory, /class="history-page-button history-next" disabled/);
 expandedDatabases.add('app');
 assert.equal(expandedDatabases.has('app'), true);
 expandedDatabases.delete('app');

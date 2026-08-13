@@ -69,6 +69,10 @@ pub struct HistorySummary {
     pub database: String,
     pub stats: HistoryStats,
     pub records: Vec<HistoryRecord>,
+    pub page: usize,
+    pub page_size: usize,
+    pub total_records: usize,
+    pub total_pages: usize,
 }
 
 /// Process-wide serialized history appender.
@@ -173,7 +177,12 @@ impl HistoryStore {
     /// Read retained history for one database without loading the history
     /// corpus into memory. Malformed JSONL lines are ignored so one truncated
     /// record cannot hide the rest of the dashboard history.
-    pub fn summary(&self, database_name: &str, limit: usize) -> Result<HistorySummary> {
+    pub fn summary(
+        &self,
+        database_name: &str,
+        page: usize,
+        page_size: usize,
+    ) -> Result<HistorySummary> {
         let mut all = Vec::new();
         let mut stats = HistoryStatsBuilder::default();
         let entries = match fs::read_dir(&self.directory) {
@@ -183,6 +192,10 @@ impl HistoryStore {
                     database: database_name.to_string(),
                     stats: stats.finish(),
                     records: Vec::new(),
+                    page: 1,
+                    page_size,
+                    total_records: 0,
+                    total_pages: 0,
                 });
             }
             Err(error) => {
@@ -221,11 +234,24 @@ impl HistoryStore {
         }
 
         all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        all.truncate(limit);
+        let total_records = all.len();
+        let total_pages = total_records.div_ceil(page_size);
+        let page = if total_pages == 0 {
+            1
+        } else {
+            page.max(1).min(total_pages)
+        };
+        let start = (page - 1) * page_size;
+        let end = (start + page_size).min(total_records);
+        let records = all.into_iter().skip(start).take(end - start).collect();
         Ok(HistorySummary {
             database: database_name.to_string(),
             stats: stats.finish(),
-            records: all,
+            records,
+            page,
+            page_size,
+            total_records,
+            total_pages,
         })
     }
 
@@ -581,8 +607,12 @@ mod tests {
             store.append(&item).unwrap();
         }
 
-        let summary = store.summary("app", 30).unwrap();
+        let summary = store.summary("app", 1, 30).unwrap();
         assert_eq!(summary.records.len(), 30);
+        assert_eq!(summary.page, 1);
+        assert_eq!(summary.page_size, 30);
+        assert_eq!(summary.total_records, 35);
+        assert_eq!(summary.total_pages, 2);
         assert_eq!(summary.records[0].started_at, "2026-09-07T00:00:00Z");
         assert_eq!(summary.records[29].started_at, "2026-08-06T00:00:00Z");
         assert_eq!(summary.stats.attempts, 35);
@@ -594,6 +624,26 @@ mod tests {
             Some("2026-09-06T00:00:00Z")
         );
         assert!((summary.stats.average_duration_secs - 18.0).abs() < f64::EPSILON);
+
+        let second_page = store.summary("app", 2, 20).unwrap();
+        assert_eq!(second_page.page, 2);
+        assert_eq!(second_page.page_size, 20);
+        assert_eq!(second_page.total_records, 35);
+        assert_eq!(second_page.total_pages, 2);
+        assert_eq!(second_page.records.len(), 15);
+        assert_eq!(
+            second_page.records.first().unwrap().started_at,
+            "2026-08-15T00:00:00Z"
+        );
+        assert_eq!(
+            second_page.records.last().unwrap().started_at,
+            "2026-08-01T00:00:00Z"
+        );
+
+        let clamped = store.summary("app", 99, 50).unwrap();
+        assert_eq!(clamped.page, 1);
+        assert_eq!(clamped.total_pages, 1);
+        assert_eq!(clamped.records.len(), 35);
         fs::remove_dir_all(dir).ok();
     }
 
@@ -608,8 +658,8 @@ mod tests {
         )
         .unwrap();
         let store = HistoryStore::new(&dir, 12);
-        assert_eq!(store.summary("app", 30).unwrap().stats.attempts, 1);
-        assert!(store.summary("missing", 30).unwrap().records.is_empty());
+        assert_eq!(store.summary("app", 1, 30).unwrap().stats.attempts, 1);
+        assert!(store.summary("missing", 1, 30).unwrap().records.is_empty());
         fs::remove_dir_all(dir).ok();
     }
 
@@ -627,7 +677,7 @@ mod tests {
         let backup = record("2026-08-01T00:00:00Z");
         store.append(&backup).unwrap();
 
-        let summary = store.summary("app", 30).unwrap();
+        let summary = store.summary("app", 1, 30).unwrap();
         assert_eq!(summary.records.len(), 2);
         assert_eq!(summary.records[0].status, "disabled");
         assert_eq!(summary.stats.attempts, 1);
@@ -641,11 +691,14 @@ mod tests {
     fn summary_of_empty_or_absent_history_is_zeroed() {
         let dir = temp_dir("summary-empty");
         let store = HistoryStore::new(&dir, 12);
-        let summary = store.summary("app", 30).unwrap();
+        let summary = store.summary("app", 1, 30).unwrap();
         assert_eq!(summary.stats.attempts, 0);
         assert_eq!(summary.stats.success_rate, 0.0);
         assert!(summary.stats.last_run.is_none());
         assert!(summary.records.is_empty());
+        assert_eq!(summary.page, 1);
+        assert_eq!(summary.total_records, 0);
+        assert_eq!(summary.total_pages, 0);
     }
 
     #[test]

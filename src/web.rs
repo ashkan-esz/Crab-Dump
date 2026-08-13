@@ -800,13 +800,26 @@ struct ManualBackupPayload {
     no_encryption: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
 /// GET /api/history/{database_name} — retained attempts and aggregate stats.
 async fn api_history(
     path: web::Path<String>,
+    query: web::Query<HistoryQuery>,
     history: web::Data<std::sync::Arc<HistoryStore>>,
 ) -> impl Responder {
     let database_name = path.into_inner();
-    match history.summary(&database_name, 30) {
+    let page_size = query.page_size.unwrap_or(10);
+    if !matches!(page_size, 10 | 20 | 50) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "page_size must be one of 10, 20, or 50"
+        }));
+    }
+    match history.summary(&database_name, query.page.unwrap_or(1), page_size) {
         Ok(summary) => HttpResponse::Ok().json(summary),
         Err(error) => {
             tracing::warn!(database = %database_name, error = %error, "failed to read database history");
@@ -1765,5 +1778,84 @@ mod tests {
         }
         set_manual_backup_available(false);
         let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[actix_web::test]
+    async fn history_api_paginates_and_rejects_invalid_page_sizes() {
+        let name = format!("history-api-{}", std::process::id());
+        let directory = std::env::temp_dir().join(format!("crab-history-api-{}", now_epoch_secs()));
+        let history = Arc::new(HistoryStore::new(&directory, 12));
+        for ordinal in 1..=25 {
+            let timestamp = format!("2026-08-{ordinal:02}T00:00:00Z");
+            history
+                .append(&crate::history::HistoryRecord {
+                    started_at: timestamp.clone(),
+                    ended_at: timestamp,
+                    database_index: 0,
+                    database_name: name.clone(),
+                    source: "scheduled".into(),
+                    recipient: None,
+                    status: "success".into(),
+                    error: None,
+                    dump_bytes: ordinal,
+                    packaged_bytes: ordinal,
+                    chunk_count: 1,
+                    sha256: None,
+                    encrypted: false,
+                    duration_secs: 1.0,
+                    upload_duration_secs: 0.0,
+                    upload_attempts: 1,
+                    upload_retries: 0,
+                })
+                .unwrap();
+        }
+
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(history))
+                .route("/api/history/{database_name}", web::get().to(api_history)),
+        )
+        .await;
+
+        let response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri(&format!("/api/history/{name}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = aw_test::read_body_json(response).await;
+        assert_eq!(body["page"], 1);
+        assert_eq!(body["page_size"], 10);
+        assert_eq!(body["total_records"], 25);
+        assert_eq!(body["total_pages"], 3);
+        assert_eq!(body["records"].as_array().unwrap().len(), 10);
+        assert_eq!(body["records"][0]["started_at"], "2026-08-25T00:00:00Z");
+        assert_eq!(body["stats"]["attempts"], 25);
+
+        for page_size in [10, 20, 50] {
+            let response = aw_test::call_service(
+                &app,
+                aw_test::TestRequest::get()
+                    .uri(&format!("/api/history/{name}?page=2&page_size={page_size}"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            let body: serde_json::Value = aw_test::read_body_json(response).await;
+            assert_eq!(body["page_size"], page_size);
+            assert_eq!(body["stats"]["attempts"], 25);
+        }
+
+        let response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri(&format!("/api/history/{name}?page_size=15"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 400);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

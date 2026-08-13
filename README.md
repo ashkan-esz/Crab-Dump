@@ -232,11 +232,13 @@ containers, mount `HISTORY_DIR` as persistent storage; the example
 state.
 
 The dashboard keeps the live pipeline view separate from historical data.
-Expand a database row to load its retained history on demand; the expanded
-view shows the newest 30 attempts and aggregate statistics across all retained
-monthly files. It includes success/failure counts and rate, last run and last
-successful run, average duration, dump and packaged sizes, upload retries, and
-sanitized failure messages.
+Expand a database row to load its retained history on demand. History is
+server-paginated with 10 records per page by default; the dashboard supports
+page sizes of 10, 20, and 50. Aggregate statistics always cover all retained
+monthly records, regardless of the selected page. The view includes
+success/failure counts and rate, last run and last successful run, average
+duration, dump and packaged sizes, upload retries, and sanitized failure
+messages.
 
 The read-only endpoint is:
 
@@ -244,10 +246,14 @@ The read-only endpoint is:
 GET /api/history/{database_name}
 ```
 
-It returns `{ "database", "stats", "records" }`. Missing or empty history
-returns a successful response with zero-valued statistics and an empty
-`records` array. The dashboard caches an expanded result until the user
-presses Refresh.
+Optional query parameters are `page` (1-based, default `1`) and `page_size`
+(one of `10`, `20`, or `50`; default `10`). It returns
+`{ "database", "stats", "records", "page", "page_size", "total_records",
+"total_pages" }`. Records are newest first. An out-of-range page is clamped
+to the last available page. Missing or empty history returns a successful
+response with zero-valued statistics, `total_records: 0`, `total_pages: 0`,
+and an empty `records` array. The dashboard caches expanded results by
+database, page, and page size until the user presses Refresh.
 
 ## Running in Docker
 
