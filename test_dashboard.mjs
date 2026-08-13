@@ -39,6 +39,10 @@ assert.match(body, /user\.enabled/);
 assert.match(body, /no_encryption: noEncryption/);
 assert.match(body, /openManualBackupModal/);
 assert.match(body, /setupManualBackupModal/);
+assert.match(html, /id="tgTestBtn"/);
+assert.match(body, /api\/status\/service\/test/);
+assert.match(body, /testTelegramApi/);
+assert.match(body, /Testing\.\.\./);
 assert.match(html, /history-table \.action \{ color: var\(--text-muted\); \}/);
 assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/);
 assert.match(body, /'disable', 'disabled'/);
@@ -209,3 +213,9 @@ assert.equal(escapeHtml(`<script>alert("x")</script> & 'id'`),
 assert.doesNotMatch(usersHtml, /—/);
 
 console.log('Telegram users workspace contract OK');
+
+const routingHtml = readFileSync(new URL('./routing.html', import.meta.url), 'utf8');
+assert.match(routingHtml, /disableRouting/);
+assert.match(routingHtml, /api\/v2ray\/disable/);
+assert.match(routingHtml, /Saved profiles will remain available/);
+console.log('Routing disable workspace contract OK');

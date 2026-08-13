@@ -310,6 +310,39 @@ pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str)
     }
 }
 
+pub fn test_api(client: &Client, bot_token: &str) -> Result<()> {
+    let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let url = format!("{API_BASE}/bot{bot_token}/getMe");
+    let response = match client.get(&url).send().context("testing Telegram API") {
+        Ok(response) => response,
+        Err(error) => {
+            web::set_telegram_status(2);
+            return Err(error);
+        }
+    };
+    let status = response.status();
+    let body: ApiResponse = match response
+        .json()
+        .context("parsing Telegram API test response")
+    {
+        Ok(body) => body,
+        Err(error) => {
+            web::set_telegram_status(2);
+            return Err(error);
+        }
+    };
+    if body.ok {
+        web::set_telegram_status(0);
+        return Ok(());
+    }
+
+    web::set_telegram_status(2);
+    bail!(
+        "Telegram API test failed (http={status}, tg_code={:?})",
+        body.error_code
+    );
+}
+
 /// How long to wait before retrying attempt `attempt`.
 ///
 /// Telegram knows how long the limit actually runs, so its `retry_after` hint

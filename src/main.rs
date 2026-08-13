@@ -11,7 +11,7 @@
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -38,7 +38,7 @@ use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
 use v2ray::{ProfileStore, RouteManager, DEFAULT_SING_BOX_PATH};
 
-type ClientHandle = Arc<RwLock<Client>>;
+type ClientHandle = Arc<RwLock<Arc<Client>>>;
 
 /// Load `.env` / `.env.local` before config resolution so environment-based
 /// config loading picks up credentials without manual export.
@@ -115,9 +115,15 @@ fn main() -> Result<()> {
         }
     }
     let route_proxy = route_manager.active_proxy();
-    let telegram_client: ClientHandle = Arc::new(RwLock::new(build_http_client_for_proxy(
-        route_proxy.as_deref().or(shared_cfg.socks_proxy.as_deref()),
-    )?));
+    let telegram_client: ClientHandle = Arc::new(RwLock::new(Arc::new(
+        build_http_client_for_proxy(route_proxy.as_deref().or(shared_cfg.socks_proxy.as_deref()))?,
+    )));
+    let (client_drop_tx, client_drop_rx) = mpsc::channel::<Arc<Client>>();
+    std::thread::spawn(move || {
+        while let Ok(client) = client_drop_rx.recv() {
+            drop(client);
+        }
+    });
 
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
@@ -139,6 +145,8 @@ fn main() -> Result<()> {
     let dashboard_route = Arc::clone(&route_manager);
     let dashboard_client = Arc::clone(&telegram_client);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
+    let dashboard_bot_token = shared_cfg.tg_bot_token.clone();
+    let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -161,6 +169,9 @@ fn main() -> Result<()> {
                 dashboard_profiles,
                 dashboard_route,
                 dashboard_client,
+                client_drop_tx,
+                dashboard_bot_token,
+                dashboard_fallback_proxy,
             )
             .await
             {

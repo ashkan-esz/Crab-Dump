@@ -842,11 +842,13 @@
             <div class="card-header">
                 <span class="status-dot" id="tgDot"></span>
                 <span class="card-title">Telegram API</span>
+                <button class="btn primary" id="tgTestBtn" type="button" onclick="testTelegramApi()">Test</button>
             </div>
             <div class="card-body">
                 <div class="status-msg" id="tgMsg">
                     <div class="skeleton" style="width:80%"></div>
                 </div>
+                <div class="status-time" id="tgTestMsg" aria-live="polite"></div>
                 <div class="status-time" id="tgTime"></div>
             </div>
         </div>
@@ -1573,6 +1575,25 @@
         const res = await apiFetch(endpoint, options);
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
         return res.json();
+    }
+
+    async function testTelegramApi() {
+        const button = document.getElementById('tgTestBtn');
+        const message = document.getElementById('tgTestMsg');
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.textContent = 'Testing...';
+        message.textContent = '';
+        try {
+            const result = await fetchStatus('/api/status/service/test', { method: 'POST' });
+            message.textContent = result.message;
+        } catch (error) {
+            message.textContent = 'Telegram API test failed. Try again.';
+        } finally {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.textContent = 'Test';
+        }
     }
 
     async function toggleDatabase(name, enable) {

@@ -23,11 +23,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
+use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
 use crate::v2ray::{ProfileInput, ProfileStore, RouteManager};
 
@@ -568,6 +570,27 @@ async fn api_service_status() -> impl Responder {
         _ => "Unable to reach Telegram API".to_string(),
     };
     HttpResponse::Ok().json(status_entry(code, &msg))
+}
+
+async fn test_telegram_api(
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    bot_token: web::Data<String>,
+) -> impl Responder {
+    let client = client
+        .read()
+        .expect("Telegram client lock poisoned")
+        .clone();
+    let token = bot_token.get_ref().clone();
+    match tokio::task::spawn_blocking(move || telegram::test_api(&client, &token)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "message": "Telegram API test succeeded"
+        })),
+        _ => HttpResponse::BadGateway().json(serde_json::json!({
+            "ok": false,
+            "error": "Telegram API test failed"
+        })),
+    }
 }
 
 /// GET /api/status/process — returns aggregated dump process status.
@@ -1337,7 +1360,8 @@ async fn apply_v2ray_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
     route: web::Data<Arc<RouteManager>>,
-    client: web::Data<Arc<RwLock<Client>>>,
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    client_drop_tx: web::Data<Sender<Arc<Client>>>,
     path: web::Path<String>,
 ) -> impl Responder {
     let id = path.into_inner();
@@ -1348,23 +1372,30 @@ async fn apply_v2ray_profile(
         return HttpResponse::BadGateway()
             .json(serde_json::json!({"error": "routing profile could not be applied"}));
     };
-    let Ok(new_client) = Client::builder()
-        .timeout(Duration::from_secs(300))
-        .proxy(match reqwest::Proxy::all(&proxy) {
-            Ok(proxy) => proxy,
-            Err(_) => {
-                route.stop();
-                return HttpResponse::BadGateway()
-                    .json(serde_json::json!({"error": "routing profile could not be applied"}));
-            }
-        })
-        .build()
-    else {
-        route.stop();
-        return HttpResponse::BadGateway()
-            .json(serde_json::json!({"error": "routing profile could not be applied"}));
+    let new_client = match tokio::task::spawn_blocking(move || {
+        let proxy =
+            reqwest::Proxy::all(&proxy).map_err(|_| "routing profile could not be applied")?;
+        Client::builder()
+            .timeout(Duration::from_secs(300))
+            .proxy(proxy)
+            .build()
+            .map(Arc::new)
+            .map_err(|_| "routing profile could not be applied")
+    })
+    .await
+    {
+        Ok(Ok(client)) => client,
+        _ => {
+            route.stop();
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"error": "routing profile could not be applied"}));
+        }
     };
-    *client.write().expect("Telegram client lock poisoned") = new_client;
+    let old_client = {
+        let mut current = client.write().expect("Telegram client lock poisoned");
+        std::mem::replace(&mut *current, new_client)
+    };
+    let _ = client_drop_tx.send(old_client);
     if store.set_active(&id).is_err() {
         route.stop();
         return HttpResponse::InternalServerError()
@@ -1373,6 +1404,59 @@ async fn apply_v2ray_profile(
     audit_action(&req, "v2ray_profile_apply", &id, "ok");
     let _ = proxy;
     HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
+}
+
+async fn disable_v2ray(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    client_drop_tx: web::Data<Sender<Arc<Client>>>,
+    fallback_proxy: web::Data<Option<String>>,
+) -> impl Responder {
+    if store.active_id().is_none() && route.active_proxy().is_none() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "active": false,
+            "message": "Routing is already disabled"
+        }));
+    }
+
+    let fallback = fallback_proxy.get_ref().clone();
+    let new_client = match tokio::task::spawn_blocking(move || {
+        let mut builder = Client::builder().timeout(Duration::from_secs(300));
+        if let Some(proxy) = fallback.as_deref() {
+            builder = builder
+                .proxy(reqwest::Proxy::all(proxy).map_err(|_| "proxy configuration failed")?);
+        }
+        builder
+            .build()
+            .map(Arc::new)
+            .map_err(|_| "client configuration failed")
+    })
+    .await
+    {
+        Ok(Ok(client)) => client,
+        _ => {
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"error": "routing could not be disabled"}));
+        }
+    };
+
+    if store.clear_active().is_err() {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "profile storage unavailable"}));
+    }
+    route.stop();
+    let old_client = {
+        let mut current = client.write().expect("Telegram client lock poisoned");
+        std::mem::replace(&mut *current, new_client)
+    };
+    let _ = client_drop_tx.send(old_client);
+    audit_action(&req, "v2ray_disable", "routing", "ok");
+    HttpResponse::Ok().json(serde_json::json!({
+        "active": false,
+        "message": "Routing disabled"
+    }))
 }
 
 async fn select_v2ray_profile(
@@ -1445,7 +1529,10 @@ pub async fn start_server(
     telegram_users: Arc<TelegramUserStore>,
     v2ray_profiles: Arc<ProfileStore>,
     route_manager: Arc<RouteManager>,
-    telegram_client: Arc<RwLock<Client>>,
+    telegram_client: Arc<RwLock<Arc<Client>>>,
+    client_drop_tx: Sender<Arc<Client>>,
+    telegram_bot_token: String,
+    fallback_proxy: Option<String>,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -1459,6 +1546,9 @@ pub async fn start_server(
     let profiles_data = web::Data::new(v2ray_profiles);
     let route_data = web::Data::new(route_manager);
     let client_data = web::Data::new(telegram_client);
+    let client_drop_data = web::Data::new(client_drop_tx);
+    let bot_token_data = web::Data::new(telegram_bot_token);
+    let fallback_proxy_data = web::Data::new(fallback_proxy);
 
     HttpServer::new(move || {
         App::new()
@@ -1469,9 +1559,16 @@ pub async fn start_server(
             .app_data(profiles_data.clone())
             .app_data(route_data.clone())
             .app_data(client_data.clone())
+            .app_data(client_drop_data.clone())
+            .app_data(bot_token_data.clone())
+            .app_data(fallback_proxy_data.clone())
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
+            .route(
+                "/api/status/service/test",
+                web::post().to(test_telegram_api),
+            )
             .route("/api/status/process", web::get().to(api_process_status))
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
@@ -1508,6 +1605,7 @@ pub async fn start_server(
                 "/api/v2ray/profiles/{id}/apply",
                 web::post().to(apply_v2ray_profile),
             )
+            .route("/api/v2ray/disable", web::post().to(disable_v2ray))
             .route(
                 "/api/v2ray/profiles/{id}/select",
                 web::post().to(select_v2ray_profile),

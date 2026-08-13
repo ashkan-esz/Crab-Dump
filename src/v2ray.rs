@@ -244,6 +244,20 @@ impl ProfileStore {
         Ok(true)
     }
 
+    pub fn clear_active(&self) -> Result<bool> {
+        let mut state = self.state.lock().expect("profile store lock poisoned");
+        if state.active_id.is_none() {
+            return Ok(false);
+        }
+        let previous = state.clone();
+        state.active_id = None;
+        if let Err(error) = self.persist(&state) {
+            *state = previous;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     pub fn active_id(&self) -> Option<String> {
         self.state
             .lock()
@@ -691,6 +705,31 @@ mod tests {
         let raw = fs::read_to_string(root.join(PROFILES_FILE)).unwrap();
         assert!(raw.contains("11111111"));
         assert!(!root.join("v2ray_profiles.json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_active_preserves_profiles_and_persists_disabled_state() {
+        let root = std::env::temp_dir().join(format!("crab-v2ray-clear-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        let store = ProfileStore::load(&root).unwrap();
+        let created = store
+            .create(ProfileInput {
+                name: "demo".into(),
+                url: "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls"
+                    .into(),
+            })
+            .unwrap();
+
+        assert!(store.set_active(&created.id).unwrap());
+        assert!(store.clear_active().unwrap());
+        assert!(!store.clear_active().unwrap());
+        assert_eq!(store.active_id(), None);
+        assert_eq!(store.list().len(), 1);
+
+        let reloaded = ProfileStore::load(&root).unwrap();
+        assert_eq!(reloaded.active_id(), None);
+        assert_eq!(reloaded.list().len(), 1);
         let _ = fs::remove_dir_all(root);
     }
 }
