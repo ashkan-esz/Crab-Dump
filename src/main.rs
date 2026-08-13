@@ -23,6 +23,7 @@ mod chunk;
 mod compress;
 mod config;
 mod cron;
+mod database_state;
 mod dump;
 mod encrypt;
 mod history;
@@ -31,6 +32,7 @@ mod web;
 
 use chunk::ChunkWriter;
 use config::{Config, DatabaseConfig, Schedule, SharedConfig};
+use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
 
 /// Load `.env` / `.env.local` before config resolution so environment-based
@@ -78,6 +80,15 @@ fn main() -> Result<()> {
     // ── Resolve configuration ───────────────────────────────────────────────
     let (shared_cfg, databases) =
         Config::resolve_databases().context("loading configuration from env")?;
+    let names = databases
+        .iter()
+        .map(DatabaseConfig::display_name)
+        .collect::<Vec<_>>();
+    let database_states = Arc::new(DatabaseStateStore::load(
+        shared_cfg.history.directory_display(),
+        &names,
+    ));
+    web::set_database_state_store(Arc::clone(&database_states));
 
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
@@ -117,7 +128,10 @@ fn main() -> Result<()> {
     for (i, db) in databases.iter().enumerate() {
         // Register up front so the dashboard lists every configured database
         // as "queued" before any pipeline starts.
-        web::register_database(&db.display_name());
+        web::register_database(
+            &db.display_name(),
+            database_states.is_enabled(&db.display_name()),
+        );
         tracing::info!(
             db_index = i,
             db_name = %db.display_name(),
@@ -347,7 +361,10 @@ fn run_scheduled(
         // Reset every card to "queued" so the dashboard shows this cycle's
         // progress rather than the previous cycle's outcome.
         for db in databases {
-            web::register_database(&db.display_name());
+            web::register_database(
+                &db.display_name(),
+                web::database_state_store().is_enabled(&db.display_name()),
+            );
         }
 
         let (results, failures) = run_cycle(cfg, databases, no_encryption, client);
@@ -492,7 +509,12 @@ fn run_cycle(
     no_encryption: bool,
     client: &Arc<Client>,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
-    let (results, failures) = execute_all_databases(cfg, databases, no_encryption, client);
+    let active = databases
+        .iter()
+        .filter(|db| web::database_state_store().is_enabled(&db.display_name()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (results, failures) = execute_all_databases(cfg, &active, no_encryption, client);
 
     print_manifest(&results, &failures);
 

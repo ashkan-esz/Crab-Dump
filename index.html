@@ -297,6 +297,10 @@
         .history-table th { color: var(--text-muted); font-weight: 600; text-align: left; padding: .4rem .45rem; border-bottom: 1px solid var(--border); }
         .history-table td { padding: .48rem .45rem; border-bottom: 1px solid rgba(30,41,59,.65); font-family: var(--mono); vertical-align: top; }
         .history-table .success { color: var(--up); } .history-table .failure { color: var(--err); }
+        .history-table .action { color: var(--accent); }
+        .db-card.disabled { opacity: .78; }
+        .db-toggle { margin-left: auto; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; padding: .25rem .45rem; font-size: .65rem; }
+        .db-toggle:hover { color: var(--text); border-color: var(--accent); }
         .history-error { color: var(--err); white-space: normal; min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
         .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
         .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
@@ -770,6 +774,7 @@
      *   STAGES.length   → every stage finished
      */
     function dbView(db) {
+        if (db.enabled === false) return { cls: 'disabled', badge: 'DISABLED', idx: -1, failed: false };
         const idx = STAGES.indexOf(db.stage);
         if (db.state === 'DOWN')  return { cls: 'failed',  badge: 'FAILED',  idx: Math.max(idx, 0), failed: true };
         if (db.stage === 'done')  return { cls: 'done',    badge: 'DONE',    idx: STAGES.length,    failed: false };
@@ -799,6 +804,7 @@
                     <span class="db-dot"></span>
                     <span class="db-name"></span>
                     <span class="db-badge"></span>
+                    <button class="db-toggle" type="button"></button>
                 </div>
                 <div class="db-step"><span class="step-icon"></span><span class="step-text"></span></div>
                 <div class="db-transfer" hidden>
@@ -859,8 +865,14 @@
         name.textContent = db.name;
         name.title = db.name;
         el.querySelector('.db-badge').textContent = v.badge;
+        const toggle = el.querySelector('.db-toggle');
+        toggle.textContent = db.enabled === false ? 'Enable' : 'Disable';
+        toggle.onclick = event => {
+            event.stopPropagation();
+            toggleDatabase(db.name, db.enabled === false);
+        };
 
-        el.querySelector('.step-icon').textContent = STEP_ICON[db.stage] || '○';
+        el.querySelector('.step-icon').textContent = db.enabled === false ? '⏸' : (STEP_ICON[db.stage] || '○');
         const step = el.querySelector('.step-text');
         step.textContent = db.detail || '—';
         step.title = db.detail || '';   // full text for clamped/long errors
@@ -869,7 +881,7 @@
         // the dump is streamed and its final size is unknown before then.
         const transfer = el.querySelector('.db-transfer');
         const total = db.bytes_total || 0;
-        transfer.hidden = total <= 0;
+        transfer.hidden = db.enabled === false || total <= 0;
         if (total > 0) {
             const done = Math.min(db.bytes_done || 0, total);
             transfer.querySelector('.tr-bar span').style.width = `${(done / total) * 100}%`;
@@ -881,10 +893,10 @@
         // Logical dump size — grows live during the dump stage, then stays put.
         const size = el.querySelector('.db-size');
         const sizeHtml = sizeLine(db);
-        size.hidden = !sizeHtml;
+        size.hidden = db.enabled === false || !sizeHtml;
         size.innerHTML = sizeHtml;
 
-        const tl = timelineClasses(v);
+        const tl = db.enabled === false ? { nodes: STAGES.map(() => ''), bars: STAGES.slice(1).map(() => '') } : timelineClasses(v);
         el.querySelectorAll('.tl-stage').forEach((node, i) => {
             node.className = `tl-stage ${tl.nodes[i]}`;
         });
@@ -932,7 +944,7 @@
         const rows = (data.records || []).map(record => `
             <tr>
                 <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
-                <td class="${record.status === 'success' ? 'success' : 'failure'}">${escapeHtml(record.status)}</td>
+                <td class="${['enabled', 'disabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure')}">${escapeHtml(record.status)}</td>
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
                 <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
@@ -1011,7 +1023,7 @@
         section.style.display = 'block';
 
         // Create-or-update each card, counting states and transfer totals.
-        const count = { queued: 0, running: 0, done: 0, failed: 0 };
+        const count = { queued: 0, running: 0, done: 0, failed: 0, disabled: 0 };
         let bytesDone = 0, bytesTotal = 0, speed = 0;
         databases.forEach(db => {
             let el = dbCards.get(db.name);
@@ -1044,6 +1056,7 @@
             pill('running', count.running, 'running'),
             pill('done', count.done, 'done'),
             pill('failed', count.failed, 'failed'),
+            pill('disabled', count.disabled, 'disabled'),
         ];
         if (bytesTotal > 0) {
             pills.push(`<span class="summary-pill size">&#x2191; ${fmtBytes(bytesDone)} / ${fmtBytes(bytesTotal)}</span>`);
@@ -1055,10 +1068,25 @@
     }
 
     // ── Fetch logic ────────────────────────────────────────────────
-    async function fetchStatus(endpoint) {
-        const res = await fetch(endpoint);
+    async function fetchStatus(endpoint, options) {
+        const res = await fetch(endpoint, options);
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
         return res.json();
+    }
+
+    async function toggleDatabase(name, enable) {
+        const action = enable ? 'enable' : 'disable';
+        try {
+            await fetchStatus(`/api/status/database/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+            historyCache.delete(name);
+            await refreshDashboard();
+            if (expandedDatabases.has(name)) {
+                const el = dbCards.get(name);
+                if (el) await loadHistory(el, true);
+            }
+        } catch (error) {
+            alert(`Could not ${action} database: ${error.message}`);
+        }
     }
 
     async function refreshDashboard(forceHistory = false) {

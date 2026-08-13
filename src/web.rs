@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
 
+use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 
 // ===========================================================================
@@ -90,6 +91,8 @@ struct DbStatus {
 /// the aggregate DOWN. Empty set → UP.
 static DUMP_STATUSES: LazyLock<RwLock<HashMap<String, DbStatus>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static DATABASE_STATES: LazyLock<RwLock<Option<std::sync::Arc<DatabaseStateStore>>>> =
+    LazyLock::new(|| RwLock::new(None));
 
 // ===========================================================================
 // Public API — Telegram service status
@@ -113,8 +116,27 @@ pub fn get_telegram_status() -> u8 {
 ///
 /// Called once per database at startup so the dashboard lists every
 /// configured database, not just the ones that already began running.
-pub fn register_database(db_name: &str) {
-    set_db_status(db_name, 0, "queued", "Queued — waiting to start");
+pub fn set_database_state_store(store: std::sync::Arc<DatabaseStateStore>) {
+    *DATABASE_STATES
+        .write()
+        .expect("database state lock poisoned") = Some(store);
+}
+
+pub fn database_state_store() -> std::sync::Arc<DatabaseStateStore> {
+    DATABASE_STATES
+        .read()
+        .expect("database state lock poisoned")
+        .as_ref()
+        .expect("database state store not initialized")
+        .clone()
+}
+
+pub fn register_database(db_name: &str, enabled: bool) {
+    if enabled {
+        set_db_status(db_name, 0, "queued", "Queued — waiting to start");
+    } else {
+        set_db_status(db_name, 0, "disabled", "DISABLED — backup skipped");
+    }
 }
 
 /// Set the pipeline stage and status for a specific database.
@@ -426,6 +448,7 @@ async fn api_db_status(path: web::Path<String>) -> impl Responder {
 struct DatabaseResponse {
     /// Display name of the database.
     name: String,
+    enabled: bool,
     /// Severity label: "UP", "DEGRADED" or "DOWN".
     state: &'static str,
     /// Current pipeline stage — drives the dashboard timeline.
@@ -455,6 +478,7 @@ async fn api_databases_list() -> impl Responder {
         .iter()
         .map(|(name, s)| DatabaseResponse {
             name: name.clone(),
+            enabled: database_state_store().is_enabled(name),
             state: state_label(s.code),
             stage: s.stage,
             detail: s.detail.clone(),
@@ -469,6 +493,59 @@ async fn api_databases_list() -> impl Responder {
     // Sort by database name (alphabetical) for stable dashboard ordering.
     entries.sort_by_key(|e| e.name.to_lowercase());
     HttpResponse::Ok().json(entries)
+}
+
+async fn api_database_toggle(
+    path: web::Path<(String, String)>,
+    history: web::Data<std::sync::Arc<HistoryStore>>,
+) -> impl Responder {
+    let (name, action) = path.into_inner();
+    if !matches!(action.as_str(), "enable" | "disable") {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Unknown database action"}));
+    }
+    let store = database_state_store();
+    if !DUMP_STATUSES
+        .read()
+        .expect("dump status lock poisoned")
+        .contains_key(&name)
+    {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": format!("Unknown database: {name}")}));
+    }
+    let enabled = action == "enable";
+    if let Err(error) = store.set_enabled(&name, enabled) {
+        tracing::warn!(database = %name, error = %error, "failed to persist database state");
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "database state unavailable"}));
+    }
+    if enabled {
+        set_db_status(&name, 0, "queued", "Queued — waiting to start");
+    } else {
+        set_db_status(&name, 0, "disabled", "DISABLED — backup skipped");
+    }
+    let now = crate::history::timestamp(std::time::SystemTime::now());
+    let record = crate::history::HistoryRecord {
+        started_at: now.clone(),
+        ended_at: now,
+        database_index: 0,
+        database_name: name.clone(),
+        status: action,
+        error: None,
+        dump_bytes: 0,
+        packaged_bytes: 0,
+        chunk_count: 0,
+        sha256: None,
+        encrypted: false,
+        duration_secs: 0.0,
+        upload_duration_secs: 0.0,
+        upload_attempts: 0,
+        upload_retries: 0,
+    };
+    if let Err(error) = history.append(&record) {
+        tracing::warn!(database = %name, error = %error, "failed to append database state history");
+    }
+    HttpResponse::Ok().json(serde_json::json!({"name": name, "enabled": enabled}))
 }
 
 /// GET /api/history/{database_name} — retained attempts and aggregate stats.
@@ -528,6 +605,10 @@ pub async fn start_server(port: u16, history: std::sync::Arc<HistoryStore>) -> s
             .route("/api/status/process", web::get().to(api_process_status))
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
+            .route(
+                "/api/status/database/{name}/{action}",
+                web::post().to(api_database_toggle),
+            )
             .route("/api/history/{database_name}", web::get().to(api_history))
             .route("/api/info", web::get().to(api_config))
             .route("/", web::get().to(serve_dashboard))

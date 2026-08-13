@@ -51,6 +51,7 @@ check({ state: 'DOWN', stage: 'upload' },  'FAILED', ['completed', 'completed', 
 
 // Failing before the first stage must not leave the timeline blank.
 check({ state: 'DOWN', stage: 'queued' }, 'FAILED', ['failed', '', ''], ['', '']);
+check({ enabled: false, state: 'UP', stage: 'disabled' }, 'DISABLED', ['', '', ''], ['', '']);
 
 // Upload size / speed formatting.
 assert.equal(fmtBytes(0), '0 B');

@@ -253,6 +253,9 @@ struct HistoryStatsBuilder {
 
 impl HistoryStatsBuilder {
     fn add(&mut self, record: &HistoryRecord) {
+        if matches!(record.status.as_str(), "enabled" | "disabled") {
+            return;
+        }
         self.attempts += 1;
         if record.status == "success" {
             self.successes += 1;
@@ -535,7 +538,7 @@ mod tests {
             item.duration_secs = ordinal as f64;
             item.dump_bytes = ordinal;
             item.packaged_bytes = ordinal * 2;
-            item.upload_retries = (ordinal % 3) as u64;
+            item.upload_retries = ordinal % 3;
             store.append(&item).unwrap();
         }
 
@@ -569,6 +572,30 @@ mod tests {
         assert_eq!(store.summary("app", 30).unwrap().stats.attempts, 1);
         assert!(store.summary("missing", 30).unwrap().records.is_empty());
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn action_records_are_retained_but_excluded_from_statistics() {
+        let dir = temp_dir("actions");
+        let store = HistoryStore::new(&dir, 12);
+        let mut action = record("2026-08-02T00:00:00Z");
+        action.status = "disabled".into();
+        action.dump_bytes = 999;
+        action.duration_secs = 99.0;
+        action.upload_retries = 99;
+        store.append(&action).unwrap();
+
+        let backup = record("2026-08-01T00:00:00Z");
+        store.append(&backup).unwrap();
+
+        let summary = store.summary("app", 30).unwrap();
+        assert_eq!(summary.records.len(), 2);
+        assert_eq!(summary.records[0].status, "disabled");
+        assert_eq!(summary.stats.attempts, 1);
+        assert_eq!(summary.stats.successes, 1);
+        assert_eq!(summary.stats.failures, 0);
+        assert_eq!(summary.stats.average_duration_secs, 1.0);
+        assert_eq!(summary.stats.average_upload_retries, 0.0);
     }
 
     #[test]
