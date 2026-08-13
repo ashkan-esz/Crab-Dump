@@ -49,6 +49,8 @@ static TELEGRAM_CHAT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// "sleeping until the next slot", which the per-database cards alone cannot
 /// say — every card reads "queued" both before the first cycle and between two.
 static CYCLE_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Whether the long-lived scheduler is available to execute dashboard requests.
+static MANUAL_BACKUP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 /// Seconds since UNIX epoch of the next scheduled backup cycle, or 0 when
 /// there is none (one-shot mode, or a cycle already in progress).
@@ -111,9 +113,17 @@ static DATABASE_STATES: LazyLock<RwLock<Option<std::sync::Arc<DatabaseStateStore
 /// accepted twice, and scheduled execution can use the same active-run guard.
 #[derive(Debug, Default)]
 struct ManualBackupState {
-    pending: VecDeque<String>,
+    pending: VecDeque<ManualBackupRequest>,
     pending_set: HashSet<String>,
     active: HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualBackupRequest {
+    pub database_name: String,
+    pub chat_id: String,
+    pub recipient_name: String,
+    pub no_encryption: bool,
 }
 
 #[derive(Debug, Default)]
@@ -123,23 +133,25 @@ pub struct ManualBackupController {
 }
 
 impl ManualBackupController {
-    pub fn request(&self, name: &str) -> bool {
+    pub fn request(&self, request: ManualBackupRequest) -> bool {
         let mut state = self.state.lock().expect("manual backup lock poisoned");
-        if state.active.contains(name) || !state.pending_set.insert(name.to_string()) {
+        if state.active.contains(&request.database_name)
+            || !state.pending_set.insert(request.database_name.clone())
+        {
             return false;
         }
-        state.pending.push_back(name.to_string());
+        state.pending.push_back(request);
         self.wake.notify_one();
         true
     }
 
-    pub fn take_pending(&self) -> Vec<String> {
+    pub fn take_pending(&self) -> Vec<ManualBackupRequest> {
         let mut state = self.state.lock().expect("manual backup lock poisoned");
         let mut names = Vec::with_capacity(state.pending.len());
-        while let Some(name) = state.pending.pop_front() {
-            state.pending_set.remove(&name);
-            state.active.insert(name.clone());
-            names.push(name);
+        while let Some(request) = state.pending.pop_front() {
+            state.pending_set.remove(&request.database_name);
+            state.active.insert(request.database_name.clone());
+            names.push(request);
         }
         names
     }
@@ -188,6 +200,14 @@ static MANUAL_BACKUPS: LazyLock<Arc<ManualBackupController>> =
 
 pub fn manual_backup_controller() -> Arc<ManualBackupController> {
     Arc::clone(&MANUAL_BACKUPS)
+}
+
+pub fn set_manual_backup_available(available: bool) {
+    MANUAL_BACKUP_AVAILABLE.store(available, Ordering::SeqCst);
+}
+
+pub fn manual_backup_available() -> bool {
+    MANUAL_BACKUP_AVAILABLE.load(Ordering::SeqCst)
 }
 
 // ===========================================================================
@@ -438,6 +458,7 @@ pub struct ConfigResponse {
     pub backup_next_run_secs: Option<u64>,
     /// Seconds until the next history upload.
     pub history_next_run_secs: Option<u64>,
+    pub manual_backup_available: bool,
 }
 
 /// GET /api/config — returns the current dashboard port.
@@ -496,6 +517,7 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
         next_run_secs: backup_next_run_secs,
         backup_next_run_secs,
         history_next_run_secs,
+        manual_backup_available: manual_backup_available(),
     })
 }
 
@@ -636,9 +658,20 @@ async fn api_databases_list() -> impl Responder {
 async fn api_database_action(
     path: web::Path<(String, String)>,
     history: web::Data<std::sync::Arc<HistoryStore>>,
+    users: web::Data<Arc<TelegramUserStore>>,
+    payload: Option<web::Json<ManualBackupPayload>>,
 ) -> impl Responder {
     let (name, action) = path.into_inner();
     if action == "backup" {
+        let Some(payload) = payload else {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "recipient and no_encryption are required"}));
+        };
+        if !manual_backup_available() {
+            return HttpResponse::Conflict().json(
+                serde_json::json!({"error": "Manual backups are unavailable in one-shot mode"}),
+            );
+        }
         if !known_database(&name) {
             return HttpResponse::NotFound()
                 .json(serde_json::json!({"error": format!("Unknown database: {name}")}));
@@ -647,7 +680,24 @@ async fn api_database_action(
             return HttpResponse::Conflict()
                 .json(serde_json::json!({"error": "Database is disabled"}));
         }
-        if !manual_backup_controller().request(&name) {
+        let Some(recipient) = users
+            .list()
+            .into_iter()
+            .find(|user| user.chat_id == payload.chat_id)
+        else {
+            return HttpResponse::Conflict()
+                .json(serde_json::json!({"error": "Recipient is unknown or disabled"}));
+        };
+        if !recipient.enabled {
+            return HttpResponse::Conflict()
+                .json(serde_json::json!({"error": "Recipient is unknown or disabled"}));
+        }
+        if !manual_backup_controller().request(ManualBackupRequest {
+            database_name: name.clone(),
+            chat_id: payload.chat_id.clone(),
+            recipient_name: recipient.name,
+            no_encryption: payload.no_encryption,
+        }) {
             return HttpResponse::Conflict().json(
                 serde_json::json!({"error": "Database backup is already running or queued"}),
             );
@@ -692,6 +742,7 @@ async fn api_database_action(
         database_index: 0,
         database_name: name.clone(),
         source: "scheduled".into(),
+        recipient: None,
         status: action,
         error: None,
         dump_bytes: 0,
@@ -708,6 +759,12 @@ async fn api_database_action(
         tracing::warn!(database = %name, error = %error, "failed to append database state history");
     }
     HttpResponse::Ok().json(serde_json::json!({"name": name, "enabled": enabled}))
+}
+
+#[derive(Debug, Deserialize)]
+struct ManualBackupPayload {
+    chat_id: String,
+    no_encryption: bool,
 }
 
 /// GET /api/history/{database_name} — retained attempts and aggregate stats.
@@ -1019,13 +1076,56 @@ mod tests {
     #[test]
     fn manual_controller_rejects_duplicate_and_active_names() {
         let controller = ManualBackupController::default();
-        assert!(controller.request("app"));
-        assert!(!controller.request("app"));
-        assert_eq!(controller.take_pending(), vec!["app"]);
+        let request = ManualBackupRequest {
+            database_name: "app".into(),
+            chat_id: "-1".into(),
+            recipient_name: "Alice".into(),
+            no_encryption: true,
+        };
+        assert!(controller.request(request.clone()));
+        assert!(!controller.request(request.clone()));
+        assert_eq!(controller.take_pending(), vec![request]);
         assert!(controller.is_active("app"));
-        assert!(!controller.request("app"));
+        assert!(!controller.request(ManualBackupRequest {
+            database_name: "app".into(),
+            chat_id: "-2".into(),
+            recipient_name: "Bob".into(),
+            no_encryption: false,
+        }));
         controller.finish("app");
-        assert!(controller.request("app"));
+        assert!(controller.request(ManualBackupRequest {
+            database_name: "app".into(),
+            chat_id: "-2".into(),
+            recipient_name: "Bob".into(),
+            no_encryption: false,
+        }));
+    }
+
+    #[test]
+    fn manual_controller_preserves_independent_database_options() {
+        let controller = ManualBackupController::default();
+        assert!(controller.request(ManualBackupRequest {
+            database_name: "first".into(),
+            chat_id: "-first".into(),
+            recipient_name: "First".into(),
+            no_encryption: true,
+        }));
+        assert!(controller.request(ManualBackupRequest {
+            database_name: "second".into(),
+            chat_id: "-second".into(),
+            recipient_name: "Second".into(),
+            no_encryption: false,
+        }));
+
+        let requests = controller.take_pending();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].chat_id, "-first");
+        assert!(requests[0].no_encryption);
+        assert_eq!(requests[1].chat_id, "-second");
+        assert!(!requests[1].no_encryption);
+        for request in requests {
+            controller.finish(&request.database_name);
+        }
     }
 
     fn users_test_store() -> Arc<TelegramUserStore> {
@@ -1109,5 +1209,95 @@ mod tests {
             aw_test::call_service(&app, missing_delete).await.status(),
             404
         );
+    }
+
+    #[actix_web::test]
+    async fn manual_backup_validates_recipient_database_and_conflicts() {
+        let name = format!("manual-api-{}", std::process::id());
+        let state_dir =
+            std::env::temp_dir().join(format!("crab-manual-state-{}", now_epoch_secs()));
+        let state = Arc::new(DatabaseStateStore::load(
+            &state_dir,
+            std::slice::from_ref(&name),
+        ));
+        set_database_state_store(state);
+        register_database(&name, true);
+        set_manual_backup_available(true);
+
+        let users = users_test_store();
+        users
+            .create(TelegramUser {
+                name: "Enabled".into(),
+                chat_id: "-enabled".into(),
+                enabled: true,
+            })
+            .unwrap();
+        users
+            .create(TelegramUser {
+                name: "Disabled".into(),
+                chat_id: "-disabled".into(),
+                enabled: false,
+            })
+            .unwrap();
+        let history = Arc::new(HistoryStore::new(
+            std::env::temp_dir().join(format!("crab-manual-history-{}", now_epoch_secs())),
+            1,
+        ));
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(history))
+                .app_data(web::Data::new(users))
+                .route(
+                    "/api/status/database/{name}/{action}",
+                    web::post().to(api_database_action),
+                ),
+        )
+        .await;
+
+        let post = |database: &str, chat_id: &str| {
+            aw_test::TestRequest::post()
+                .uri(&format!("/api/status/database/{database}/backup"))
+                .set_json(serde_json::json!({
+                    "chat_id": chat_id,
+                    "no_encryption": true
+                }))
+                .to_request()
+        };
+
+        assert_eq!(
+            aw_test::call_service(&app, post(&name, "-missing"))
+                .await
+                .status(),
+            409
+        );
+        assert_eq!(
+            aw_test::call_service(&app, post(&name, "-disabled"))
+                .await
+                .status(),
+            409
+        );
+        assert_eq!(
+            aw_test::call_service(&app, post("unknown-database", "-enabled"))
+                .await
+                .status(),
+            404
+        );
+
+        let accepted = aw_test::call_service(&app, post(&name, "-enabled")).await;
+        assert_eq!(accepted.status(), 202);
+        let duplicate = aw_test::call_service(&app, post(&name, "-enabled")).await;
+        assert_eq!(duplicate.status(), 409);
+        let body = aw_test::read_body(duplicate).await;
+        assert!(!String::from_utf8_lossy(&body).contains("-enabled"));
+
+        for request in manual_backup_controller().take_pending() {
+            assert_eq!(request.database_name, name);
+            assert_eq!(request.chat_id, "-enabled");
+            assert_eq!(request.recipient_name, "Enabled");
+            assert!(request.no_encryption);
+            manual_backup_controller().finish(&request.database_name);
+        }
+        set_manual_backup_available(false);
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 }

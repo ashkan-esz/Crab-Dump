@@ -29,6 +29,10 @@ pub struct HistoryRecord {
     /// deserialize as scheduled attempts for backward compatibility.
     #[serde(default = "default_source")]
     pub source: String,
+    /// Dashboard-selected receiver for manual backups. Older records and
+    /// scheduled/one-shot attempts omit this field.
+    #[serde(default)]
+    pub recipient: Option<String>,
     pub status: String,
     pub error: Option<String>,
     pub dump_bytes: u64,
@@ -401,6 +405,7 @@ mod tests {
             database_index: 0,
             database_name: "app".into(),
             source: "scheduled".into(),
+            recipient: None,
             status: "success".into(),
             error: None,
             dump_bytes: 10,
@@ -425,6 +430,7 @@ mod tests {
             "database_index",
             "database_name",
             "source",
+            "recipient",
             "status",
             "error",
             "dump_bytes",
@@ -450,6 +456,18 @@ mod tests {
         value.as_object_mut().unwrap().remove("source");
         let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.source, "scheduled");
+        assert_eq!(parsed.recipient, None);
+    }
+
+    #[test]
+    fn manual_records_preserve_recipient() {
+        let mut item = record("2026-08-01T00:00:00Z");
+        item.source = "manual".into();
+        item.recipient = Some("Alice".into());
+        let parsed: HistoryRecord =
+            serde_json::from_value(serde_json::to_value(item).unwrap()).unwrap();
+        assert_eq!(parsed.source, "manual");
+        assert_eq!(parsed.recipient.as_deref(), Some("Alice"));
     }
 
     #[test]

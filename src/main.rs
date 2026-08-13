@@ -102,6 +102,7 @@ fn main() -> Result<()> {
     let dashboard_password = shared_cfg.dashboard_password.clone();
     let dashboard_users = Arc::clone(&telegram_users);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
+    web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
     tracing::info!(port = dashboard_port, "spawning status dashboard server");
@@ -378,7 +379,7 @@ fn run_scheduled(
     let controller = web::manual_backup_controller();
     let mut next_interval = None;
     for cycle in 1u64.. {
-        if run_manual_requests(cfg, databases, no_encryption, client, &controller) {
+        if run_manual_requests(cfg, databases, client, &controller) {
             continue;
         }
 
@@ -470,33 +471,49 @@ fn run_scheduled(
 fn run_manual_requests(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
-    no_encryption: bool,
     client: &Arc<Client>,
     controller: &Arc<web::ManualBackupController>,
 ) -> bool {
-    let names = controller.take_pending();
-    if names.is_empty() {
+    let requests = controller.take_pending();
+    if requests.is_empty() {
         return false;
     }
-    let indices = names
+    let indices = requests
         .iter()
-        .filter_map(|name| databases.iter().position(|db| db.display_name() == *name))
+        .filter_map(|request| {
+            databases
+                .iter()
+                .position(|db| db.display_name() == request.database_name)
+        })
         .collect::<Vec<_>>();
     if !indices.is_empty() {
+        let options = requests
+            .iter()
+            .map(|request| {
+                (
+                    request.database_name.clone(),
+                    BackupOptions {
+                        chat_ids: vec![request.chat_id.clone()],
+                        recipient: Some(request.recipient_name.clone()),
+                        no_encryption: request.no_encryption,
+                    },
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         web::set_cycle_running(true);
         let _ = execute_database_indices(
             cfg,
             databases,
             &indices,
-            no_encryption,
             client,
             BackupSource::Manual,
             true,
+            &options,
         );
         web::set_cycle_running(false);
     }
-    for name in names {
-        controller.finish(&name);
+    for request in requests {
+        controller.finish(&request.database_name);
     }
     true
 }
@@ -620,14 +637,27 @@ fn run_cycle(
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
+    let options = databases
+        .iter()
+        .map(|db| {
+            (
+                db.display_name(),
+                BackupOptions {
+                    chat_ids: cfg.tg_chat_ids.clone(),
+                    recipient: None,
+                    no_encryption,
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let (results, failures) = execute_database_indices(
         cfg,
         databases,
         &active,
-        no_encryption,
         client,
         source,
         source == BackupSource::Scheduled,
+        &options,
     );
 
     print_manifest(&results, &failures);
@@ -686,6 +716,13 @@ struct AttemptMetrics {
     upload_duration_secs: f64,
     upload_attempts: u64,
     upload_retries: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BackupOptions {
+    chat_ids: Vec<String>,
+    recipient: Option<String>,
+    no_encryption: bool,
 }
 
 /// Upload every chunk to each destination that has not failed yet.
@@ -785,25 +822,27 @@ fn run_database(
     cfg: &SharedConfig,
     db: &DatabaseConfig,
     db_index: usize,
-    no_encryption: bool,
     client: &Client,
     source: BackupSource,
+    options: &BackupOptions,
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
     let mut metrics = AttemptMetrics {
-        encrypted: !no_encryption && cfg.age_recipient.is_some(),
+        encrypted: !options.no_encryption && cfg.age_recipient.is_some(),
         ..Default::default()
     };
 
-    // Namespaced prefix prevents collisions when multiple databases share
-    // the same working directory. Format:
-    // `db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}`.
-    // Duplicate display names are rejected at config time; the index is belt
-    // and braces, so a future resolution path cannot make two pipelines write
-    // the same `.partNNNN` files.
+    // Wire-contract filename: `{db}_{utc_ts}.sql.zst[.age]`. Duplicate
+    // display names are rejected at config time, so the timestamped prefix
+    // remains unique for a database's run.
     let stamp = dump_timestamp(started)?;
-    let base_name = format!("db{db_index}-{db_name}-{stamp}");
+    let extension = if !options.no_encryption && cfg.age_recipient.is_some() {
+        ".sql.zst.age"
+    } else {
+        ".sql.zst"
+    };
+    let base_name = format!("{db_name}_{stamp}{extension}");
 
     let result = backup_pipeline(
         cfg,
@@ -811,7 +850,7 @@ fn run_database(
         &db_name,
         &base_name,
         started,
-        no_encryption,
+        options,
         client,
         &mut metrics,
     );
@@ -830,6 +869,7 @@ fn run_database(
                 database_index: db_index,
                 database_name: db_name.clone(),
                 source: source.as_str().into(),
+                recipient: options.recipient.clone(),
                 status: "success".into(),
                 error: None,
                 dump_bytes: metrics.dump_bytes,
@@ -844,6 +884,7 @@ fn run_database(
             },
             &db.url,
             cfg,
+            &options.chat_ids,
         ),
         Err(error) => record_history(
             &cfg.history,
@@ -853,12 +894,13 @@ fn run_database(
                 database_index: db_index,
                 database_name: db_name.clone(),
                 source: source.as_str().into(),
+                recipient: options.recipient.clone(),
                 status: "failure".into(),
                 error: Some(history::sanitize_error(
                     &format!("{error:#}"),
                     &db.url,
                     &cfg.tg_bot_token,
-                    &cfg.tg_chat_ids,
+                    &options.chat_ids,
                 )),
                 dump_bytes: metrics.dump_bytes,
                 packaged_bytes: metrics.packaged_bytes,
@@ -872,6 +914,7 @@ fn run_database(
             },
             &db.url,
             cfg,
+            &options.chat_ids,
         ),
     }
 
@@ -902,7 +945,7 @@ fn backup_pipeline(
     db_name: &str,
     base_name: &str,
     started: SystemTime,
-    no_encryption: bool,
+    options: &BackupOptions,
     client: &Client,
     metrics: &mut AttemptMetrics,
 ) -> Result<BackupResult> {
@@ -910,7 +953,7 @@ fn backup_pipeline(
     web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
 
     // ── Resolve encryption mode ────────────────────────────────────────────
-    let age_recipient = if no_encryption {
+    let age_recipient = if options.no_encryption {
         None
     } else {
         cfg.age_recipient.as_deref()
@@ -940,7 +983,7 @@ fn backup_pipeline(
             Sink::Encrypted(zstd)
         }
         None => {
-            if no_encryption {
+            if options.no_encryption {
                 tracing::warn!(
                     db = db_name,
                     "--no-encryption — dump will be compressed but NOT encrypted"
@@ -1046,7 +1089,7 @@ fn backup_pipeline(
     let mut upload_stats = telegram::UploadStats::default();
     upload_chunks_to_destinations(
         &chunks,
-        &cfg.tg_chat_ids,
+        &options.chat_ids,
         |chat_id, path, stats| {
             telegram::send_document(client, &cfg.tg_bot_token, chat_id, path, stats)
         },
@@ -1103,13 +1146,14 @@ fn record_history(
     record: HistoryRecord,
     database_url: &str,
     cfg: &SharedConfig,
+    chat_ids: &[String],
 ) {
     if let Err(error) = store.append(&record) {
         let sanitized = history::sanitize_error(
             &error.to_string(),
             database_url,
             &cfg.tg_bot_token,
-            &cfg.tg_chat_ids,
+            chat_ids,
         );
         tracing::warn!(error = %sanitized, "failed to write backup history; continuing");
     }
@@ -1140,10 +1184,10 @@ fn execute_database_indices(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
     indices: &[usize],
-    no_encryption: bool,
     client: &Arc<Client>,
     source: BackupSource,
     already_claimed: bool,
+    options_by_db: &std::collections::HashMap<String, BackupOptions>,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
     // Never start more workers than there is work for them. With a single
     // database this is one worker, which is the sequential path — no special
@@ -1169,8 +1213,11 @@ fn execute_database_indices(
         if !already_claimed && !web::manual_backup_controller().claim_scheduled(&name) {
             return None;
         }
+        let options = options_by_db
+            .get(&name)
+            .expect("backup options must exist for configured database");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_database(cfg, db, *db_index, no_encryption, client, source)
+            run_database(cfg, db, *db_index, client, source, options)
         }));
         if !already_claimed || source == BackupSource::Scheduled {
             web::manual_backup_controller().finish(&name);
@@ -1236,18 +1283,27 @@ fn execute_database_indices(
                         database_index: i,
                         database_name: databases[i].display_name(),
                         source: source.as_str().into(),
+                        recipient: options_by_db
+                            .get(&databases[i].display_name())
+                            .and_then(|options| options.recipient.clone()),
                         status: "failure".into(),
                         error: Some(history::sanitize_error(
                             &format!("panicked: {panic_msg}"),
                             &databases[i].url,
                             &cfg.tg_bot_token,
-                            &cfg.tg_chat_ids,
+                            options_by_db
+                                .get(&databases[i].display_name())
+                                .map(|options| options.chat_ids.as_slice())
+                                .unwrap_or(&[]),
                         )),
                         dump_bytes: 0,
                         packaged_bytes: 0,
                         chunk_count: 0,
                         sha256: None,
-                        encrypted: !no_encryption && cfg.age_recipient.is_some(),
+                        encrypted: !options_by_db
+                            .get(&databases[i].display_name())
+                            .is_some_and(|options| options.no_encryption)
+                            && cfg.age_recipient.is_some(),
                         duration_secs: 0.0,
                         upload_duration_secs: 0.0,
                         upload_attempts: 0,
@@ -1255,6 +1311,10 @@ fn execute_database_indices(
                     },
                     &databases[i].url,
                     cfg,
+                    &options_by_db
+                        .get(&databases[i].display_name())
+                        .map(|options| options.chat_ids.clone())
+                        .unwrap_or_else(|| cfg.tg_chat_ids.clone()),
                 );
             }
         }

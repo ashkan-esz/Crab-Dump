@@ -17,7 +17,8 @@ execution paths. Starting an immediate backup currently requires changing the
 deployment schedule or invoking the process manually.
 
 Operators need a per-database control for ad-hoc backups without weakening the
-existing pipeline guarantees:
+existing pipeline guarantees. They also need to choose the Telegram user who
+receives that one backup and optionally bypass age encryption for that request:
 
 - scheduled and manual backups must not overlap for the same database;
 - the configured parallelism limit must continue to apply;
@@ -40,12 +41,27 @@ Add:
 POST /api/status/database/{name}/backup
 ```
 
-The endpoint accepts only configured database display names and returns:
+The endpoint accepts only configured database display names and this JSON body:
+
+```json
+{
+  "chat_id": "-1001234567890",
+  "no_encryption": true
+}
+```
+
+`chat_id` must identify an enabled entry in `TelegramUserStore`. The selected
+recipient and encryption override are captured when the request is accepted;
+later directory changes do not rewrite the queued request.
+
+The endpoint returns:
 
 - `202 Accepted` when the request is queued;
 - `404 Not Found` for an unknown database;
 - `409 Conflict` when the database is already running, already has a pending
-  manual request, or is disabled.
+  manual request, is disabled, the recipient is unknown/disabled, or manual
+  execution is unavailable because the process is not in long-lived scheduled
+  mode.
 
 The response does not expose credentials or other configuration secrets.
 
@@ -54,7 +70,8 @@ The response does not expose credentials or other configuration secrets.
 Use one process-wide manual-backup controller shared by the web server and
 scheduler. The controller tracks:
 
-- pending manual database names;
+- pending manual requests, including database name, selected chat ID, and
+  encryption override;
 - active database names.
 
 Requests for a name already in either set are rejected. A successful request
@@ -81,9 +98,20 @@ guard. A scheduled run cannot start a database whose manual request is pending
 or active, and a manual request cannot start while its database is scheduled
 or already running.
 
-Manual requests are available while the long-running dashboard process is
+Manual requests are available only while the long-running dashboard process is
 alive. One-shot CLI execution retains its existing behavior and exits after
-its normal cycle.
+its normal cycle; the dashboard advertises manual requests as unavailable.
+
+### Per-request destination and encryption
+
+Scheduled and one-shot runs continue to upload to every configured
+`TG_CHAT_ID_*` destination and use the CLI/configured encryption decision.
+Manual runs upload only to the selected enabled dashboard user. Encryption is
+enabled by default when `AGE_RECIPIENT` is configured, while
+`no_encryption: true` bypasses age for that request. If no recipient is
+configured, the existing compressed-only behavior remains. Wire names follow
+the restore contract: `{db}_{utc_ts}.sql.zst` or
+`{db}_{utc_ts}.sql.zst.age`, with `.partNNNN` appended for multi-part streams.
 
 ### History source
 
@@ -99,6 +127,10 @@ The `status` field remains the outcome of the attempt (`success` or
 `failure`). Existing JSONL records without `source` deserialize as
 `scheduled`, preserving backward compatibility.
 
+Manual records also persist the selected Telegram user's display name in the
+`recipient` field. Scheduled and one-shot records leave it empty, and older
+records without the field deserialize with no recipient.
+
 Manual attempts are included in the normal history timeline and participate
 in success/failure statistics like any other backup attempt. Enable/disable
 action records remain excluded from backup statistics as defined by
@@ -108,6 +140,10 @@ ADR-0002.
 
 Each enabled database card includes a `Backup now` button. The button:
 
+- lets the operator choose an enabled dashboard-managed Telegram user;
+- includes a checked-by-default encryption-bypass checkbox with a plaintext
+  warning;
+- shows the selected receiver in the database history table;
 - shows queued/running state while the request is outstanding;
 - is disabled while the database is queued or running;
 - displays a concise conflict or error message when the request is rejected;
@@ -137,6 +173,8 @@ scheduled.
   dashboard thread and the scheduler.
 - A manual request may wait behind other active work when all parallel slots
   are occupied.
+- Manual requests can intentionally upload plaintext compressed dumps, so the
+  dashboard makes that choice explicit and warns before submission.
 - The dashboard remains a trusted local control surface and has no
   authentication, consistent with ADR-0002.
 
@@ -172,4 +210,3 @@ one database, and a global action would create unnecessary load.
 | Should disabled databases accept manual backup requests? | No; return `409 Conflict` and require re-enabling first. |
 | Should manual backups have a separate retention policy? | No; they are ordinary backup attempts and use existing history retention. |
 | Should the API require authentication? | Not in the current local/trusted deployment model; revisit if dashboard binding expands. |
-

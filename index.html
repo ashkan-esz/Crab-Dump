@@ -409,6 +409,129 @@
         .db-backup:disabled { cursor: wait; opacity: .7; }
         .db-backup-error { max-width: 180px; color: var(--err); font-size: .64rem; line-height: 1.3; text-align: right; }
         .db-backup-error[hidden] { display: none; }
+        .db-manual-form { display: contents; }
+        .db-no-encryption {
+            display: inline-flex;
+            align-items: center;
+            gap: .25rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+        .manual-backup-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            display: grid;
+            place-items: center;
+            padding: 1rem;
+            background: rgba(3, 7, 18, .72);
+            backdrop-filter: blur(4px);
+        }
+        .manual-backup-modal[hidden] { display: none; }
+        .manual-backup-dialog {
+            width: min(100%, 30rem);
+            max-width: 30rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-card);
+            color: var(--text);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+            padding: 1.35rem;
+        }
+        .manual-backup-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        .manual-backup-header h2 { font-size: 1rem; }
+        .manual-backup-header p {
+            color: var(--text-muted);
+            font-size: .75rem;
+            margin-top: .25rem;
+        }
+        .manual-backup-close {
+            border: 0;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1.25rem;
+            line-height: 1;
+            padding: .15rem;
+        }
+        .manual-backup-close:hover { color: var(--text); }
+        .manual-backup-field {
+            display: grid;
+            gap: .4rem;
+            margin-bottom: 1rem;
+        }
+        .manual-backup-field label,
+        .manual-backup-encryption {
+            color: var(--text-muted);
+            font-size: .75rem;
+            font-weight: 600;
+        }
+        .manual-backup-recipient {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            padding: .55rem .6rem;
+            background: var(--bg);
+            color: var(--text);
+            font: inherit;
+        }
+        .manual-backup-encryption {
+            display: flex;
+            align-items: center;
+            gap: .45rem;
+            margin-bottom: .65rem;
+        }
+        .manual-backup-warning {
+            color: var(--warn);
+            background: var(--warn-bg);
+            border: 1px solid var(--warn-border);
+            border-radius: 7px;
+            padding: .6rem .7rem;
+            font-size: .72rem;
+            line-height: 1.25;
+            margin-bottom: 1rem;
+        }
+        .manual-backup-warning[hidden] { display: none; }
+        .manual-backup-error,
+        .manual-backup-unavailable {
+            color: var(--text-muted);
+            font-size: .72rem;
+            line-height: 1.3;
+            margin-bottom: 1rem;
+        }
+        .manual-backup-error { color: var(--err); }
+        .manual-backup-error[hidden],
+        .manual-backup-unavailable[hidden] { display: none; }
+        .manual-backup-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: .55rem;
+        }
+        .manual-backup-actions button {
+            border-radius: 7px;
+            padding: .5rem .75rem;
+            font: inherit;
+            font-size: .75rem;
+            cursor: pointer;
+        }
+        .manual-backup-cancel {
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-muted);
+        }
+        .manual-backup-submit {
+            border: 1px solid var(--accent);
+            background: var(--accent);
+            color: white;
+            font-weight: 650;
+        }
+        .manual-backup-actions button:disabled { cursor: wait; opacity: .7; }
         .history-error { color: var(--err); white-space: normal; min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
         .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
         .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
@@ -757,6 +880,37 @@
         </div>
     </div>
 
+    <div id="manualBackupModal" class="manual-backup-modal" hidden>
+        <div class="manual-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="manualBackupTitle">
+            <div class="manual-backup-header">
+                <div>
+                    <h2 id="manualBackupTitle">Backup database</h2>
+                    <p id="manualBackupDatabase"></p>
+                </div>
+                <button id="manualBackupClose" class="manual-backup-close" type="button" aria-label="Close">&times;</button>
+            </div>
+            <form id="manualBackupForm">
+                <div class="manual-backup-field">
+                    <label for="manualBackupRecipient">Telegram recipient</label>
+                    <select id="manualBackupRecipient" class="manual-backup-recipient"></select>
+                </div>
+                <label class="manual-backup-encryption">
+                    <input id="manualBackupNoEncryption" type="checkbox" checked>
+                    Disable encryption for this backup
+                </label>
+                <div id="manualBackupWarning" class="manual-backup-warning" hidden>
+                    Plaintext upload: anyone with access to this chat can read this backup.
+                </div>
+                <div id="manualBackupUnavailable" class="manual-backup-unavailable" hidden></div>
+                <div id="manualBackupError" class="manual-backup-error" role="alert" hidden></div>
+                <div class="manual-backup-actions">
+                    <button id="manualBackupCancel" class="manual-backup-cancel" type="button">Cancel</button>
+                    <button id="manualBackupSubmit" class="manual-backup-submit" type="submit">Queue backup</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Controls -->
     <div class="controls">
         <button class="btn primary" id="refreshBtn" onclick="refreshDashboard(true)">
@@ -777,6 +931,9 @@
      */
 
     let config = null;
+    let telegramUsers = [];
+    let manualBackupAvailable = false;
+    let latestDatabases = [];
 
     // ── Helpers ────────────────────────────────────────────────────
     function formatUptime(seconds) {
@@ -821,6 +978,7 @@
     async function loadConfig() {
         try {
             config = await fetchStatus('/api/config');
+            manualBackupAvailable = config.manual_backup_available === true;
             document.getElementById('infoHost').textContent = config.hostname;
             document.getElementById('infoPort').textContent = config.port;
             document.getElementById('infoTelegramChats').textContent =
@@ -928,6 +1086,7 @@
     const toggleErrors = new Map();
     const manualRequests = new Set();
     const backupErrors = new Map();
+    let manualBackupDatabase = null;
 
     /**
      * Derive display state from the backend's (state, stage) pair.
@@ -1064,14 +1223,20 @@
             }
         }
         const busy = manualRequests.has(db.name) || db.state === 'DEGRADED';
-        backup.hidden = !enabled;
-        backup.disabled = !enabled || busy;
+        const users = telegramUsers.filter(user => user.enabled);
+        backup.hidden = false;
+        backup.disabled = !manualBackupAvailable || !enabled || busy || !users.length;
+        backup.title = !manualBackupAvailable
+            ? 'Manual backups are unavailable in one-shot mode'
+            : !users.length
+                ? 'Add an enabled Telegram user to enable manual backups'
+                : busy ? 'Backup is already queued or running' : 'Open manual backup options';
         backup.textContent = manualRequests.has(db.name)
             ? (db.state === 'DEGRADED' ? 'Running...' : 'Queued...')
             : 'Backup now';
         backup.onclick = event => {
             event.stopPropagation();
-            backupDatabase(db.name);
+            openManualBackupModal(db.name);
         };
         const backupError = el.querySelector('.db-backup-error');
         backupError.textContent = backupErrors.get(db.name) || '';
@@ -1155,6 +1320,7 @@
             <tr>
                 <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
                 <td class="${record.source === 'manual' ? 'manual-source' : ''}">${record.source === 'manual' ? 'Manual' : escapeHtml(record.source || 'Scheduled')}</td>
+                <td>${escapeHtml(record.recipient || '-')}</td>
                 <td class="${['disable', 'disabled'].includes(record.status) ? 'action-disable' : (['enable', 'enabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure'))}">${escapeHtml(record.status)}</td>
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
@@ -1170,7 +1336,7 @@
             </div>
             <div class="history-stats">${stats}</div>
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
-                <thead><tr><th>Started</th><th>Source</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>` : '<div class="history-muted">No backup history yet.</div>'}`;
     }
@@ -1342,7 +1508,7 @@
         }
     }
 
-    async function backupDatabase(name) {
+    async function backupDatabase(name, chatId, noEncryption) {
         const el = dbCards.get(name);
         const button = el?.querySelector('.db-backup');
         manualRequests.add(name);
@@ -1352,13 +1518,18 @@
             button.textContent = 'Queuing...';
         }
         try {
-            const res = await fetch(`/api/status/database/${encodeURIComponent(name)}/backup`, { method: 'POST' });
+            const res = await fetch(`/api/status/database/${encodeURIComponent(name)}/backup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId, no_encryption: noEncryption }),
+            });
             if (!res.ok) {
                 const error = new Error(`HTTP ${res.status}`);
                 error.status = res.status;
                 throw error;
             }
             await res.json();
+            closeManualBackupModal();
             await refreshDashboard();
             if (expandedDatabases.has(name)) {
                 const current = dbCards.get(name);
@@ -1366,11 +1537,86 @@
             }
         } catch (error) {
             manualRequests.delete(name);
-            backupErrors.set(name, error.status === 409
-                ? 'Backup already running or queued.'
-                : 'Could not queue backup. Try again.');
+            const message = error.status === 409
+                ? 'Backup could not be queued: it is unavailable, already running, or the recipient is invalid.'
+                : 'Could not queue backup. Try again.';
+            document.getElementById('manualBackupError').textContent = message;
+            document.getElementById('manualBackupError').hidden = false;
             await refreshDashboard();
         }
+    }
+
+    function openManualBackupModal(name) {
+        manualBackupDatabase = name;
+        const modal = document.getElementById('manualBackupModal');
+        const form = document.getElementById('manualBackupForm');
+        const recipient = document.getElementById('manualBackupRecipient');
+        const noEncryption = document.getElementById('manualBackupNoEncryption');
+        const warning = document.getElementById('manualBackupWarning');
+        const unavailable = document.getElementById('manualBackupUnavailable');
+        const error = document.getElementById('manualBackupError');
+        const submit = document.getElementById('manualBackupSubmit');
+        const users = telegramUsers.filter(user => user.enabled);
+        document.getElementById('manualBackupDatabase').textContent = name;
+        recipient.innerHTML = users.length
+            ? users.map(user => `<option value="${escapeHtml(user.chat_id)}">${escapeHtml(user.name)}</option>`).join('')
+            : '<option value="">No enabled recipients</option>';
+        recipient.disabled = !manualBackupAvailable || !users.length;
+        noEncryption.checked = true;
+        noEncryption.disabled = !manualBackupAvailable || !users.length;
+        warning.hidden = false;
+        unavailable.hidden = manualBackupAvailable && users.length > 0;
+        unavailable.textContent = !manualBackupAvailable
+            ? 'Manual backups are unavailable when the process is not running in scheduled mode.'
+            : 'Add an enabled Telegram user to enable manual backups.';
+        error.hidden = true;
+        error.textContent = '';
+        submit.disabled = !manualBackupAvailable || !users.length;
+        modal.hidden = false;
+        document.body.style.overflow = 'hidden';
+        (users.length ? recipient : document.getElementById('manualBackupClose')).focus();
+        form.setAttribute('aria-busy', 'false');
+    }
+
+    function closeManualBackupModal() {
+        const modal = document.getElementById('manualBackupModal');
+        if (!modal) return;
+        modal.hidden = true;
+        manualBackupDatabase = null;
+        document.body.style.overflow = '';
+    }
+
+    function setupManualBackupModal() {
+        const modal = document.getElementById('manualBackupModal');
+        const form = document.getElementById('manualBackupForm');
+        const recipient = document.getElementById('manualBackupRecipient');
+        const noEncryption = document.getElementById('manualBackupNoEncryption');
+        const warning = document.getElementById('manualBackupWarning');
+        const submit = document.getElementById('manualBackupSubmit');
+        document.getElementById('manualBackupClose').onclick = closeManualBackupModal;
+        document.getElementById('manualBackupCancel').onclick = closeManualBackupModal;
+        modal.onclick = event => { if (event.target === modal && !submit.disabled) closeManualBackupModal(); };
+        noEncryption.onchange = () => { warning.hidden = !noEncryption.checked; };
+        form.onsubmit = async event => {
+            event.preventDefault();
+            if (!manualBackupDatabase || submit.disabled) return;
+            submit.disabled = true;
+            submit.textContent = 'Queueing...';
+            recipient.disabled = true;
+            noEncryption.disabled = true;
+            form.setAttribute('aria-busy', 'true');
+            await backupDatabase(manualBackupDatabase, recipient.value, noEncryption.checked);
+            if (!modal.hidden) {
+                submit.disabled = false;
+                submit.textContent = 'Queue backup';
+                recipient.disabled = false;
+                noEncryption.disabled = false;
+                form.setAttribute('aria-busy', 'false');
+            }
+        };
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !modal.hidden && !submit.disabled) closeManualBackupModal();
+        });
     }
 
     async function refreshDashboard(forceHistory = false) {
@@ -1400,7 +1646,12 @@
                     setStatus(document.getElementById('dumpMsg'), document.getElementById('dumpTime'), data.state, data.message, data.timestamp);
                 }),
                 fetchStatus('/api/status/databases').then(data => {
+                    latestDatabases = data;
                     renderDatabases(data);
+                }),
+                fetchStatus('/api/telegram-users').then(data => {
+                    telegramUsers = data;
+                    renderDatabases(latestDatabases);
                 }),
             ]);
         } catch (err) {
@@ -1424,6 +1675,7 @@
 
     // ── Init ───────────────────────────────────────────────────────
     async function init() {
+        setupManualBackupModal();
         // refreshDashboard() loads the config too, so one call covers both.
         await refreshDashboard();
         setInterval(() => refreshDashboard(), 2000);

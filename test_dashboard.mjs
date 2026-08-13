@@ -28,6 +28,17 @@ assert.match(body, /class="db-summary-main"/);
 assert.match(body, /role="switch"/);
 assert.match(body, /class="db-backup"/);
 assert.match(body, /Backup now/);
+assert.match(html, /id="manualBackupModal"/);
+assert.match(html, /role="dialog"/);
+assert.match(html, /class="manual-backup-recipient"/);
+assert.match(html, /id="manualBackupNoEncryption" type="checkbox" checked/);
+assert.match(html, /Plaintext upload/);
+assert.match(body, /manual_backup_available/);
+assert.match(body, /api\/telegram-users/);
+assert.match(body, /user\.enabled/);
+assert.match(body, /no_encryption: noEncryption/);
+assert.match(body, /openManualBackupModal/);
+assert.match(body, /setupManualBackupModal/);
 assert.match(html, /history-table \.action \{ color: var\(--text-muted\); \}/);
 assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/);
 assert.match(body, /'disable', 'disabled'/);
@@ -113,9 +124,11 @@ const actionHistory = historyMarkup({
 });
 const manualHistory = historyMarkup({
     stats: {},
-    records: [{ started_at: '2026-08-13T00:00:00Z', source: 'manual', status: 'success' }],
+    records: [{ started_at: '2026-08-13T00:00:00Z', source: 'manual', recipient: 'Alice', status: 'success' }],
 });
 assert.match(manualHistory, /<td class="manual-source">Manual<\/td>/);
+assert.match(manualHistory, /<td>Alice<\/td>/);
+assert.match(manualHistory, /<th>Receiver<\/th>/);
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
 assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);
 expandedDatabases.add('app');
