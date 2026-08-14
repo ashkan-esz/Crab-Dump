@@ -233,4 +233,8 @@ assert.match(routingHtml, /Check all configurations/);
 assert.match(routingHtml, /api\/routing\/profiles\/check-all/);
 assert.match(routingHtml, /checkSummary/);
 assert.match(routingHtml, /CHECK FAILED/);
+assert.match(routingHtml, /role="status"/);
+assert.match(routingHtml, /setProfilesBusy/);
+assert.match(routingHtml, /setMessage\(e\.message,'error'\)/);
+assert.match(routingHtml, /finally\{setProfilesBusy\(false\)\}/);
 console.log('Routing disable workspace contract OK');

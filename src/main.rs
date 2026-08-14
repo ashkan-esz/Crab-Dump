@@ -253,6 +253,7 @@ fn main() -> Result<()> {
     }
 
     // ── One-shot mode ───────────────────────────────────────────────────────
+    let _operation_gate = web::acquire_backup_route_gate();
     web::set_cycle_running(true);
     let (results, failures) = run_cycle(
         &shared_cfg,
@@ -459,6 +460,7 @@ fn run_scheduled(
             }
         }
 
+        let _operation_gate = web::acquire_backup_route_gate();
         let cycle_started = std::time::Instant::now();
         tracing::info!(cycle, "backup cycle starting");
         web::set_cycle_running(true);
@@ -557,6 +559,7 @@ fn run_manual_requests(
                 )
             })
             .collect::<std::collections::HashMap<_, _>>();
+        let _operation_gate = web::acquire_backup_route_gate();
         web::set_cycle_running(true);
         let _ = execute_database_indices(
             cfg,

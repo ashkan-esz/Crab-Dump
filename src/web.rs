@@ -61,6 +61,19 @@ static TELEGRAM_CHAT_COUNT: AtomicU64 = AtomicU64::new(0);
 static CYCLE_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Whether the long-lived scheduler is available to execute dashboard requests.
 static MANUAL_BACKUP_AVAILABLE: AtomicBool = AtomicBool::new(false);
+/// Serializes backup execution with runtime route mutations. Replacing the
+/// Telegram client while a backup is uploading would split one backup across
+/// two routes, so both operations must own this gate for their full duration.
+static BACKUP_ROUTE_GATE: AtomicBool = AtomicBool::new(false);
+
+/// Exclusive ownership of the backup/route operation slot.
+pub struct BackupRouteGuard;
+
+impl Drop for BackupRouteGuard {
+    fn drop(&mut self) {
+        BACKUP_ROUTE_GATE.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Seconds since UNIX epoch of the next scheduled backup cycle, or 0 when
 /// there is none (one-shot mode, or a cycle already in progress).
@@ -454,6 +467,28 @@ pub fn set_cycle_running(running: bool) {
     if running {
         BACKUP_NEXT_RUN_EPOCH_SECS.store(0, Ordering::SeqCst);
     }
+}
+
+/// Acquire exclusive ownership for a backup run.
+pub fn acquire_backup_route_gate() -> BackupRouteGuard {
+    while BACKUP_ROUTE_GATE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        std::thread::yield_now();
+    }
+    BackupRouteGuard
+}
+
+/// Try to acquire exclusive ownership for a runtime route mutation.
+///
+/// A non-blocking result lets the dashboard explain that the user should wait
+/// for the active backup instead of leaving the request hanging.
+pub fn try_acquire_route_gate() -> Option<BackupRouteGuard> {
+    BACKUP_ROUTE_GATE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| BackupRouteGuard)
 }
 
 /// Publish when the next backup cycle starts, as seconds from now.
@@ -1547,13 +1582,39 @@ async fn apply_routing_profile(
     client_drop_tx: web::Data<Sender<Arc<Client>>>,
     path: web::Path<String>,
 ) -> impl Responder {
+    let Some(_operation_gate) = try_acquire_route_gate() else {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Cannot apply routing while a backup is running. Try again when it finishes."
+        }));
+    };
     let id = path.into_inner();
     let Some(url) = store.get_url(&id) else {
         return HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}));
     };
-    let Ok(proxy) = route.apply(&url) else {
-        return HttpResponse::BadGateway()
-            .json(serde_json::json!({"error": "routing profile could not be applied"}));
+    if route.test(&url).is_err() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "The routing profile is invalid and could not be applied."
+        }));
+    }
+    let proxy = match route.apply(&url) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            let message = if error.chain().any(|cause| {
+                cause
+                    .to_string()
+                    .contains("did not open its local listener")
+            }) {
+                "The managed routing service did not start its local listener."
+            } else if error
+                .chain()
+                .any(|cause| cause.to_string().contains("starting managed routing core"))
+            {
+                "The managed routing service is unavailable."
+            } else {
+                "The routing profile could not be applied."
+            };
+            return HttpResponse::BadGateway().json(serde_json::json!({"error": message}));
+        }
     };
     let new_client = match tokio::task::spawn_blocking(move || {
         let proxy =
@@ -1603,6 +1664,11 @@ async fn disable_routing(
     client_drop_tx: web::Data<Sender<Arc<Client>>>,
     fallback_proxy: web::Data<Option<String>>,
 ) -> impl Responder {
+    let Some(_operation_gate) = try_acquire_route_gate() else {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Cannot change routing while a backup is running. Try again when it finishes."
+        }));
+    };
     if store.active_id().is_none() && route.active_proxy().is_none() {
         return HttpResponse::Ok().json(serde_json::json!({
             "active": false,
@@ -1986,6 +2052,14 @@ mod tests {
             recipient_name: "Bob".into(),
             no_encryption: false,
         }));
+    }
+
+    #[test]
+    fn route_gate_rejects_mutations_while_backup_owns_it() {
+        let guard = acquire_backup_route_gate();
+        assert!(try_acquire_route_gate().is_none());
+        drop(guard);
+        assert!(try_acquire_route_gate().is_some());
     }
 
     #[test]
