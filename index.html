@@ -1105,6 +1105,18 @@
         return `${count} destination${count === 1 ? '' : 's'}`;
     }
 
+    function renderTelegramTestState(data) {
+        const button = document.getElementById('tgTestBtn');
+        const message = document.getElementById('tgTestMsg');
+        const localBusy = button.getAttribute('aria-busy') === 'true';
+        const reason = data.test_disabled_reason || '';
+        if (!localBusy) {
+            button.disabled = Boolean(data.test_disabled);
+            button.title = reason;
+            message.textContent = reason ? `Test unavailable: ${reason}` : '';
+        }
+    }
+
     // ── Info bar ───────────────────────────────────────────────────
     async function loadConfig() {
         try {
@@ -1717,7 +1729,15 @@
         button.textContent = 'Testing...';
         message.textContent = '';
         try {
-            const result = await fetchStatus('/api/status/service/test', { method: 'POST' });
+            const response = await apiFetch('/api/status/service/test', { method: 'POST' });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                if (result.disabled_reason) {
+                    message.textContent = `Test unavailable: ${result.disabled_reason}`;
+                    return;
+                }
+                throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            }
             message.textContent = result.message;
         } catch (error) {
             message.textContent = 'Telegram API test failed. Try again.';
@@ -1903,6 +1923,7 @@
                 fetchStatus('/api/status/service').then(data => {
                     applyState(document.getElementById('tgCard'), document.getElementById('tgDot'), data.state);
                     setStatus(document.getElementById('tgMsg'), document.getElementById('tgTime'), data.state, data.message, data.timestamp);
+                    renderTelegramTestState(data);
                 }),
                 fetchStatus('/api/status/process').then(data => {
                     applyState(document.getElementById('dumpCard'), document.getElementById('dumpDot'), data.state);

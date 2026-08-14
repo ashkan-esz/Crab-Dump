@@ -3,7 +3,8 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -25,6 +26,60 @@ const MAX_RETRY_AFTER_SECS: u64 = 300;
 /// buy no throughput — they only convert into 429s. Queueing here costs
 /// nothing real and keeps the dump and packaging stages parallel.
 static UPLOAD_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Idle = 0,
+    Check = 1,
+    Upload = 2,
+    Message = 3,
+}
+
+static ACTIVE_OPERATION: AtomicU8 = AtomicU8::new(Operation::Idle as u8);
+
+struct OperationGuard {
+    lock: Option<MutexGuard<'static, ()>>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.lock.take();
+        ACTIVE_OPERATION.store(Operation::Idle as u8, Ordering::SeqCst);
+    }
+}
+
+fn acquire_operation(operation: Operation) -> OperationGuard {
+    let lock = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ACTIVE_OPERATION.store(operation as u8, Ordering::SeqCst);
+    OperationGuard { lock: Some(lock) }
+}
+
+fn try_acquire_operation(operation: Operation) -> Result<OperationGuard, &'static str> {
+    let lock = match UPLOAD_LOCK.try_lock() {
+        Ok(lock) => lock,
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            return Err(test_disabled_reason().unwrap_or("Telegram is busy with another operation"));
+        }
+    };
+    ACTIVE_OPERATION.store(operation as u8, Ordering::SeqCst);
+    Ok(OperationGuard { lock: Some(lock) })
+}
+
+pub(crate) fn test_disabled_reason() -> Option<&'static str> {
+    match ACTIVE_OPERATION.load(Ordering::SeqCst) {
+        value if value == Operation::Check as u8 => {
+            Some("Waiting for the previous Telegram check to finish")
+        }
+        value if value == Operation::Upload as u8 => {
+            Some("Waiting for an active Telegram upload to finish")
+        }
+        value if value == Operation::Message as u8 => {
+            Some("Waiting for an active Telegram message to finish")
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UploadStats {
@@ -188,7 +243,7 @@ pub fn send_document_with_progress(
     progress: Option<UploadProgress>,
 ) -> Result<()> {
     // The guard protects no data, so a poisoned lock is safe to adopt.
-    let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _operation_guard = acquire_operation(Operation::Upload);
 
     let url = format!("{API_BASE}/bot{bot_token}/sendDocument");
     let file_name = path
@@ -302,7 +357,7 @@ pub fn send_document_with_progress(
 /// document uploads. Callers intentionally decide whether a notice failure is
 /// fatal; dashboard notices are best-effort.
 pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str) -> Result<()> {
-    let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _operation_guard = acquire_operation(Operation::Message);
     let url = format!("{API_BASE}/bot{bot_token}/sendMessage");
     let mut attempt = 0u32;
 
@@ -362,12 +417,20 @@ pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str)
     }
 }
 
-pub fn test_api(client: &Client, bot_token: &str) -> Result<()> {
-    test_api_at(client, bot_token, API_BASE)
+pub fn test_api_at(client: &Client, bot_token: &str, api_base: &str) -> Result<()> {
+    let _operation_guard = acquire_operation(Operation::Check);
+    test_api_at_locked(client, bot_token, api_base)
 }
 
-pub fn test_api_at(client: &Client, bot_token: &str, api_base: &str) -> Result<()> {
-    let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn try_test_api(
+    client: &Client,
+    bot_token: &str,
+) -> std::result::Result<Result<()>, &'static str> {
+    let _operation_guard = try_acquire_operation(Operation::Check)?;
+    Ok(test_api_at_locked(client, bot_token, API_BASE))
+}
+
+fn test_api_at_locked(client: &Client, bot_token: &str, api_base: &str) -> Result<()> {
     let url = api_test_url(api_base, bot_token);
     let response = match client.get(&url).send().context("testing Telegram API") {
         Ok(response) => response,
@@ -438,6 +501,29 @@ fn is_transient(http_status: u16, tg_code: Option<i64>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_busy_reason_identifies_the_active_operation() {
+        let check_guard = acquire_operation(Operation::Check);
+        assert_eq!(
+            test_disabled_reason(),
+            Some("Waiting for the previous Telegram check to finish")
+        );
+        assert_eq!(
+            try_acquire_operation(Operation::Check).err(),
+            Some("Waiting for the previous Telegram check to finish")
+        );
+        drop(check_guard);
+        assert_eq!(test_disabled_reason(), None);
+
+        let upload_guard = acquire_operation(Operation::Upload);
+        assert_eq!(
+            test_disabled_reason(),
+            Some("Waiting for an active Telegram upload to finish")
+        );
+        drop(upload_guard);
+        assert_eq!(test_disabled_reason(), None);
+    }
 
     /// D8: Telegram's own hint beats the computed backoff, but a hostile or
     /// buggy value must not park the backup for hours.

@@ -620,6 +620,15 @@ struct StatusResponse {
     timestamp: String,
 }
 
+#[derive(Serialize)]
+struct ServiceStatusResponse {
+    state: &'static str,
+    message: String,
+    timestamp: String,
+    test_disabled: bool,
+    test_disabled_reason: Option<&'static str>,
+}
+
 /// Map a severity code to its human-readable label.
 fn state_label(code: u8) -> &'static str {
     match code {
@@ -653,7 +662,14 @@ async fn api_service_status() -> impl Responder {
         1 => "Telegram API is slow or rate-limited".to_string(),
         _ => "Unable to reach Telegram API".to_string(),
     };
-    HttpResponse::Ok().json(status_entry(code, &msg))
+    let test_disabled_reason = telegram::test_disabled_reason();
+    HttpResponse::Ok().json(ServiceStatusResponse {
+        state: state_label(code),
+        message: msg,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        test_disabled: test_disabled_reason.is_some(),
+        test_disabled_reason,
+    })
 }
 
 async fn test_telegram_api(
@@ -665,10 +681,20 @@ async fn test_telegram_api(
         .expect("Telegram client lock poisoned")
         .clone();
     let token = bot_token.get_ref().clone();
-    match tokio::task::spawn_blocking(move || telegram::test_api(&client, &token)).await {
-        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+    match tokio::task::spawn_blocking(move || telegram::try_test_api(&client, &token)).await {
+        Ok(Ok(Ok(()))) => HttpResponse::Ok().json(serde_json::json!({
             "ok": true,
             "message": "Telegram API test succeeded"
+        })),
+        Ok(Err(reason)) => HttpResponse::Conflict().json(serde_json::json!({
+            "ok": false,
+            "error": reason,
+            "disabled": true,
+            "disabled_reason": reason
+        })),
+        Ok(Ok(Err(error))) => HttpResponse::BadGateway().json(serde_json::json!({
+            "ok": false,
+            "error": format!("Telegram API test failed: {error}")
         })),
         _ => HttpResponse::BadGateway().json(serde_json::json!({
             "ok": false,
