@@ -326,6 +326,29 @@ impl RouteManager {
             .map(|core| core.proxy.clone())
     }
 
+    pub fn is_healthy(&self) -> bool {
+        let mut active = self.active.lock().expect("route manager lock poisoned");
+        let Some(core) = active.as_mut() else {
+            return true;
+        };
+
+        if matches!(core.child.try_wait(), Ok(Some(_)) | Err(_)) {
+            return false;
+        }
+
+        let Some(port) = core
+            .proxy
+            .strip_prefix("socks5h://127.0.0.1:")
+            .and_then(|port| port.parse::<u16>().ok())
+        else {
+            return false;
+        };
+        let Ok(address) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+            return false;
+        };
+        TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+    }
+
     pub fn test(&self, url: &str) -> Result<ParsedProfile> {
         parse_share_url(url)
     }
@@ -867,6 +890,12 @@ fn restrict_path(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn route_manager_without_active_core_is_healthy() {
+        let manager = RouteManager::new("/tmp/crab-routing-health", "/bin/false");
+        assert!(manager.is_healthy());
+    }
 
     #[test]
     fn parses_vless_without_exposing_secret() {

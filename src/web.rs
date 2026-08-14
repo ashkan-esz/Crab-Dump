@@ -1152,7 +1152,7 @@ async fn dashboard_auth(
     // login. All data and mutation endpoints remain protected below.
     if matches!(
         req.path(),
-        "/" | "/index.html" | "/users" | "/routing" | "/api/auth/login"
+        "/" | "/index.html" | "/users" | "/routing" | "/healthz" | "/api/auth/login"
     ) {
         return next.call(req).await;
     }
@@ -1215,6 +1215,14 @@ async fn dashboard_auth(
         role: session.role,
     });
     next.call(req).await
+}
+
+async fn healthz(route: web::Data<Arc<RouteManager>>) -> impl Responder {
+    if route.is_healthy() {
+        HttpResponse::Ok().body("ok")
+    } else {
+        HttpResponse::ServiceUnavailable().body("routing core unavailable")
+    }
 }
 
 async fn security_headers(
@@ -1638,6 +1646,7 @@ pub async fn start_server(
             .app_data(bot_token_data.clone())
             .app_data(fallback_proxy_data.clone())
             .app_data(resource_data.clone())
+            .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
@@ -1932,6 +1941,33 @@ mod tests {
         )
         .await;
         assert_eq!(protected_api.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn health_endpoint_is_public_without_active_route() {
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(DashboardAuth::new(
+                    "admin".into(),
+                    "a-strong-test-password".into(),
+                    None,
+                    None,
+                )))
+                .app_data(web::Data::new(Arc::new(RouteManager::new(
+                    "/tmp/crab-routing-health-web",
+                    "/bin/false",
+                ))))
+                .route("/healthz", web::get().to(healthz))
+                .wrap(from_fn(dashboard_auth)),
+        )
+        .await;
+
+        let response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get().uri("/healthz").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
     }
 
     #[actix_web::test]
