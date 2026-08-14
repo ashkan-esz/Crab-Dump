@@ -15,11 +15,13 @@ RUN apk add --no-cache curl tar \
        | tar -xz --strip-components=1 -C /out \
     && test -x /out/sing-box
 
-FROM rust:1-bookworm AS builder
+FROM rust:1-alpine AS builder
+
+RUN apk add --no-cache build-base
 
 WORKDIR /build
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && printf 'fn main() {}\n' > src/main.rs \
     && cargo build --release \
@@ -30,9 +32,10 @@ COPY index.html users.html routing.html ./
 # Build the final application into a separate target directory. This prevents
 # Cargo from ever reusing the placeholder executable built for dependency
 # caching above, even when Docker restores an otherwise valid stale layer.
-RUN CARGO_TARGET_DIR=/build/final-target cargo build --release
+RUN CARGO_TARGET_DIR=/build/final-target cargo build --release \
+    && strip --strip-unneeded /build/final-target/release/crab-dump
 
-FROM postgres:17-bookworm
+FROM postgres:17-alpine3.21
 
 WORKDIR /app
 
@@ -41,8 +44,6 @@ COPY --from=singbox /out/sing-box /usr/local/bin/sing-box
 
 RUN mkdir -p /app/data /app/history /app/work \
     && chown -R postgres:postgres /app
-
-USER postgres
 
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \

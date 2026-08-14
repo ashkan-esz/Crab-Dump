@@ -1,6 +1,6 @@
 # Rust workspace
 target/
-Cargo.lock
+.git/
 
 # Environment secrets
 .env
@@ -15,6 +15,9 @@ Cargo.lock
 .codex
 .gapcode
 .vexp
+skills-lock.json
+AGENTS.md
+*.md
 
 # OS
 .DS_Store

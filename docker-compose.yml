@@ -13,6 +13,7 @@ services:
       SING_BOX_PATH: /usr/local/bin/sing-box
       HISTORY_DIR: /app/history
       WORK_DIR: /app/work
+      MAX_PARALLEL_DATABASES: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -22,9 +23,9 @@ services:
     ports:
       - "${API_PORT:-1111}:1111"
     restart: "unless-stopped"
-    cpus: "0.2"
-    memswap_limit: 0
-    mem_limit: "50mb"
+    cpus: "0.25"
+    mem_limit: "128mb"
+    memswap_limit: "128mb"
 
 volumes:
   crab_dump_history:
