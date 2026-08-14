@@ -1054,10 +1054,10 @@
         } catch { return dateStr; }
     }
 
-    /** Format a byte count with binary units (KiB = 1024 B). */
+    /** Format a byte count with 1024-byte units (KB = 1024 B). */
     function fmtBytes(n) {
         if (!n || n < 0) return '0 B';
-        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        const units = ['B', 'KB', 'MB', 'GiB', 'TiB'];
         const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
         const v = n / Math.pow(1024, i);
         return `${v.toFixed(i === 0 || v >= 10 ? 0 : 1)} ${units[i]}`;
