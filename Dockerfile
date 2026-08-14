@@ -35,18 +35,24 @@ COPY index.html users.html routing.html ./
 RUN CARGO_TARGET_DIR=/build/final-target cargo build --release \
     && strip --strip-unneeded /build/final-target/release/crab-dump
 
-FROM postgres:17-alpine3.21
+FROM alpine:3.21
 
 WORKDIR /app
+
+RUN apk add --no-cache \
+        ca-certificates \
+        postgresql17-client \
+        tzdata \
+    && mkdir -p /app/data /app/history /app/work \
+    && chown -R postgres:postgres /app
 
 COPY --from=builder /build/final-target/release/crab-dump /app/crab-dump
 COPY --from=singbox /out/sing-box /usr/local/bin/sing-box
 
-RUN mkdir -p /app/data /app/history /app/work \
-    && chown -R postgres:postgres /app
-
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
       org.opencontainers.image.source="https://github.com/ashkan/crab-dump"
+
+#USER postgres
 
 ENTRYPOINT ["./crab-dump"]

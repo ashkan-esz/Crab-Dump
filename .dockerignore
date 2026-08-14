@@ -9,15 +9,18 @@ target/
 .idea/
 .vscode/
 
-# AI
-.agents
-.claude
-.codex
-.gapcode
-.vexp
+# AI and agent metadata
+.agents/
+.gapcode/
+.claude/
+.codex/
+.vexp/
 skills-lock.json
 AGENTS.md
 *.md
+
+# GitHub metadata
+.github/
 
 # OS
 .DS_Store
@@ -36,10 +39,16 @@ temp/
 history
 data/
 
-# Archives
+# Archives and packages
 *.tar
 *.tar.gz
 *.zip
+*.deb
+
+# Node/development artifacts
+node_modules/
+test_dashboard.mjs
+file_list.txt
 
 # Docker overrides
 docker-compose.override.yml
