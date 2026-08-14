@@ -154,7 +154,7 @@ static DATABASE_STATES: LazyLock<RwLock<Option<std::sync::Arc<DatabaseStateStore
 struct ManualBackupState {
     pending: VecDeque<ManualBackupRequest>,
     pending_set: HashSet<String>,
-    active: HashSet<String>,
+    active: HashMap<String, Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +174,7 @@ pub struct ManualBackupController {
 impl ManualBackupController {
     pub fn request(&self, request: ManualBackupRequest) -> bool {
         let mut state = self.state.lock().expect("manual backup lock poisoned");
-        if state.active.contains(&request.database_name)
+        if state.active.contains_key(&request.database_name)
             || !state.pending_set.insert(request.database_name.clone())
         {
             return false;
@@ -189,7 +189,10 @@ impl ManualBackupController {
         let mut names = Vec::with_capacity(state.pending.len());
         while let Some(request) = state.pending.pop_front() {
             state.pending_set.remove(&request.database_name);
-            state.active.insert(request.database_name.clone());
+            state.active.insert(
+                request.database_name.clone(),
+                Arc::new(AtomicBool::new(false)),
+            );
             names.push(request);
         }
         names
@@ -197,11 +200,46 @@ impl ManualBackupController {
 
     pub fn claim_scheduled(&self, name: &str) -> bool {
         let mut state = self.state.lock().expect("manual backup lock poisoned");
-        if state.active.contains(name) || state.pending_set.contains(name) {
+        if state.active.contains_key(name) || state.pending_set.contains(name) {
             return false;
         }
-        state.active.insert(name.to_string());
+        state
+            .active
+            .insert(name.to_string(), Arc::new(AtomicBool::new(false)));
         true
+    }
+
+    pub fn cancellation_token(&self, name: &str) -> Option<Arc<AtomicBool>> {
+        self.state
+            .lock()
+            .expect("manual backup lock poisoned")
+            .active
+            .get(name)
+            .cloned()
+    }
+
+    pub fn can_cancel(&self, name: &str) -> bool {
+        let state = self.state.lock().expect("manual backup lock poisoned");
+        state.pending_set.contains(name) || state.active.contains_key(name)
+    }
+
+    pub fn cancel(&self, name: &str) -> CancelResult {
+        let mut state = self.state.lock().expect("manual backup lock poisoned");
+        if state.pending_set.remove(name) {
+            state
+                .pending
+                .retain(|request| request.database_name != name);
+            return CancelResult::Queued;
+        }
+        let Some(token) = state.active.get(name) else {
+            return CancelResult::NotFound;
+        };
+        if token.swap(true, Ordering::SeqCst) {
+            CancelResult::AlreadyCancelled
+        } else {
+            self.wake.notify_all();
+            CancelResult::Active
+        }
     }
 
     pub fn finish(&self, name: &str) {
@@ -230,9 +268,28 @@ impl ManualBackupController {
             .lock()
             .expect("manual backup lock poisoned")
             .active
-            .contains(name)
+            .contains_key(name)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelResult {
+    Queued,
+    Active,
+    AlreadyCancelled,
+    NotFound,
+}
+
+#[derive(Debug)]
+pub struct CancellationError;
+
+impl std::fmt::Display for CancellationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("backup cancelled")
+    }
+}
+
+impl std::error::Error for CancellationError {}
 
 static MANUAL_BACKUPS: LazyLock<Arc<ManualBackupController>> =
     LazyLock::new(|| Arc::new(ManualBackupController::default()));
@@ -408,6 +465,31 @@ pub fn fail_db(db_name: &str, detail: impl Into<String>) {
     });
     entry.code = 2;
     entry.detail = detail.into();
+    entry.speed_bps = 0.0;
+    entry.current_chunk_done = 0;
+    entry.current_chunk_total = 0;
+    entry.updated = chrono::Utc::now().to_rfc3339();
+}
+
+pub fn cancel_db(db_name: &str) {
+    let mut statuses = DUMP_STATUSES.write().expect("dump status lock poisoned");
+    let entry = statuses.entry(db_name.to_string()).or_insert(DbStatus {
+        code: 0,
+        stage: "cancelled",
+        detail: String::new(),
+        bytes_done: 0,
+        bytes_total: 0,
+        speed_bps: 0.0,
+        current_chunk: 0,
+        current_chunk_done: 0,
+        current_chunk_total: 0,
+        chunk_count: 0,
+        dump_bytes: 0,
+        updated: String::new(),
+    });
+    entry.code = 0;
+    entry.stage = "cancelled";
+    entry.detail = "CANCELLED — backup stopped by operator".into();
     entry.speed_bps = 0.0;
     entry.current_chunk_done = 0;
     entry.current_chunk_total = 0;
@@ -748,6 +830,8 @@ struct DatabaseResponse {
     /// Display name of the database.
     name: String,
     enabled: bool,
+    /// Whether a queued or active backup can currently be cancelled.
+    cancellable: bool,
     /// Severity label: "UP", "DEGRADED" or "DOWN".
     state: &'static str,
     /// Current pipeline stage — drives the dashboard timeline.
@@ -786,6 +870,7 @@ async fn api_databases_list() -> impl Responder {
         .map(|(name, s)| DatabaseResponse {
             name: name.clone(),
             enabled: database_state_store().is_enabled(name),
+            cancellable: manual_backup_controller().can_cancel(name),
             state: state_label(s.code),
             stage: s.stage,
             detail: s.detail.clone(),
@@ -833,6 +918,60 @@ async fn api_database_action(
     payload: Option<web::Json<ManualBackupPayload>>,
 ) -> impl Responder {
     let (name, action) = path.into_inner();
+    if action == "cancel" {
+        if !known_database(&name) {
+            audit_action(&req, "cancel", &name, "not_found");
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": format!("Unknown database: {name}")}));
+        }
+        let result = manual_backup_controller().cancel(&name);
+        match result {
+            CancelResult::Queued | CancelResult::Active => {
+                if matches!(result, CancelResult::Queued) {
+                    cancel_db(&name);
+                }
+                let now = crate::history::timestamp(std::time::SystemTime::now());
+                let record = crate::history::HistoryRecord {
+                    started_at: now.clone(),
+                    ended_at: now,
+                    database_index: 0,
+                    database_name: name.clone(),
+                    source: "scheduled".into(),
+                    recipient: None,
+                    status: "cancelled".into(),
+                    error: Some("cancelled by dashboard operator".into()),
+                    dump_bytes: 0,
+                    packaged_bytes: 0,
+                    chunk_count: 0,
+                    sha256: None,
+                    encrypted: false,
+                    duration_secs: 0.0,
+                    upload_duration_secs: 0.0,
+                    upload_attempts: 0,
+                    upload_retries: 0,
+                };
+                if matches!(result, CancelResult::Queued) {
+                    if let Err(error) = history.append(&record) {
+                        tracing::warn!(database = %name, error = %error, "failed to append cancellation history");
+                    }
+                }
+                audit_action(&req, "cancel", &name, "accepted");
+                return HttpResponse::Accepted()
+                    .json(serde_json::json!({"name": name, "status": "cancelled"}));
+            }
+            CancelResult::AlreadyCancelled => {
+                audit_action(&req, "cancel", &name, "already_cancelled");
+                return HttpResponse::Conflict()
+                    .json(serde_json::json!({"error": "Database backup is already cancelling"}));
+            }
+            CancelResult::NotFound => {
+                audit_action(&req, "cancel", &name, "idle");
+                return HttpResponse::Conflict().json(
+                    serde_json::json!({"error": "Database backup is not queued or running"}),
+                );
+            }
+        }
+    }
     if action == "backup" {
         let Some(payload) = payload else {
             audit_action(&req, "backup", &name, "rejected_missing_payload");
@@ -2113,6 +2252,44 @@ mod tests {
         for request in requests {
             controller.finish(&request.database_name);
         }
+    }
+
+    #[test]
+    fn manual_controller_cancels_queued_and_active_runs_idempotently() {
+        let controller = ManualBackupController::default();
+        let queued = ManualBackupRequest {
+            database_name: "queued".into(),
+            chat_id: "-queued".into(),
+            recipient_name: "Queued".into(),
+            no_encryption: false,
+        };
+        assert!(controller.request(queued));
+        assert_eq!(controller.cancel("queued"), CancelResult::Queued);
+        assert_eq!(controller.cancel("queued"), CancelResult::NotFound);
+        assert!(controller.take_pending().is_empty());
+
+        assert!(controller.request(ManualBackupRequest {
+            database_name: "active".into(),
+            chat_id: "-active".into(),
+            recipient_name: "Active".into(),
+            no_encryption: false,
+        }));
+        let request = controller.take_pending().pop().expect("active request");
+        let token = controller
+            .cancellation_token("active")
+            .expect("active cancellation token");
+        assert!(!token.load(Ordering::SeqCst));
+        assert_eq!(controller.cancel("active"), CancelResult::Active);
+        assert!(token.load(Ordering::SeqCst));
+        assert_eq!(controller.cancel("active"), CancelResult::AlreadyCancelled);
+        controller.finish(&request.database_name);
+        assert_eq!(controller.cancel("active"), CancelResult::NotFound);
+        assert!(controller.request(ManualBackupRequest {
+            database_name: "active".into(),
+            chat_id: "-again".into(),
+            recipient_name: "Again".into(),
+            no_encryption: false,
+        }));
     }
 
     fn users_test_store() -> Arc<TelegramUserStore> {

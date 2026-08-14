@@ -1,6 +1,6 @@
 //! Spawns `pg_dump` and exposes its stdout as a reader.
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -16,6 +16,25 @@ pub struct DumpPipe {
 }
 
 impl DumpPipe {
+    /// Terminate and reap `pg_dump` after cancellation.
+    pub fn cancel(&mut self) -> Result<()> {
+        drop(std::mem::replace(&mut self.stdout, Box::new(io::empty())));
+        if self
+            .child
+            .try_wait()
+            .context("checking pg_dump after cancellation")?
+            .is_none()
+        {
+            self.child
+                .kill()
+                .context("terminating pg_dump after cancellation")?;
+        }
+        self.child
+            .wait()
+            .context("reaping pg_dump after cancellation")?;
+        Ok(())
+    }
+
     /// Wait for the child to exit and return an error if it failed.
     pub fn finish(mut self) -> Result<()> {
         // Make sure we've drained stdout so the child isn't blocked writing.

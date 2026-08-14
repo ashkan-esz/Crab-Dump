@@ -296,6 +296,7 @@
         .summary-pill.running { background: rgba(245,158,11,.12);  color: var(--warn);     border: 1px solid rgba(245,158,11,.25); }
         .summary-pill.done    { background: rgba(34,197,94,.12);   color: var(--up);       border: 1px solid rgba(34,197,94,.25); }
         .summary-pill.failed  { background: rgba(239,68,68,.12);   color: var(--err);      border: 1px solid rgba(239,68,68,.25); }
+        .summary-pill.cancelled { background: var(--idle-bg); color: var(--idle); border: 1px solid var(--idle-border); }
         .summary-pill.size    { background: rgba(226,232,240,.05); color: var(--text);     border: 1px solid var(--border); }
         .summary-pill.speed   { background: rgba(245,158,11,.12);  color: var(--warn);     border: 1px solid rgba(245,158,11,.25); }
         .summary-pill.zero    { opacity: .4; }
@@ -470,6 +471,11 @@
         }
         .db-backup:hover { background: rgba(59,130,246,.10); }
         .db-backup:disabled { cursor: wait; opacity: .7; }
+        .db-backup.cancel-action {
+            border-color: var(--err);
+            color: var(--err);
+        }
+        .db-backup.cancel-action:hover { background: var(--err-bg); }
         .db-backup-error { max-width: 180px; color: var(--err); font-size: .64rem; line-height: 1.3; text-align: right; }
         .db-backup-error[hidden] { display: none; }
         .db-manual-form { display: contents; }
@@ -625,6 +631,7 @@
         .db-card.running { border-color: var(--warn-border); border-left-color: var(--warn); box-shadow: 0 0 16px rgba(245,158,11,.06); }
         .db-card.done    { border-color: var(--up-border);   border-left-color: var(--up);   box-shadow: 0 0 16px rgba(34,197,94,.06); }
         .db-card.failed  { border-color: var(--err-border);  border-left-color: var(--err);  box-shadow: 0 0 16px rgba(239,68,68,.06); }
+        .db-card.cancelled { border-color: var(--idle-border); border-left-color: var(--idle); }
 
         /* Row 1: dot + name + state badge */
         .db-top {
@@ -665,6 +672,7 @@
         .db-card.running .db-badge { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-border); }
         .db-card.done    .db-badge { background: var(--up-bg);   color: var(--up);   border-color: var(--up-border); }
         .db-card.failed  .db-badge { background: var(--err-bg);  color: var(--err);  border-color: var(--err-border); }
+        .db-card.cancelled .db-badge { background: var(--idle-bg); color: var(--idle); border-color: var(--idle-border); }
 
         /* Row 2: what the database is doing right now */
         .db-step {
@@ -697,6 +705,7 @@
             overflow: hidden;
         }
         .db-card.failed .step-text { color: var(--err); opacity: .85; }
+        .db-card.cancelled .step-text { color: var(--idle); }
 
         /* Row 3: upload size + speed (hidden until the size is known) */
         .db-transfer { display: flex; flex-direction: column; gap: .35rem; }
@@ -1230,6 +1239,7 @@
     const toggleErrors = new Map();
     const manualRequests = new Set();
     const backupErrors = new Map();
+    const cancelRequests = new Set();
     let manualBackupDatabase = null;
 
     /**
@@ -1242,6 +1252,7 @@
      */
     function dbView(db) {
         if (db.enabled === false) return { cls: 'disabled', badge: 'DISABLED', idx: -1, failed: false };
+        if (db.stage === 'cancelled') return { cls: 'cancelled', badge: 'CANCELLED', idx: -1, failed: false };
         const idx = STAGES.indexOf(db.stage);
         if (db.state === 'DOWN')  return { cls: 'failed',  badge: 'FAILED',  idx: Math.max(idx, 0), failed: true };
         if (db.stage === 'done')  return { cls: 'done',    badge: 'DONE',    idx: STAGES.length,    failed: false };
@@ -1367,21 +1378,30 @@
                 });
             }
         }
-        const busy = manualRequests.has(db.name) || db.state === 'DEGRADED';
+        const canCancel = db.cancellable === true;
+        const busy = manualRequests.has(db.name) || canCancel;
         const users = telegramUsers.filter(user => user.enabled);
         backup.hidden = false;
-        backup.disabled = !manualBackupAvailable || !enabled || busy || !users.length;
-        backup.title = !manualBackupAvailable
+        backup.disabled = canCancel
+            ? cancelRequests.has(db.name)
+            : !manualBackupAvailable || !enabled || busy || !users.length;
+        backup.title = canCancel
+            ? 'Stop this queued or running backup'
+            : !manualBackupAvailable
             ? 'Manual backups are unavailable in one-shot mode'
             : !users.length
                 ? 'Add an enabled Telegram user to enable manual backups'
                 : busy ? 'Backup is already queued or running' : 'Open manual backup options';
-        backup.textContent = manualRequests.has(db.name)
+        backup.textContent = cancelRequests.has(db.name)
+            ? 'Cancelling...'
+            : canCancel ? 'Cancel backup' : manualRequests.has(db.name)
             ? (db.state === 'DEGRADED' ? 'Running...' : 'Queued...')
             : 'Backup now';
+        backup.classList.toggle('cancel-action', canCancel);
         backup.onclick = event => {
             event.stopPropagation();
-            openManualBackupModal(db.name);
+            if (canCancel) cancelDatabase(db.name);
+            else openManualBackupModal(db.name);
         };
         const backupError = el.querySelector('.db-backup-error');
         backupError.textContent = backupErrors.get(db.name) || '';
@@ -1490,7 +1510,7 @@
                 <td>${escapeHtml(new Date(record.started_at).toLocaleString())}</td>
                 <td class="${record.source === 'manual' ? 'manual-source' : ''}">${record.source === 'manual' ? 'Manual' : escapeHtml(record.source || 'Scheduled')}</td>
                 <td>${escapeHtml(record.recipient || '-')}</td>
-                <td class="${['disable', 'disabled'].includes(record.status) ? 'action-disable' : (['enable', 'enabled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure'))}">${escapeHtml(record.status)}</td>
+                <td class="${['disable', 'disabled'].includes(record.status) ? 'action-disable' : (['enable', 'enabled', 'cancelled'].includes(record.status) ? 'action' : (record.status === 'success' ? 'success' : 'failure'))}">${escapeHtml(record.status)}</td>
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
                 <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
@@ -1621,7 +1641,7 @@
         section.style.display = 'block';
 
         // Create-or-update each card, counting states and transfer totals.
-        const count = { queued: 0, running: 0, done: 0, failed: 0, disabled: 0 };
+        const count = { queued: 0, running: 0, done: 0, failed: 0, cancelled: 0, disabled: 0 };
         let bytesDone = 0, bytesTotal = 0, speed = 0;
         const ordered = databaseOrder(databases);
         ordered.forEach(db => {
@@ -1640,7 +1660,7 @@
             bytesTotal += db.bytes_total || 0;
             speed      += db.speed_bps   || 0;   // databases upload in parallel
         });
-        activeGroup.hidden = count.queued + count.running + count.done + count.failed === 0;
+        activeGroup.hidden = count.queued + count.running + count.done + count.failed + count.cancelled === 0;
         disabledGroup.hidden = count.disabled === 0;
 
         // Drop cards for databases no longer present in the payload.
@@ -1657,6 +1677,7 @@
             pill('running', count.running, 'running'),
             pill('done', count.done, 'done'),
             pill('failed', count.failed, 'failed'),
+            pill('cancelled', count.cancelled, 'cancelled'),
             pill('disabled', count.disabled, 'disabled'),
         ];
         if (bytesTotal > 0) {
@@ -1826,6 +1847,33 @@
             document.getElementById('manualBackupError').textContent = message;
             document.getElementById('manualBackupError').hidden = false;
             await refreshDashboard();
+        }
+    }
+
+    async function cancelDatabase(name) {
+        const el = dbCards.get(name);
+        cancelRequests.add(name);
+        const button = el?.querySelector('.db-backup');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Cancelling...';
+        }
+        try {
+            const res = await apiFetch(`/api/status/database/${encodeURIComponent(name)}/cancel`, {
+                method: 'POST',
+            });
+            if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
+            await res.json().catch(() => ({}));
+            await refreshDashboard();
+            if (expandedDatabases.has(name)) {
+                const current = dbCards.get(name);
+                if (current) await loadHistory(current, true);
+            }
+        } catch {
+            backupErrors.set(name, 'Could not cancel backup. Try again.');
+            await refreshDashboard();
+        } finally {
+            cancelRequests.delete(name);
         }
     }
 

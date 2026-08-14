@@ -231,7 +231,7 @@ pub fn send_document(
     path: &Path,
     stats: &mut UploadStats,
 ) -> Result<()> {
-    send_document_with_progress(client, bot_token, chat_id, path, stats, None)
+    send_document_with_progress(client, bot_token, chat_id, path, stats, None, None)
 }
 
 pub fn send_document_with_progress(
@@ -241,6 +241,7 @@ pub fn send_document_with_progress(
     path: &Path,
     stats: &mut UploadStats,
     progress: Option<UploadProgress>,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
     // The guard protects no data, so a poisoned lock is safe to adopt.
     let _operation_guard = acquire_operation(Operation::Upload);
@@ -254,6 +255,9 @@ pub fn send_document_with_progress(
 
     let mut attempt = 0u32;
     loop {
+        if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
+            return Err(anyhow::Error::new(web::CancellationError));
+        }
         attempt += 1;
         stats.attempts += 1;
         let part = if let Some(progress) = progress.clone() {
@@ -313,6 +317,9 @@ pub fn send_document_with_progress(
 
         match outcome {
             Ok(()) => {
+                if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
+                    return Err(anyhow::Error::new(web::CancellationError));
+                }
                 tracing::info!(
                     attempt, file = %path.display(),
                     "uploaded chunk"
@@ -345,10 +352,29 @@ pub fn send_document_with_progress(
                 }
                 web::set_telegram_status(1);
                 stats.retries += 1;
-                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
+                if interruptible_sleep(backoff_secs(attempt, retry_after), cancellation) {
+                    return Err(anyhow::Error::new(web::CancellationError));
+                }
             }
         }
     }
+}
+
+fn interruptible_sleep(
+    seconds: u64,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
+            return true;
+        }
+        std::thread::sleep(
+            Duration::from_millis(100)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+    false
 }
 
 /// Send an informational text message to the configured chat.
@@ -357,11 +383,24 @@ pub fn send_document_with_progress(
 /// document uploads. Callers intentionally decide whether a notice failure is
 /// fatal; dashboard notices are best-effort.
 pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str) -> Result<()> {
+    send_message_with_cancel(client, bot_token, chat_id, text, None)
+}
+
+pub fn send_message_with_cancel(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<()> {
     let _operation_guard = acquire_operation(Operation::Message);
     let url = format!("{API_BASE}/bot{bot_token}/sendMessage");
     let mut attempt = 0u32;
 
     loop {
+        if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
+            return Err(anyhow::Error::new(web::CancellationError));
+        }
         attempt += 1;
         let send_result = client
             .post(&url)
@@ -388,6 +427,9 @@ pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str)
 
         match outcome {
             Ok(()) => {
+                if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
+                    return Err(anyhow::Error::new(web::CancellationError));
+                }
                 web::set_telegram_status(0);
                 return Ok(());
             }
@@ -411,7 +453,9 @@ pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str)
                     );
                 }
                 web::set_telegram_status(1);
-                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
+                if interruptible_sleep(backoff_secs(attempt, retry_after), cancellation) {
+                    return Err(anyhow::Error::new(web::CancellationError));
+                }
             }
         }
     }
@@ -552,6 +596,12 @@ mod tests {
         assert!(is_transient(200, Some(429)), "code in the JSON body");
         assert!(!is_transient(400, None), "bad request is permanent");
         assert!(!is_transient(401, None), "bad token is permanent");
+    }
+
+    #[test]
+    fn cancellation_interrupts_retry_sleep() {
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(interruptible_sleep(300, Some(&token)));
     }
 
     #[test]

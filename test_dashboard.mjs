@@ -62,6 +62,9 @@ assert.match(html, /id="resourceCpuFill"/);
 assert.match(html, /id="resourceMemoryFill"/);
 assert.match(html, /id="resourceDiskFill"/);
 assert.match(body, /api\/status\/resources/);
+assert.match(body, /api\/status\/database\/\$\{encodeURIComponent\(name\)\}\/cancel/);
+assert.match(body, /CANCELLED/);
+assert.match(body, /cancelDatabase\(db\.name\)/);
 assert.match(body, /container scope/);
 assert.match(html, /WORK_DIR disk/);
 
@@ -149,6 +152,7 @@ const manualHistory = historyMarkup({
 assert.match(manualHistory, /<td class="manual-source">Manual<\/td>/);
 assert.match(manualHistory, /<td>Alice<\/td>/);
 assert.match(manualHistory, /<th>Receiver<\/th>/);
+assert.equal(dbView({ enabled: true, state: 'UP', stage: 'cancelled' }).badge, 'CANCELLED');
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
 assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);
 const pagedHistory = historyMarkup({

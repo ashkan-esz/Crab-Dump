@@ -359,6 +359,7 @@ fn upload_active_history(
             },
             |_index| {},
             &mut stats,
+            None,
         )
         .context("uploading history snapshot")?;
         tracing::info!(
@@ -692,8 +693,7 @@ fn run_cycle(
         .enumerate()
         .filter(|(_, db)| {
             web::database_state_store().is_enabled(&db.display_name())
-                && (source == BackupSource::OneShot
-                    || controller.claim_scheduled(&db.display_name()))
+                && controller.claim_scheduled(&db.display_name())
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
@@ -716,7 +716,7 @@ fn run_cycle(
         &active,
         client,
         source,
-        source == BackupSource::Scheduled,
+        source != BackupSource::Manual,
         &options,
     );
 
@@ -797,6 +797,20 @@ struct BackupOptions {
     no_encryption: bool,
 }
 
+type CancellationToken = Arc<std::sync::atomic::AtomicBool>;
+
+fn cancellation_requested(token: &CancellationToken) -> bool {
+    token.load(Ordering::SeqCst)
+}
+
+fn cancelled() -> anyhow::Error {
+    anyhow::Error::new(web::CancellationError)
+}
+
+fn is_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<web::CancellationError>().is_some()
+}
+
 /// Upload every chunk to each destination that has not failed yet.
 ///
 /// A destination is complete only if it receives every chunk. Failed
@@ -808,6 +822,7 @@ fn upload_chunks_to_destinations<F, C>(
     mut send: F,
     mut after_chunk: C,
     stats: &mut telegram::UploadStats,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<()>
 where
     F: FnMut(&str, &std::path::Path, &mut telegram::UploadStats) -> Result<()>,
@@ -822,11 +837,17 @@ where
     let mut failures = Vec::new();
 
     for (chunk_index, path) in chunks.iter().enumerate() {
+        if cancellation.is_some_and(cancellation_requested) {
+            return Err(cancelled());
+        }
         if !active.iter().any(|is_active| *is_active) {
             break;
         }
 
         for (destination, is_active) in active.iter_mut().enumerate() {
+            if cancellation.is_some_and(cancellation_requested) {
+                return Err(cancelled());
+            }
             if !*is_active {
                 continue;
             }
@@ -897,6 +918,7 @@ fn run_database(
     client: &ClientHandle,
     source: BackupSource,
     options: &BackupOptions,
+    cancellation: CancellationToken,
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
@@ -926,6 +948,7 @@ fn run_database(
         options,
         client,
         &mut metrics,
+        &cancellation,
     );
 
     let ended = SystemTime::now();
@@ -968,9 +991,18 @@ fn run_database(
                 database_name: db_name.clone(),
                 source: source.as_str().into(),
                 recipient: options.recipient.clone(),
-                status: "failure".into(),
+                status: if is_cancelled(error) {
+                    "cancelled"
+                } else {
+                    "failure"
+                }
+                .into(),
                 error: Some(history::sanitize_error(
-                    &format!("{error:#}"),
+                    &if is_cancelled(error) {
+                        "cancelled by dashboard operator".to_string()
+                    } else {
+                        format!("{error:#}")
+                    },
                     &db.url,
                     &cfg.tg_bot_token,
                     &options.chat_ids,
@@ -994,7 +1026,7 @@ fn run_database(
     // A failure can happen anywhere — mid-dump, mid-upload — so sweep by
     // prefix: the chunk path list only exists once the pipeline finished.
     if result.is_err() {
-        if cfg.keep_failed_dumps {
+        if cfg.keep_failed_dumps && !result.as_ref().err().is_some_and(is_cancelled) {
             tracing::warn!(
                 db = db_name,
                 work_dir = %cfg.work_dir.display(),
@@ -1022,6 +1054,7 @@ fn backup_pipeline(
     options: &BackupOptions,
     client: &ClientHandle,
     metrics: &mut AttemptMetrics,
+    cancellation: &CancellationToken,
 ) -> Result<BackupResult> {
     // Report "running" status to the dashboard before starting heavy work.
     web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
@@ -1040,6 +1073,10 @@ fn backup_pipeline(
     tracing::info!(db = db_name, "starting pg_dump");
     let mut pipe = dump::spawn_pg_dump(&db.url, db.pg_dump_extra_args.as_deref())
         .with_context(|| format!("starting pg_dump for {db_name}"))?;
+    if cancellation_requested(cancellation) {
+        pipe.cancel().context("terminating cancelled pg_dump")?;
+        return Err(cancelled());
+    }
 
     // ── Build the streaming pipeline ───────────────────────────────────────
     //   encrypted:  pg_dump | zstd | age  | chunked files
@@ -1086,6 +1123,10 @@ fn backup_pipeline(
     let mut raw_bytes: u64 = 0;
     let mut reported_at: u64 = 0;
     loop {
+        if cancellation_requested(cancellation) {
+            pipe.cancel().context("terminating cancelled pg_dump")?;
+            return Err(cancelled());
+        }
         let n = pipe
             .stdout
             .read(&mut buf)
@@ -1093,6 +1134,10 @@ fn backup_pipeline(
         if n == 0 {
             break;
         } // EOF reached
+        if cancellation_requested(cancellation) {
+            pipe.cancel().context("terminating cancelled pg_dump")?;
+            return Err(cancelled());
+        }
         sink.write(&buf[..n])
             .with_context(|| format!("writing through pipeline (db={db_name})"))?;
         raw_bytes += n as u64;
@@ -1120,6 +1165,10 @@ fn backup_pipeline(
             "Flushing compression, writing chunks …"
         },
     );
+    if cancellation_requested(cancellation) {
+        pipe.cancel().context("terminating cancelled pg_dump")?;
+        return Err(cancelled());
+    }
     let (chunks, hash, total_bytes) = sink
         .finish()
         .with_context(|| format!("finalizing pipeline stages (db={db_name})"))?;
@@ -1174,10 +1223,17 @@ fn backup_pipeline(
             )
         };
         for chat_id in source.notification_chat_ids(options) {
+            if cancellation_requested(cancellation) {
+                return Err(cancelled());
+            }
             let client_guard = client.read().expect("Telegram client lock poisoned");
-            if let Err(error) =
-                telegram::send_message(&client_guard, &cfg.tg_bot_token, chat_id, &message)
-            {
+            if let Err(error) = telegram::send_message_with_cancel(
+                &client_guard,
+                &cfg.tg_bot_token,
+                chat_id,
+                &message,
+                Some(cancellation),
+            ) {
                 tracing::warn!(
                     db = db_name,
                     error = %error,
@@ -1243,6 +1299,7 @@ fn backup_pipeline(
                 path,
                 stats,
                 Some(progress),
+                Some(cancellation),
             )
         },
         |i| {
@@ -1259,6 +1316,7 @@ fn backup_pipeline(
             web::set_db_transfer(db_name, sent, total_bytes, rate(sent, &upload_started));
         },
         &mut upload_stats,
+        Some(cancellation),
     )
     .with_context(|| format!("uploading backup chunks (db={db_name})"))?;
     metrics.upload_attempts += upload_stats.attempts;
@@ -1385,10 +1443,13 @@ fn execute_database_indices(
         let options = options_by_db
             .get(&name)
             .expect("backup options must exist for configured database");
+        let cancellation = web::manual_backup_controller()
+            .cancellation_token(&name)
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_database(cfg, db, *db_index, client, source, options)
+            run_database(cfg, db, *db_index, client, source, options, cancellation)
         }));
-        if !already_claimed || source == BackupSource::Scheduled {
+        if source != BackupSource::Manual {
             web::manual_backup_controller().finish(&name);
         }
         Some((job_index, outcome))
@@ -1415,12 +1476,21 @@ fn execute_database_indices(
                     error = %e,
                     "database backup failed",
                 );
-                web::fail_db(&db_name, e.to_string()); // keeps the failed stage
-                errors.push(DatabaseFailure {
-                    index: i,
-                    db_name,
-                    error: format!("{e:#}"),
-                });
+                if is_cancelled(&e) {
+                    web::cancel_db(&db_name);
+                    tracing::info!(
+                        db_index = i,
+                        db_name = %db_name,
+                        "database backup cancelled by operator",
+                    );
+                } else {
+                    web::fail_db(&db_name, e.to_string()); // keeps the failed stage
+                    errors.push(DatabaseFailure {
+                        index: i,
+                        db_name,
+                        error: format!("{e:#}"),
+                    });
+                }
             }
             Err(payload) => {
                 // Attempt to extract a human-readable panic message.
@@ -1933,6 +2003,7 @@ mod tests {
             },
             |index| completed_chunks.push(index),
             &mut stats,
+            None,
         )
         .unwrap();
         assert_eq!(stats.attempts, 4);
@@ -1961,6 +2032,7 @@ mod tests {
             },
             |_| {},
             &mut stats,
+            None,
         )
         .unwrap();
         assert_eq!(stats.attempts, 4);
@@ -1983,12 +2055,32 @@ mod tests {
             },
             |_| {},
             &mut stats,
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("no Telegram destination"));
         assert_eq!(stats.attempts, 2);
         assert!(!chunks[0].exists());
         assert!(chunks[1].exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_upload_stops_before_the_next_chunk() {
+        let (root, chunks) = upload_test_chunks("cancelled", 2);
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut stats = telegram::UploadStats::default();
+        let error = upload_chunks_to_destinations(
+            &chunks,
+            &["primary".into()],
+            |_destination, _path, _stats| Ok(()),
+            |_| {},
+            &mut stats,
+            Some(&token),
+        )
+        .unwrap_err();
+        assert!(is_cancelled(&error));
+        assert!(chunks.iter().all(|path| path.exists()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
