@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::web;
 
-const API_BASE: &str = "https://api.telegram.org";
+pub(crate) const API_BASE: &str = "https://api.telegram.org";
 /// Max attempts per chunk (1 initial + retries).
 const MAX_ATTEMPTS: u32 = 5;
 /// Upper bound on a server-supplied `retry_after`, so a bad value can't park
@@ -363,8 +363,12 @@ pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str)
 }
 
 pub fn test_api(client: &Client, bot_token: &str) -> Result<()> {
+    test_api_at(client, bot_token, API_BASE)
+}
+
+pub fn test_api_at(client: &Client, bot_token: &str, api_base: &str) -> Result<()> {
     let _upload_guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let url = format!("{API_BASE}/bot{bot_token}/getMe");
+    let url = api_test_url(api_base, bot_token);
     let response = match client.get(&url).send().context("testing Telegram API") {
         Ok(response) => response,
         Err(error) => {
@@ -393,6 +397,10 @@ pub fn test_api(client: &Client, bot_token: &str) -> Result<()> {
         "Telegram API test failed (http={status}, tg_code={:?})",
         body.error_code
     );
+}
+
+fn api_test_url(api_base: &str, bot_token: &str) -> String {
+    format!("{}/bot{bot_token}/getMe", api_base.trim_end_matches('/'))
 }
 
 /// How long to wait before retrying attempt `attempt`.
@@ -458,6 +466,14 @@ mod tests {
         assert!(is_transient(200, Some(429)), "code in the JSON body");
         assert!(!is_transient(400, None), "bad request is permanent");
         assert!(!is_transient(401, None), "bad token is permanent");
+    }
+
+    #[test]
+    fn test_api_at_uses_injected_http_target() {
+        assert_eq!(
+            api_test_url("http://127.0.0.1:1234/", "redacted-token"),
+            "http://127.0.0.1:1234/botredacted-token/getMe"
+        );
     }
 
     #[test]

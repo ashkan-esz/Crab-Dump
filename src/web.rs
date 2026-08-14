@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 use crate::resource_usage::ResourceCollector;
-use crate::routing::{ProfileInput, ProfileStore, RouteManager};
+use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
 
@@ -1430,6 +1430,115 @@ async fn test_routing_profile(
     }
 }
 
+#[derive(Serialize)]
+struct RoutingCheckResult {
+    id: String,
+    name: String,
+    kind: ProfileKind,
+    transport: Option<String>,
+    tls: Option<bool>,
+    ok: bool,
+    error: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct RoutingCheckResponse {
+    valid: bool,
+    checked: usize,
+    passed: usize,
+    failed: usize,
+    results: Vec<RoutingCheckResult>,
+}
+
+fn check_all_profiles(
+    store: &ProfileStore,
+    route: &RouteManager,
+    bot_token: &str,
+    api_base: &str,
+) -> RoutingCheckResponse {
+    let mut results = Vec::new();
+    for summary in store.list() {
+        let mut result = RoutingCheckResult {
+            id: summary.id.clone(),
+            name: summary.name.clone(),
+            kind: summary.kind,
+            transport: None,
+            tls: None,
+            ok: false,
+            error: None,
+        };
+
+        let Some(url) = store.get_url(&summary.id) else {
+            result.error = Some("profile could not be checked");
+            results.push(result);
+            continue;
+        };
+
+        match route.start_temporary(&url) {
+            Ok((parsed, temporary)) => {
+                result.transport = Some(parsed.transport);
+                result.tls = Some(parsed.tls);
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .proxy(match reqwest::Proxy::all(temporary.proxy()) {
+                        Ok(proxy) => proxy,
+                        Err(_) => {
+                            result.error = Some("profile could not be checked");
+                            results.push(result);
+                            continue;
+                        }
+                    })
+                    .build();
+                match client {
+                    Ok(client) => {
+                        result.ok = telegram::test_api_at(&client, bot_token, api_base).is_ok();
+                        if !result.ok {
+                            result.error = Some("Telegram API check failed");
+                        }
+                    }
+                    Err(_) => result.error = Some("profile could not be checked"),
+                }
+                drop(temporary);
+            }
+            Err(_) => result.error = Some("profile could not be checked"),
+        }
+        results.push(result);
+    }
+
+    let checked = results.len();
+    let passed = results.iter().filter(|result| result.ok).count();
+    RoutingCheckResponse {
+        valid: checked == passed,
+        checked,
+        passed,
+        failed: checked - passed,
+        results,
+    }
+}
+
+async fn check_all_routing_profiles(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+    bot_token: web::Data<String>,
+) -> impl Responder {
+    let store = store.get_ref().clone();
+    let route = route.get_ref().clone();
+    let token = bot_token.get_ref().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        check_all_profiles(&store, &route, &token, telegram::API_BASE)
+    })
+    .await;
+    match result {
+        Ok(response) => {
+            audit_action(&req, "routing_profiles_check_all", "routing", "ok");
+            HttpResponse::Ok().json(response)
+        }
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "routing checks could not be completed"})),
+    }
+}
+
 async fn apply_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
@@ -1689,6 +1798,10 @@ pub async fn start_server(
             .route(
                 "/api/routing/profiles/{id}/test",
                 web::post().to(test_routing_profile),
+            )
+            .route(
+                "/api/routing/profiles/check-all",
+                web::post().to(check_all_routing_profiles),
             )
             .route(
                 "/api/routing/profiles/{id}/apply",

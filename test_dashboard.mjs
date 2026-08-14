@@ -229,4 +229,8 @@ assert.match(routingHtml, /disableRouting/);
 assert.match(routingHtml, /api\/routing\/disable/);
 assert.match(routingHtml, /ss:\/\/|trojan:\/\//);
 assert.match(routingHtml, /Saved profiles will remain available/);
+assert.match(routingHtml, /Check all configurations/);
+assert.match(routingHtml, /api\/routing\/profiles\/check-all/);
+assert.match(routingHtml, /checkSummary/);
+assert.match(routingHtml, /CHECK FAILED/);
 console.log('Routing disable workspace contract OK');

@@ -308,6 +308,25 @@ pub struct RouteManager {
     pending_previous: Mutex<Option<ActiveCore>>,
 }
 
+pub struct TemporaryRoute {
+    core: Option<ActiveCore>,
+    proxy: String,
+}
+
+impl TemporaryRoute {
+    pub fn proxy(&self) -> &str {
+        &self.proxy
+    }
+}
+
+impl Drop for TemporaryRoute {
+    fn drop(&mut self) {
+        if let Some(core) = self.core.take() {
+            cleanup_core(core);
+        }
+    }
+}
+
 impl RouteManager {
     pub fn new(work_dir: impl Into<PathBuf>, sing_box_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -351,6 +370,59 @@ impl RouteManager {
 
     pub fn test(&self, url: &str) -> Result<ParsedProfile> {
         parse_share_url(url)
+    }
+
+    /// Start an isolated core for a connectivity check.
+    ///
+    /// This deliberately does not touch `active` or `pending_previous`, so a
+    /// check can never replace, stop, or otherwise mutate the active route.
+    pub fn start_temporary(&self, url: &str) -> Result<(ParsedProfile, TemporaryRoute)> {
+        let profile = parse_share_url(url)?;
+        let port = free_port()?;
+        let config = generate_config(&profile, port)?;
+        fs::create_dir_all(&self.work_dir).context("creating sing-box work directory")?;
+        let config_path = self
+            .work_dir
+            .join(format!("routing-check-{}-{port}.json", std::process::id()));
+        if let Err(error) = write_config(&config_path, &config) {
+            let _ = fs::remove_file(&config_path);
+            return Err(error);
+        }
+
+        let mut child = match Command::new(&self.sing_box_path)
+            .args(["run", "-c"])
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("starting temporary routing core")
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_file(&config_path);
+                return Err(error);
+            }
+        };
+        if !wait_for_listener(port) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = child.stderr.take();
+            let _ = fs::remove_file(&config_path);
+            anyhow::bail!("temporary routing core did not open its local listener");
+        }
+
+        Ok((
+            profile,
+            TemporaryRoute {
+                core: Some(ActiveCore {
+                    child,
+                    config_path,
+                    proxy: format!("socks5h://127.0.0.1:{port}"),
+                }),
+                proxy: format!("socks5h://127.0.0.1:{port}"),
+            },
+        ))
     }
 
     pub fn apply(&self, url: &str) -> Result<String> {
@@ -459,6 +531,22 @@ impl RouteManager {
             cleanup_core(previous);
         }
     }
+}
+
+fn write_config(path: &Path, config: &serde_json::Value) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(config).context("serializing sing-box config")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .context("writing temporary sing-box config")?;
+    restrict(&file)?;
+    file.write_all(&bytes)
+        .context("writing temporary sing-box config")?;
+    file.sync_all()
+        .context("flushing temporary sing-box config")?;
+    Ok(())
 }
 
 impl Drop for RouteManager {
