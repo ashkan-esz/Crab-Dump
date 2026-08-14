@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -356,14 +356,25 @@ impl RouteManager {
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("starting managed routing core")?;
         if !wait_for_listener(port) {
             let _ = child.kill();
             let _ = child.wait();
+            let diagnostic = child
+                .stderr
+                .take()
+                .and_then(|mut stderr| {
+                    let mut output = String::new();
+                    stderr.read_to_string(&mut output).ok()?;
+                    Some(output)
+                })
+                .map(|output| sanitize_core_diagnostic(&output))
+                .filter(|output| !output.is_empty())
+                .unwrap_or_else(|| "no diagnostic was emitted".to_string());
             let _ = fs::remove_file(&config_path);
-            anyhow::bail!("managed routing core did not open its local listener");
+            anyhow::bail!("managed routing core did not open its local listener: {diagnostic}");
         }
 
         let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -430,6 +441,23 @@ impl RouteManager {
 impl Drop for RouteManager {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+fn sanitize_core_diagnostic(output: &str) -> String {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let lower = line.to_ascii_lowercase();
+    if ["password", "uuid", "server", "url", "token", "secret"]
+        .iter()
+        .any(|term| lower.contains(term))
+    {
+        "invalid managed routing configuration".to_string()
+    } else {
+        line.to_string()
     }
 }
 
@@ -660,28 +688,42 @@ fn generate_config(profile: &ParsedProfile, port: u16) -> Result<serde_json::Val
             "server_port": profile.port,
             "password": profile.password,
         }),
-        _ => serde_json::json!({
+        ProfileKind::Vmess => serde_json::json!({
             "type": outbound_type,
             "tag": "proxy",
             "server": profile.address,
             "server_port": profile.port,
             "uuid": profile.uuid,
-            "security": profile.security,
-            "transport": {
-                "type": profile.transport,
-                "path": profile.path,
-                "headers": profile.host.as_ref().map(|host| serde_json::json!({"Host": host}))
-            }
+            "security": profile.security
+        }),
+        ProfileKind::Vless => serde_json::json!({
+            "type": outbound_type,
+            "tag": "proxy",
+            "server": profile.address,
+            "server_port": profile.port,
+            "uuid": profile.uuid
         }),
     };
+    if matches!(profile.kind, ProfileKind::Vmess | ProfileKind::Vless) && profile.transport != "tcp"
+    {
+        let mut transport = serde_json::json!({"type": profile.transport});
+        if let Some(path) = profile.path.as_ref() {
+            transport["path"] = serde_json::json!(path);
+        }
+        if let Some(host) = profile.host.as_ref() {
+            transport["headers"] = serde_json::json!({"Host": host});
+        }
+        outbound["transport"] = transport;
+    }
     if profile.kind == ProfileKind::Vmess {
         outbound["alter_id"] = serde_json::json!(profile.alter_id);
     }
     if profile.tls {
-        outbound["tls"] = serde_json::json!({
-            "enabled": true,
-            "server_name": profile.sni
-        });
+        let mut tls = serde_json::json!({"enabled": true});
+        if let Some(sni) = profile.sni.as_ref() {
+            tls["server_name"] = serde_json::json!(sni);
+        }
+        outbound["tls"] = tls;
     }
     Ok(serde_json::json!({
         "log": {"disabled": true},
@@ -877,13 +919,84 @@ mod tests {
         assert_eq!(shadowsocks_outbound["method"], "aes-256-gcm");
         assert_eq!(shadowsocks_outbound["password"], "secret");
         assert!(shadowsocks_outbound.get("uuid").is_none());
+        assert!(shadowsocks_outbound.get("transport").is_none());
 
         let trojan = parse_share_url("trojan://secret@example.com:443").unwrap();
         let trojan_config = generate_config(&trojan, 12345).unwrap();
         let trojan_outbound = &trojan_config["outbounds"][0];
         assert_eq!(trojan_outbound["type"], "trojan");
         assert_eq!(trojan_outbound["password"], "secret");
+        assert!(trojan_outbound.get("transport").is_none());
         assert_eq!(trojan_outbound["tls"]["enabled"], true);
+    }
+
+    #[test]
+    fn generates_minimal_config_for_all_supported_profiles_and_transports() {
+        let profile = |kind: ProfileKind, transport: &str| ParsedProfile {
+            kind,
+            name: "test".into(),
+            address: "proxy.example".into(),
+            port: 443,
+            uuid: "11111111-1111-1111-1111-111111111111".into(),
+            password: matches!(kind, ProfileKind::Shadowsocks | ProfileKind::Trojan)
+                .then(|| "secret".into()),
+            method: (kind == ProfileKind::Shadowsocks).then(|| "aes-256-gcm".into()),
+            alter_id: 0,
+            security: if matches!(kind, ProfileKind::Vmess | ProfileKind::Vless) {
+                "tls".into()
+            } else {
+                String::new()
+            },
+            transport: transport.into(),
+            host: None,
+            path: None,
+            tls: matches!(
+                kind,
+                ProfileKind::Vmess | ProfileKind::Vless | ProfileKind::Trojan
+            ),
+            sni: None,
+        };
+
+        for kind in [ProfileKind::Vmess, ProfileKind::Vless] {
+            for transport in ["tcp", "ws", "grpc", "http"] {
+                let config = generate_config(&profile(kind, transport), 12345).unwrap();
+                assert_eq!(config.as_object().unwrap().len(), 3);
+                assert!(config.get("dns").is_none());
+                assert!(config.get("route").is_none());
+                assert_eq!(config["inbounds"].as_array().unwrap().len(), 1);
+                assert_eq!(config["outbounds"].as_array().unwrap().len(), 2);
+                if transport == "tcp" {
+                    assert!(config["outbounds"][0].get("transport").is_none());
+                } else {
+                    assert_eq!(config["outbounds"][0]["transport"]["type"], transport);
+                }
+            }
+        }
+
+        for kind in [ProfileKind::Shadowsocks, ProfileKind::Trojan] {
+            let config = generate_config(&profile(kind, "tcp"), 12345).unwrap();
+            assert_eq!(config.as_object().unwrap().len(), 3);
+            assert_eq!(
+                config["outbounds"][0]["type"],
+                match kind {
+                    ProfileKind::Shadowsocks => "shadowsocks",
+                    ProfileKind::Trojan => "trojan",
+                    _ => unreachable!(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizes_routing_core_diagnostics() {
+        assert_eq!(
+            sanitize_core_diagnostic("password=secret"),
+            "invalid managed routing configuration"
+        );
+        assert_eq!(
+            sanitize_core_diagnostic("unknown field transport"),
+            "unknown field transport"
+        );
     }
 
     #[test]

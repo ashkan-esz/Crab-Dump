@@ -1,18 +1,31 @@
 # syntax=docker/dockerfile:1
 
-FROM alpine:3.21 AS singbox
-
 ARG SING_BOX_VERSION=1.11.15
+
+FROM golang:1.23-alpine AS singbox-builder
+
+ARG SING_BOX_VERSION
+ARG TARGETOS=linux
 ARG TARGETARCH
-RUN apk add --no-cache curl tar \
+ARG GOPROXY=https://proxy.golang.org,direct
+
+RUN apk add --no-cache ca-certificates curl git tar
+ENV GOPROXY="$GOPROXY"
+
+WORKDIR /src
+
+RUN curl -fsSL "https://github.com/SagerNet/sing-box/archive/refs/tags/v${SING_BOX_VERSION}.tar.gz" \
+       | tar -xz --strip-components=1 \
+    && mkdir -p /out \
     && case "$TARGETARCH" in \
-         amd64) arch=amd64 ;; \
-         arm64) arch=arm64 ;; \
+         amd64|arm64) ;; \
          *) echo "unsupported sing-box architecture: $TARGETARCH" >&2; exit 1 ;; \
        esac \
-    && mkdir -p /out \
-    && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${arch}.tar.gz" \
-       | tar -xz --strip-components=1 -C /out \
+    && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+       go build -trimpath \
+         -ldflags "-X github.com/sagernet/sing-box/constant.Version=${SING_BOX_VERSION} -s -w -buildid=" \
+         -tags "with_grpc,with_utls" \
+         -o /out/sing-box ./cmd/sing-box \
     && test -x /out/sing-box
 
 FROM rust:1-alpine AS builder
@@ -42,12 +55,11 @@ WORKDIR /app
 RUN apk add --no-cache \
         ca-certificates \
         postgresql17-client \
-        tzdata \
     && mkdir -p /app/data /app/history /app/work \
     && chown -R postgres:postgres /app
 
-COPY --from=builder /build/final-target/release/crab-dump /app/crab-dump
-COPY --from=singbox /out/sing-box /usr/local/bin/sing-box
+COPY --from=builder --chown=postgres:postgres /build/final-target/release/crab-dump /app/crab-dump
+COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
 
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
