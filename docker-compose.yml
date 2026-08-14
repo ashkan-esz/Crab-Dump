@@ -18,10 +18,15 @@ services:
     volumes:
       - crab_dump_history:/app/history
       - crab_dump_data:/app/data
+      - crab_dump_temp:/app/tmp
     ports:
       - "${API_PORT:-1111}:1111"
     restart: "unless-stopped"
+    cpus: "0.2"
+    memswap_limit: 0
+    mem_limit: "50mb"
 
 volumes:
   crab_dump_history:
   crab_dump_data:
+  crab_dump_temp:

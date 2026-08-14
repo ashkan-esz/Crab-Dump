@@ -27,6 +27,7 @@ mod database_state;
 mod dump;
 mod encrypt;
 mod history;
+mod resource_usage;
 mod routing;
 mod telegram;
 mod telegram_users;
@@ -147,6 +148,7 @@ fn main() -> Result<()> {
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
     let dashboard_bot_token = shared_cfg.tg_bot_token.clone();
     let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
+    let dashboard_work_dir = shared_cfg.work_dir.clone();
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -172,6 +174,7 @@ fn main() -> Result<()> {
                 client_drop_tx,
                 dashboard_bot_token,
                 dashboard_fallback_proxy,
+                dashboard_work_dir,
             )
             .await
             {

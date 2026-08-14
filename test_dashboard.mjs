@@ -53,6 +53,13 @@ assert.match(body, /'enable', 'enabled'/);
 assert.match(html, /\.db-group-list \{ display: flex; flex-direction: column; gap: 1rem; \}/);
 assert.match(body, /page_size=\$\{state\.pageSize\}/);
 assert.match(body, /historyCacheKey\(name, state\.page, state\.pageSize\)/);
+assert.match(html, /id="resourceCard"/);
+assert.match(html, /id="resourceCpuFill"/);
+assert.match(html, /id="resourceMemoryFill"/);
+assert.match(html, /id="resourceDiskFill"/);
+assert.match(body, /api\/status\/resources/);
+assert.match(body, /container scope/);
+assert.match(html, /WORK_DIR disk/);
 
 assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
 

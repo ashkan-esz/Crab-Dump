@@ -7,6 +7,7 @@
 //! - `GET /api/status/process` — aggregated PostgreSQL dump status (max across DBs)
 //! - `GET /api/status/database/{name}` — per-database dump status
 //! - `GET /api/status/databases` — all database statuses as a JSON array
+//! - `GET /api/status/resources` — CPU, memory, and WORK_DIR disk usage
 //!
 //! The dashboard polls these endpoints every 4 seconds and updates the UI.
 
@@ -29,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
+use crate::resource_usage::ResourceCollector;
 use crate::routing::{ProfileInput, ProfileStore, RouteManager};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
@@ -741,6 +743,11 @@ async fn api_databases_list() -> impl Responder {
     // Sort by database name (alphabetical) for stable dashboard ordering.
     entries.sort_by_key(|e| e.name.to_lowercase());
     HttpResponse::Ok().json(entries)
+}
+
+/// GET /api/status/resources — returns CPU, memory, and WORK_DIR disk usage.
+async fn api_resource_status(collector: web::Data<ResourceCollector>) -> impl Responder {
+    HttpResponse::Ok().json(collector.collect())
 }
 
 fn audit_action(req: &HttpRequest, action: &str, target: &str, result: &str) {
@@ -1580,6 +1587,7 @@ async fn serve_routing() -> impl Responder {
 /// - `/api/status/process` — returns aggregated PostgreSQL dump status
 /// - `/api/status/database/{name}` — returns per-database dump status
 /// - `/api/status/databases` — returns all tracked database statuses as an array
+/// - `/api/status/resources` — returns CPU, memory, and WORK_DIR disk usage
 ///
 /// All status endpoints return JSON with `state`, `message`, and `timestamp` fields.
 #[allow(clippy::too_many_arguments)]
@@ -1598,6 +1606,7 @@ pub async fn start_server(
     client_drop_tx: Sender<Arc<Client>>,
     telegram_bot_token: String,
     fallback_proxy: Option<String>,
+    work_dir: std::path::PathBuf,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -1614,6 +1623,7 @@ pub async fn start_server(
     let client_drop_data = web::Data::new(client_drop_tx);
     let bot_token_data = web::Data::new(telegram_bot_token);
     let fallback_proxy_data = web::Data::new(fallback_proxy);
+    let resource_data = web::Data::new(ResourceCollector::new(work_dir));
 
     HttpServer::new(move || {
         App::new()
@@ -1627,6 +1637,7 @@ pub async fn start_server(
             .app_data(client_drop_data.clone())
             .app_data(bot_token_data.clone())
             .app_data(fallback_proxy_data.clone())
+            .app_data(resource_data.clone())
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
             .route("/api/status/service", web::get().to(api_service_status))
@@ -1637,6 +1648,7 @@ pub async fn start_server(
             .route("/api/status/process", web::get().to(api_process_status))
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
+            .route("/api/status/resources", web::get().to(api_resource_status))
             .route(
                 "/api/status/database/{name}/{action}",
                 web::post().to(api_database_action),
