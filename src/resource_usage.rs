@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn memory_percentage_is_bounded() {
-        let percent = (150_u64 as f64 / 100.0 * 100.0).clamp(0.0, 100.0);
+        let percent = (150_f64 / 100.0 * 100.0).clamp(0.0, 100.0);
         assert_eq!(percent, 100.0);
     }
 

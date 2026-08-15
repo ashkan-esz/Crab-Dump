@@ -22,6 +22,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
+use crate::compress::CompressionCodec;
 use crate::cron::Cron;
 use crate::history::HistoryStore;
 
@@ -84,6 +85,12 @@ pub enum Schedule {
 /// Shared settings loaded once and inherited by every database backup.
 #[derive(Clone)]
 pub struct SharedConfig {
+    /// Global compression codec used for every database backup.
+    pub compression_codec: CompressionCodec,
+    /// Codec-native compression level.
+    pub compression_level: i32,
+    /// Whether zstd frames include a checksum.
+    pub compression_checksum: bool,
     /// Telegram bot token from @BotFather.
     pub tg_bot_token: String,
     /// Target chats for uploaded chunks (numeric IDs or `@channelusername`).
@@ -141,6 +148,9 @@ impl fmt::Debug for SharedConfig {
         formatter
             .debug_struct("SharedConfig")
             .field("tg_bot_token", &"[REDACTED]")
+            .field("compression_codec", &self.compression_codec)
+            .field("compression_level", &self.compression_level)
+            .field("compression_checksum", &self.compression_checksum)
             .field("tg_chat_ids", &"[REDACTED]")
             .field(
                 "age_recipient",
@@ -381,6 +391,9 @@ fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
 /// file is merged with environment variables (which fill gaps).
 #[derive(Debug, Clone, Deserialize, Default)]
 struct RawConfigFile {
+    compression_codec: Option<String>,
+    compression_level: Option<RawCompressionLevel>,
+    compression_checksum: Option<bool>,
     pg_dump_extra_args: Option<String>,
     tg_bot_token: Option<String>,
     tg_chat_ids: Option<Vec<String>>,
@@ -408,6 +421,13 @@ struct RawConfigFile {
     history_upload_schedule: Option<String>,
     // Populated only when [[databases]] exists in the TOML file.
     databases: Option<Vec<TomlDatabase>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawCompressionLevel {
+    Integer(i64),
+    Text(String),
 }
 
 /// A single `[[databases]]` entry from the TOML file.
@@ -490,6 +510,27 @@ fn validate_optional_dashboard_credentials(
 }
 
 fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
+    let compression_codec =
+        CompressionCodec::parse(raw.compression_codec.as_deref().ok_or_else(|| {
+            anyhow!("COMPRESSION_CODEC is required (set to zstd, gzip, or brotli)")
+        })?)?;
+    let compression_level = match raw.compression_level.as_ref() {
+        None => compression_codec.default_level(),
+        Some(RawCompressionLevel::Integer(level)) => i32::try_from(*level)
+            .with_context(|| format!("COMPRESSION_LEVEL is outside the i32 range: {level}"))?,
+        Some(RawCompressionLevel::Text(level)) => level
+            .parse::<i32>()
+            .with_context(|| format!("COMPRESSION_LEVEL must be an integer, got `{level}`"))?,
+    };
+    compression_codec.validate_level(compression_level)?;
+    let compression_checksum = raw.compression_checksum.unwrap_or(true);
+    if compression_codec != CompressionCodec::Zstd && raw.compression_checksum.is_some() {
+        bail!(
+            "COMPRESSION_CHECKSUM is only supported with zstd, not {}",
+            compression_codec.as_str()
+        );
+    }
+
     let tg_bot_token = raw
         .tg_bot_token
         .clone()
@@ -587,6 +628,9 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
     };
 
     Ok(SharedConfig {
+        compression_codec,
+        compression_level,
+        compression_checksum,
         tg_bot_token,
         tg_chat_ids,
         age_recipient,
@@ -686,6 +730,13 @@ fn parse_duration(s: &str) -> Result<Duration> {
 /// file-bound).
 fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) -> RawConfigFile {
     RawConfigFile {
+        compression_codec: env("COMPRESSION_CODEC").or(raw.compression_codec),
+        compression_level: env("COMPRESSION_LEVEL")
+            .map(RawCompressionLevel::Text)
+            .or(raw.compression_level),
+        compression_checksum: env("COMPRESSION_CHECKSUM")
+            .map(|v| parse_bool(&v))
+            .or(raw.compression_checksum),
         pg_dump_extra_args: env("PG_DUMP_EXTRA_ARGS").or(raw.pg_dump_extra_args),
         tg_bot_token: env("TG_BOT_TOKEN").or(raw.tg_bot_token),
         tg_chat_ids: raw.tg_chat_ids,
@@ -1011,6 +1062,9 @@ mod tests {
     #[test]
     fn chunk_size_bytes_computes_correctly() {
         let cfg = SharedConfig {
+            compression_codec: CompressionCodec::Zstd,
+            compression_level: 3,
+            compression_checksum: true,
             tg_bot_token: "t".into(),
             tg_chat_ids: vec!["c".into()],
             age_recipient: None,
@@ -1072,6 +1126,7 @@ mod tests {
             None
         );
         let empty = RawConfigFile {
+            compression_codec: Some("zstd".into()),
             tg_bot_token: Some("t".into()),
             tg_chat_ids: Some(Vec::new()),
             ..Default::default()
@@ -1086,6 +1141,7 @@ mod tests {
 
     fn shared_raw() -> RawConfigFile {
         RawConfigFile {
+            compression_codec: Some("zstd".into()),
             tg_bot_token: Some("t".into()),
             tg_chat_ids: Some(vec!["c".into()]),
             ..Default::default()
@@ -1105,6 +1161,105 @@ mod tests {
             ..shared_raw()
         };
         assert_eq!(build_shared_config(&raw).unwrap().max_parallel_databases, 2);
+    }
+
+    #[test]
+    fn compression_codec_is_required_and_parses_from_merged_values() {
+        let missing = build_shared_config(&RawConfigFile {
+            tg_bot_token: Some("t".into()),
+            tg_chat_ids: Some(vec!["c".into()]),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(missing.to_string().contains("COMPRESSION_CODEC"));
+
+        let raw = RawConfigFile {
+            compression_codec: Some("brotli".into()),
+            compression_level: Some(RawCompressionLevel::Integer(7)),
+            ..shared_raw()
+        };
+        let cfg = build_shared_config(&raw).unwrap();
+        assert_eq!(cfg.compression_codec, CompressionCodec::Brotli);
+        assert_eq!(cfg.compression_level, 7);
+
+        let parsed: RawConfigFile = toml::from_str(
+            r#"
+            compression_codec = "gzip"
+            compression_level = 8
+            compression_checksum = false
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.compression_level,
+            Some(RawCompressionLevel::Integer(8))
+        ));
+        assert!(
+            build_shared_config(&parsed).is_err(),
+            "checksum must be rejected for gzip"
+        );
+    }
+
+    #[test]
+    fn compression_level_and_checksum_are_codec_specific() {
+        for (codec, level) in [("zstd", 22), ("gzip", 9), ("brotli", 11)] {
+            let cfg = build_shared_config(&RawConfigFile {
+                compression_codec: Some(codec.into()),
+                compression_level: Some(RawCompressionLevel::Integer(level)),
+                ..shared_raw()
+            })
+            .unwrap();
+            assert_eq!(cfg.compression_level, level as i32);
+        }
+
+        for (codec, level) in [("zstd", 23), ("gzip", 10), ("brotli", 12)] {
+            let error = build_shared_config(&RawConfigFile {
+                compression_codec: Some(codec.into()),
+                compression_level: Some(RawCompressionLevel::Integer(level)),
+                ..shared_raw()
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("COMPRESSION_LEVEL"), "{error}");
+        }
+
+        let error = build_shared_config(&RawConfigFile {
+            compression_codec: Some("gzip".into()),
+            compression_checksum: Some(true),
+            ..shared_raw()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only supported with zstd"), "{error}");
+
+        let error = build_shared_config(&RawConfigFile {
+            compression_level: Some(RawCompressionLevel::Text("not-a-level".into())),
+            ..shared_raw()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("must be an integer"), "{error}");
+    }
+
+    #[test]
+    fn compression_settings_accept_environment_over_toml_values() {
+        let merged = merge_raw_with_env(
+            RawConfigFile {
+                compression_codec: Some("zstd".into()),
+                compression_level: Some(RawCompressionLevel::Integer(3)),
+                ..shared_raw()
+            },
+            |key| match key {
+                "COMPRESSION_CODEC" => Some("zstd".into()),
+                "COMPRESSION_LEVEL" => Some("8".into()),
+                "COMPRESSION_CHECKSUM" => Some("0".into()),
+                _ => None,
+            },
+        );
+        let cfg = build_shared_config(&merged).unwrap();
+        assert_eq!(cfg.compression_codec, CompressionCodec::Zstd);
+        assert_eq!(cfg.compression_level, 8);
+        assert!(!cfg.compression_checksum);
     }
 
     /// Zero would stall the run instead of limiting it — reject at startup.
@@ -1513,6 +1668,7 @@ mod tests {
         let raw = RawConfigFile {
             tg_bot_token: Some("t".into()),
             tg_chat_ids: Some(vec!["c".into()]),
+            compression_codec: Some("zstd".into()),
             // Byte index 12 lands inside a multi-byte char — the old byte-slice
             // excerpt panicked here instead of reporting the bad value.
             age_recipient: Some("a密码密码密码".into()),

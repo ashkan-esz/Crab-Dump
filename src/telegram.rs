@@ -112,6 +112,7 @@ pub fn format_backup_summary(
     total_bytes: u64,
     parts: usize,
     encrypted: bool,
+    compression: &str,
 ) -> String {
     format_backup_summary_with_label(
         "📦 <b>Manual backup ready</b>",
@@ -120,6 +121,7 @@ pub fn format_backup_summary(
         total_bytes,
         parts,
         encrypted,
+        compression,
     )
 }
 
@@ -129,6 +131,7 @@ pub fn format_scheduled_backup_summary(
     total_bytes: u64,
     parts: usize,
     encrypted: bool,
+    compression: &str,
 ) -> String {
     format_backup_summary_with_label(
         "📦 <b>Scheduled backup ready</b>",
@@ -137,6 +140,7 @@ pub fn format_scheduled_backup_summary(
         total_bytes,
         parts,
         encrypted,
+        compression,
     )
 }
 
@@ -147,6 +151,7 @@ fn format_backup_summary_with_label(
     total_bytes: u64,
     parts: usize,
     encrypted: bool,
+    compression: &str,
 ) -> String {
     let part_label = if parts == 1 { "part" } else { "parts" };
     let encryption = if encrypted { "age enabled" } else { "disabled" };
@@ -157,10 +162,11 @@ fn format_backup_summary_with_label(
          📄 <b>File:</b> <code>{}</code>\n\
          📏 <b>Packaged size:</b> <code>{size_mb:.2} MB</code>\n\
          🧩 <b>Parts:</b> <code>{parts} {part_label}</code>\n\
-         🗜️ <b>Compression:</b> <code>zstd</code>\n\
+         🗜️ <b>Compression:</b> <code>{}</code>\n\
          🔐 <b>Encryption:</b> <code>{encryption}</code>",
         escape_html(database),
         escape_html(filename),
+        escape_html(compression),
     )
 }
 
@@ -620,6 +626,7 @@ mod tests {
             100_000_000,
             3,
             true,
+            "zstd",
         );
         assert!(message.contains("analytics"));
         assert!(message.contains("analytics_20260812T031500Z.sql.zst.age"));
@@ -631,8 +638,14 @@ mod tests {
 
     #[test]
     fn backup_summary_formats_unencrypted_singlepart_notice() {
-        let message =
-            format_backup_summary("orders", "orders_20260812T031500Z.sql.zst", 42, 1, false);
+        let message = format_backup_summary(
+            "orders",
+            "orders_20260812T031500Z.sql.zst",
+            42,
+            1,
+            false,
+            "zstd",
+        );
         assert!(message.contains("orders"));
         assert!(message.contains("0.00 MB"));
         assert!(message.contains("1 part"));
@@ -658,6 +671,7 @@ mod tests {
             100_000_000,
             3,
             true,
+            "zstd",
         );
         assert!(summary.contains("Scheduled backup ready"));
         assert!(summary.contains("analytics"));

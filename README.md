@@ -3,8 +3,8 @@
 Stream a **compressed**, optionally **encrypted** PostgreSQL dump to **Telegram**, in chunks.
 
 ```
-encrypted:  pg_dump  →  zstd  →  age (X25519)  →  ≤49 MiB parts  →  Telegram
-plain:      pg_dump  →  zstd                          →  ≤49 MiB parts  →  Telegram
+encrypted:  pg_dump  →  compression  →  age (X25519)  →  ≤49 MiB parts  →  Telegram
+plain:      pg_dump  →  compression                       →  ≤49 MiB parts  →  Telegram
 
 Single self-contained binary. No external services to run. Designed to be
 scheduled from cron or a systemd timer.
@@ -14,7 +14,7 @@ scheduled from cron or a systemd timer.
 | Stage   | Choice         | Reason                                                            |
 |---------|----------------|-------------------------------------------------------------------|
 | Dump    | `pg_dump -Fc`  | Custom format → fast, supports selective `pg_restore`.            |
-| Compress| `zstd`         | ~2× better ratio than gzip at higher speed; built-in checksum.    |
+| Compress| `zstd`, `gzip`, `brotli` | Select one globally with `COMPRESSION_CODEC`; streaming and constant-memory. |
 | Encrypt | `age` (X25519) | Optional — modern, audited, hybrid encryption to a public key. No password to leak. Set `AGE_RECIPIENT` to enable; otherwise the dump is compressed but not encrypted. |
 | Upload  | `reqwest`      | Direct Bot API calls; no bot-framework overhead for a one-shot job.|
 
@@ -175,6 +175,9 @@ directory yourself).
 | `DASHBOARD_OPERATOR_USERNAME/PASSWORD` | no | | optional backup/database-control account |
 | `DASHBOARD_VIEWER_USERNAME/PASSWORD` | no | | optional read-only status account |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
+| `COMPRESSION_CODEC`  | yes      |                | `zstd`, `gzip`, or `brotli`; also `compression_codec` in `config.toml` |
+| `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `-131072..22`, gzip `0..9`, brotli `0..11` |
+| `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; reject for gzip/brotli |
 | `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
 | `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
@@ -487,7 +490,9 @@ On a machine with the `identity.txt` (private key) and the downloaded parts.
 ```bash
 BASE=db0-app-2026-08-12_20:55:32
 
-# Encrypted, single-chunk dump (manifest says chunks=1):
+# Encrypted, single-chunk dump (manifest says chunks=1). Use the suffix and
+# decoder matching COMPRESSION_CODEC (`.zst`/`zstd -d`, `.gz`/`gzip -d`, or
+# `.br`/`brotli -d`):
 cat "$BASE" \
   | rage -d -i identity.txt \
   | zstd -d \
@@ -547,7 +552,8 @@ cat "$BASE".part* | zstd -d | psql "$RESTORE_DATABASE_URL"
 
 ## Behavior notes
 
-- **Single pass, constant memory.** `pg_dump` stdout is streamed through zstd
+- **Single pass, constant memory.** `pg_dump` stdout is streamed through the
+  selected compressor
   → age → the rolling chunk writer; the uncompressed dump is never written to
   disk.
 - **Retries.** Upload failures are retried up to 5× with exponential backoff

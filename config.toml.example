@@ -5,7 +5,8 @@
 # (tokens, secrets) prefer env vars; for everything else a file is convenient.
 #
 # Required fields: at least one [[databases]] entry, tg_bot_token, and indexed
-# TG_CHAT_ID_N environment variables (chat IDs are environment-only).
+# TG_CHAT_ID_N environment variables (chat IDs are environment-only), and
+# compression_codec.
 # ---------------------------------------------------------------------------
 
 # At least one database entry is required.
@@ -15,6 +16,13 @@
 
 # Telegram bot token from @BotFather.
 tg_bot_token = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+# Compression is required: "zstd", "gzip", or "brotli".
+compression_codec = "zstd"
+# Optional codec-native level: zstd default 3, gzip default 6, brotli default 5.
+# compression_level = 3
+# zstd only; defaults to true. Do not set for gzip or brotli.
+# compression_checksum = true
 
 # Telegram destinations are environment-only: set TG_CHAT_ID_0, TG_CHAT_ID_1, …
 

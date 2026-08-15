@@ -1,7 +1,7 @@
 //! crab-dump: stream compressed, optionally encrypted Postgres dumps to Telegram.
 //!
 //! Multi-database aware: spawns independent pipelines per configured server,
-//! each running `pg_dump → zstd → age? → chunk → upload`, at most
+//! each running `pg_dump → compression → age? → chunk → upload`, at most
 //! `MAX_PARALLEL_DATABASES` of them at a time. A database that fails is
 //! reported and skipped — never fatal to its peers.
 //!
@@ -946,15 +946,14 @@ fn run_database(
         ..Default::default()
     };
 
-    // Wire-contract filename: `{db}_{utc_ts}.sql.zst[.age]`. Duplicate
+    // Wire-contract filename: `{db}_{utc_ts}.sql.{codec}[.age]`. Duplicate
     // display names are rejected at config time, so the timestamped prefix
     // remains unique for a database's run.
     let stamp = dump_timestamp(started)?;
-    let extension = if !options.no_encryption && cfg.age_recipient.is_some() {
-        ".sql.zst.age"
-    } else {
-        ".sql.zst"
-    };
+    let extension = backup_extension(
+        cfg.compression_codec,
+        !options.no_encryption && cfg.age_recipient.is_some(),
+    );
     let base_name = format!("{db_name}_{stamp}{extension}");
 
     let result = backup_pipeline(
@@ -1098,8 +1097,8 @@ fn backup_pipeline(
     }
 
     // ── Build the streaming pipeline ───────────────────────────────────────
-    //   encrypted:  pg_dump | zstd | age  | chunked files
-    //   plain:      pg_dump | zstd        | chunked files
+    //   encrypted:  pg_dump | compression | age  | chunked files
+    //   plain:      pg_dump | compression        | chunked files
     let mut sink = match age_recipient {
         Some(recipient) => {
             tracing::info!(db = db_name, "encryption enabled (age X25519)");
@@ -1109,8 +1108,14 @@ fn backup_pipeline(
                 ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
             )
             .context("wrapping chunker in age StreamWriter")?;
-            let zstd = compress::encoder(age_writer).context("building zstd encoder")?;
-            Sink::Encrypted(zstd)
+            let compressor = compress::encoder(
+                age_writer,
+                cfg.compression_codec,
+                cfg.compression_level,
+                cfg.compression_checksum,
+            )
+            .context("building compression encoder")?;
+            Sink::Encrypted(compressor)
         }
         None => {
             if options.no_encryption {
@@ -1125,8 +1130,14 @@ fn backup_pipeline(
                 );
             }
             let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
-            let zstd = compress::encoder(chunker).context("building zstd encoder")?;
-            Sink::Plain(zstd)
+            let compressor = compress::encoder(
+                chunker,
+                cfg.compression_codec,
+                cfg.compression_level,
+                cfg.compression_checksum,
+            )
+            .context("building compression encoder")?;
+            Sink::Plain(compressor)
         }
     };
 
@@ -1171,7 +1182,7 @@ fn backup_pipeline(
 
     // ── Finalize pipeline stages ───────────────────────────────────────────
     // Unwind the writer stack in reverse order:
-    //   1. zstd::Encoder::finish(self) → io::Result<InnerWriter>
+    //   1. compressor finish → InnerWriter
     //   2. age::StreamWriter::finish() → Result<ChunkWriter> (if encrypted)
     //   3. ChunkWriter::finish() → Result<(paths, hash, total)>
     web::set_db_status(
@@ -1231,6 +1242,7 @@ fn backup_pipeline(
                 total_bytes,
                 chunks_count,
                 encrypted,
+                cfg.compression_codec.as_str(),
             )
         } else {
             telegram::format_backup_summary(
@@ -1239,6 +1251,7 @@ fn backup_pipeline(
                 total_bytes,
                 chunks_count,
                 encrypted,
+                cfg.compression_codec.as_str(),
             )
         };
         for chat_id in source.notification_chat_ids(options) {
@@ -1670,13 +1683,13 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
 // Streaming pipeline finalization (kept intact from original implementation)
 // =============================================================================
 
-/// Finalization sink: owns the zstd encoder and its inner writer(s).
+/// Finalization sink: owns the selected compressor and its inner writer(s).
 ///
 /// Implementing `Write` delegates to the zstd encoder for the main loop.
 /// Unwinding through `finish()` peels off each layer in reverse order.
 enum Sink {
-    Encrypted(zstd::Encoder<'static, age::stream::StreamWriter<ChunkWriter>>),
-    Plain(zstd::Encoder<'static, ChunkWriter>),
+    Encrypted(compress::Encoder<'static, age::stream::StreamWriter<ChunkWriter>>),
+    Plain(compress::Encoder<'static, ChunkWriter>),
 }
 
 impl Write for Sink {
@@ -1696,30 +1709,26 @@ impl Write for Sink {
 }
 
 impl Sink {
-    /// Finalize the zstd encoder (flushing into age→chunker), then unwrap
+    /// Finalize the compressor (flushing into age→chunker), then unwrap
     /// the inner layers back to the ChunkWriter, finalize it, and return
     /// the chunk list, sha256, and total bytes.
     ///
     /// Pipeline unwinding order:
-    ///   1. `zstd::Encoder::finish(self)` → `io::Result<InnerWriter>`
+    ///   1. compressor `finish(self)` → `io::Result<InnerWriter>`
     ///   2. `age::StreamWriter::finish()` → `Result<ChunkWriter>`
     ///   3. `ChunkWriter::finish()` → `Result<(paths, hash, total)>`
     fn finish(self) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
         match self {
             Sink::Plain(encoder) => {
                 // Finish zstd, get back the owned ChunkWriter, finalize it.
-                let chunker = encoder
-                    .finish()
-                    .map_err(|e| anyhow::anyhow!("zstd finish: {e}"))?;
+                let chunker = encoder.finish().context("compression finish")?;
                 chunker
                     .finish()
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
             Sink::Encrypted(encoder) => {
                 // Finish zstd → get age StreamWriter, finish that → get ChunkWriter.
-                let age_writer = encoder
-                    .finish()
-                    .map_err(|e| anyhow::anyhow!("zstd finish: {e}"))?;
+                let age_writer = encoder.finish().context("compression finish")?;
                 let chunker = age_writer
                     .finish()
                     .map_err(|e| anyhow::anyhow!("age writer finish: {e}"))?;
@@ -1733,6 +1742,14 @@ impl Sink {
 
 /// Convert a Unix epoch timestamp to a readable, filename-safe UTC timestamp
 /// (`YYYY-MM-DD_HH:mm:ss`) for dump and history filenames.
+fn backup_extension(codec: compress::CompressionCodec, encrypted: bool) -> String {
+    if encrypted {
+        format!(".sql{}.age", codec.suffix())
+    } else {
+        format!(".sql{}", codec.suffix())
+    }
+}
+
 fn dump_timestamp(t: SystemTime) -> Result<String> {
     let (year, month, day, hour, minute, second) = utc_timestamp_parts(t)?;
     Ok(format!(
@@ -1965,6 +1982,18 @@ mod tests {
         assert_eq!(format_secs(45), "45s");
         assert_eq!(format_secs(3_600), "1h");
         assert_eq!(format_secs(90_061), "1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn backup_extensions_follow_codec_and_encryption_order() {
+        for (codec, suffix) in [
+            (compress::CompressionCodec::Zstd, ".sql.zst"),
+            (compress::CompressionCodec::Gzip, ".sql.gz"),
+            (compress::CompressionCodec::Brotli, ".sql.br"),
+        ] {
+            assert_eq!(backup_extension(codec, false), suffix);
+            assert_eq!(backup_extension(codec, true), format!("{suffix}.age"));
+        }
     }
 
     #[test]
