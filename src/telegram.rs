@@ -622,14 +622,14 @@ mod tests {
     fn backup_summary_formats_encrypted_multipart_notice() {
         let message = format_backup_summary(
             "analytics",
-            "analytics_20260812T031500Z.sql.zst.age",
+            "analytics_20260812T031500Z.dump.zst.age",
             100_000_000,
             3,
             true,
             "zstd",
         );
         assert!(message.contains("analytics"));
-        assert!(message.contains("analytics_20260812T031500Z.sql.zst.age"));
+        assert!(message.contains("analytics_20260812T031500Z.dump.zst.age"));
         assert!(message.contains("95.37 MB"));
         assert!(message.contains("3 parts"));
         assert!(message.contains("zstd"));
@@ -640,7 +640,7 @@ mod tests {
     fn backup_summary_formats_unencrypted_singlepart_notice() {
         let message = format_backup_summary(
             "orders",
-            "orders_20260812T031500Z.sql.zst",
+            "orders_20260812T031500Z.dump.zst",
             42,
             1,
             false,
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn backup_completion_mentions_all_uploaded_parts() {
         let message =
-            format_backup_completion("analytics", "analytics_20260812T031500Z.sql.zst.age", 3);
+            format_backup_completion("analytics", "analytics_20260812T031500Z.dump.zst.age", 3);
         assert!(message.contains("analytics"));
         assert!(message.contains("All <code>3</code> parts"));
         assert!(message.contains("uploaded"));
@@ -667,7 +667,7 @@ mod tests {
     fn scheduled_messages_are_distinguishable_and_include_multipart_details() {
         let summary = format_scheduled_backup_summary(
             "analytics",
-            "analytics_20260812T031500Z.sql.zst.age",
+            "analytics_20260812T031500Z.dump.zst.age",
             100_000_000,
             3,
             true,
@@ -682,7 +682,7 @@ mod tests {
 
         let completion = format_scheduled_backup_completion(
             "analytics",
-            "analytics_20260812T031500Z.sql.zst.age",
+            "analytics_20260812T031500Z.dump.zst.age",
             3,
         );
         assert!(completion.contains("Scheduled backup uploaded"));

@@ -110,8 +110,8 @@ Manual runs upload only to the selected enabled dashboard user. Encryption is
 enabled by default when `AGE_RECIPIENT` is configured, while
 `no_encryption: true` bypasses age for that request. If no recipient is
 configured, the existing compressed-only behavior remains. Wire names follow
-the restore contract: `{db}_{utc_ts}.sql.zst` or
-`{db}_{utc_ts}.sql.zst.age`, with `.partNNNN` appended for multi-part streams.
+the restore contract: `{db}_{utc_ts}.dump.zst` or
+`{db}_{utc_ts}.dump.zst.age`, with `.partNNNN` appended for multi-part streams.
 
 ### History source
 

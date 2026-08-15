@@ -973,7 +973,7 @@ fn run_database(
         ..Default::default()
     };
 
-    // Wire-contract filename: `{db}_{utc_ts}.sql.{codec}[.age]`, or `.dump`
+    // Wire-contract filename: `{db}_{utc_ts}.dump.{codec}[.age]`, or `.dump`
     // when compression is disabled. Duplicate
     // display names are rejected at config time, so the timestamped prefix
     // remains unique for a database's run.
@@ -1823,7 +1823,7 @@ impl Sink {
 /// (`YYYY-MM-DD_HH:mm:ss`) for dump and history filenames.
 fn backup_extension(codec: Option<compress::CompressionCodec>, encrypted: bool) -> String {
     let suffix = codec.map_or(".dump".to_string(), |codec| {
-        format!(".sql{}", codec.suffix())
+        format!(".dump{}", codec.suffix())
     });
     if encrypted {
         format!("{suffix}.age")
@@ -2099,9 +2099,9 @@ mod tests {
     #[test]
     fn backup_extensions_follow_codec_and_encryption_order() {
         for (codec, suffix) in [
-            (compress::CompressionCodec::Zstd, ".sql.zst"),
-            (compress::CompressionCodec::Gzip, ".sql.gz"),
-            (compress::CompressionCodec::Brotli, ".sql.br"),
+            (compress::CompressionCodec::Zstd, ".dump.zst"),
+            (compress::CompressionCodec::Gzip, ".dump.gz"),
+            (compress::CompressionCodec::Brotli, ".dump.br"),
         ] {
             assert_eq!(backup_extension(Some(codec), false), suffix);
             assert_eq!(backup_extension(Some(codec), true), format!("{suffix}.age"));

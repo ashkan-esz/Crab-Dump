@@ -49,7 +49,7 @@ If a task appears to require breaking one, stop and say so instead.
    chat IDs are redacted in logs, `Debug`/`Display` impls, `anyhow` context
    strings, and `--dry-run` output.
 3. **Chunk naming is a wire contract.** A packaged stream at or below the
-   limit is `{db}_{utc_ts}.sql.zst[.age]`; larger streams use that prefix plus
+   limit is `{db}_{utc_ts}.dump.{codec}[.age]`; larger streams use that prefix plus
    `.partNNNN` (4-digit zero-padded). Lexicographic order == concatenation
    order; multi-part outputs must reassemble with `cat parts*`. Changing this
    is a breaking change.
@@ -99,13 +99,13 @@ tooling. This is the observable consequence of Invariants 3 and 4, and should
 be covered by an integration test rather than trusted by inspection.
 
 Encrypted, one chunk:
-cat mydb_20260812T031500Z.sql.zst.age | age -d -i key.txt | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst.age | age -d -i key.txt | zstd -d | psql
 Encrypted, multiple chunks:
-cat mydb_20260812T031500Z.sql.zst.age.part* | age -d -i key.txt | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst.age.part* | age -d -i key.txt | zstd -d | psql
 Unencrypted, one chunk:
-cat mydb_20260812T031500Z.sql.zst | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst | zstd -d | psql
 Unencrypted, multiple chunks:
-cat mydb_20260812T031500Z.sql.zst.part* | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst.part* | zstd -d | psql
 
 ## Done
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test` clean; no new deps without justification.

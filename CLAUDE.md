@@ -48,7 +48,7 @@ If a task appears to require breaking one, stop and say so instead.
 2. **Secrets never surface.** `TG_BOT_TOKEN`, `DATABASE_URL` passwords, and
    chat IDs are redacted in logs, `Debug`/`Display` impls, `anyhow` context
    strings, and `--dry-run` output.
-3. **Chunk naming is a wire contract.** `{db}_{utc_ts}.sql.zst[.age].part0001`
+3. **Chunk naming is a wire contract.** `{db}_{utc_ts}.dump.{codec}[.age].part0001`
    — 4-digit zero-padded. Lexicographic order == concatenation order; parts
    must reassemble with `cat parts*`. Changing this is a breaking change.
 4. **Pipeline order is fixed.** dump → compress → encrypt → chunk → upload.
@@ -97,9 +97,9 @@ tooling. This is the observable consequence of Invariants 3 and 4, and should
 be covered by an integration test rather than trusted by inspection.
 
 Encrypted:
-cat mydb_20260812T031500Z.sql.zst.age.part* | age -d -i key.txt | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst.age.part* | age -d -i key.txt | zstd -d | psql
 Unencrypted:
-cat mydb_20260812T031500Z.sql.zst.part* | zstd -d | psql
+cat mydb_20260812T031500Z.dump.zst.part* | zstd -d | psql
 
 ## Done
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test` clean; no new deps without justification.
