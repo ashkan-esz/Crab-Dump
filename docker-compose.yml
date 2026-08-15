@@ -4,14 +4,14 @@
 
 services:
   crab-dump:
-    build: .
-    image: crab-dump:latest
+    build:
+      context: .
+      target: ${ROUTING_TARGET:-runtime-all}
+    image: ${IMAGE_TAG:-crab-dump:latest}
     env_file: .env
     environment:
       API_PORT: "1111"
       DASHBOARD_HOST: "0.0.0.0"
-      SING_BOX_PATH: /usr/local/bin/sing-box
-      SHOES_PATH: /usr/local/bin/shoes
       HISTORY_DIR: /app/history
       WORK_DIR: /app/work
       MAX_PARALLEL_DATABASES: "1"

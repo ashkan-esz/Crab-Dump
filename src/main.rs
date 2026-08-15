@@ -106,15 +106,32 @@ fn main() -> Result<()> {
     ));
     let routing_backend = routing_profiles.selected_core();
     if let Some(active_url) = routing_profiles.active_url() {
-        if shared_cfg.socks_proxy.is_some() {
+        if route_manager.is_available(routing_backend) && shared_cfg.socks_proxy.is_some() {
             anyhow::bail!(
                 "SOCKS_PROXY cannot be combined with an active dashboard routing profile"
             );
         }
-        if !cli.dry_run {
-            route_manager
-                .apply(&active_url, routing_backend)
-                .context("starting active dashboard routing profile")?;
+        if !route_manager.is_available(routing_backend) {
+            tracing::warn!(
+                core = routing_backend.as_str(),
+                "active dashboard routing profile is persisted but its routing core is unavailable; routing starts disabled"
+            );
+        } else if !cli.dry_run {
+            if let Err(error) = route_manager.apply(&active_url, routing_backend) {
+                let executable_missing = error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+                });
+                if executable_missing {
+                    tracing::warn!(
+                        core = routing_backend.as_str(),
+                        "active dashboard routing profile could not find its routing executable; routing starts disabled"
+                    );
+                } else {
+                    return Err(error).context("starting active dashboard routing profile");
+                }
+            }
         }
     }
     let route_proxy = route_manager.active_proxy();

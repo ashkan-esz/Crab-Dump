@@ -193,7 +193,12 @@ impl ProfileStore {
     }
 
     pub fn list(&self) -> Vec<ProfileSummary> {
+        self.list_for_available(&RoutingBackend::ALL)
+    }
+
+    pub fn list_for_available(&self, available: &[RoutingBackend]) -> Vec<ProfileSummary> {
         let state = self.state.lock().expect("profile store lock poisoned");
+        let selected_available = available.contains(&state.selected_core);
         state
             .profiles
             .iter()
@@ -201,8 +206,14 @@ impl ProfileStore {
                 id: profile.id.clone(),
                 name: profile.name.clone(),
                 kind: profile.kind,
-                compatible_cores: profile.compatible_cores.clone(),
-                active: state.active_id.as_deref() == Some(profile.id.as_str()),
+                compatible_cores: profile
+                    .compatible_cores
+                    .iter()
+                    .copied()
+                    .filter(|core| available.contains(core))
+                    .collect(),
+                active: selected_available
+                    && state.active_id.as_deref() == Some(profile.id.as_str()),
             })
             .collect()
     }
@@ -384,13 +395,20 @@ impl ProfileStore {
         Ok(())
     }
 
-    pub fn routing_status(&self, running_core: Option<RoutingBackend>) -> RoutingStatus {
+    pub fn routing_status(
+        &self,
+        running_core: Option<RoutingBackend>,
+        available: &[RoutingBackend],
+    ) -> RoutingStatus {
         let state = self.state.lock().expect("profile store lock poisoned");
         RoutingStatus {
             selected_core: state.selected_core,
             running_core,
-            active_profile: state.active_id.clone(),
-            available_cores: RoutingBackend::ALL.to_vec(),
+            active_profile: available
+                .contains(&state.selected_core)
+                .then(|| state.active_id.clone())
+                .flatten(),
+            available_cores: available.to_vec(),
         }
     }
 
@@ -504,6 +522,17 @@ impl RouteManager {
             .map(|core| core.backend)
     }
 
+    pub fn available_cores(&self) -> Vec<RoutingBackend> {
+        RoutingBackend::ALL
+            .into_iter()
+            .filter(|backend| is_executable(self.executable_path(*backend)))
+            .collect()
+    }
+
+    pub fn is_available(&self, backend: RoutingBackend) -> bool {
+        is_executable(self.executable_path(backend))
+    }
+
     pub fn active_proxy(&self) -> Option<String> {
         self.active
             .lock()
@@ -548,6 +577,9 @@ impl RouteManager {
         url: &str,
         backend: RoutingBackend,
     ) -> Result<(ParsedProfile, TemporaryRoute)> {
+        if !self.is_available(backend) {
+            anyhow::bail!("routing core {} is unavailable", backend.label());
+        }
         let profile = parse_share_url(url)?;
         let port = free_port()?;
         let config = generate_backend_config(backend, &profile, port)?;
@@ -610,6 +642,9 @@ impl RouteManager {
     }
 
     pub fn apply(&self, url: &str, backend: RoutingBackend) -> Result<String> {
+        if !self.is_available(backend) {
+            anyhow::bail!("routing core {} is unavailable", backend.label());
+        }
         let profile = parse_share_url(url)?;
         let port = free_port()?;
         let config = generate_backend_config(backend, &profile, port)?;
@@ -750,6 +785,25 @@ fn derive_compatible_cores(url: &str) -> Result<Vec<RoutingBackend>> {
         .into_iter()
         .filter(|backend| generate_backend_config(*backend, &profile, 1).is_ok())
         .collect())
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn write_backend_config(
@@ -1339,6 +1393,57 @@ mod tests {
         assert!(manager.is_healthy());
     }
 
+    fn executable_fixture(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        fs::write(&path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn detects_zero_one_and_two_available_routing_cores() {
+        let root = std::env::temp_dir().join(format!("crab-routing-capabilities-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let missing_sing_box = root.join("missing-sing-box");
+        let missing_shoes = root.join("missing-shoes");
+
+        let none = RouteManager::with_paths(&root, &missing_sing_box, &missing_shoes);
+        assert!(none.available_cores().is_empty());
+
+        let sing_box = executable_fixture(&root, "sing-box");
+        let one = RouteManager::with_paths(&root, &sing_box, &missing_shoes);
+        assert_eq!(one.available_cores(), vec![RoutingBackend::SingBox]);
+
+        let shoes = executable_fixture(&root, "shoes");
+        let two = RouteManager::with_paths(&root, &sing_box, &shoes);
+        assert_eq!(
+            two.available_cores(),
+            vec![RoutingBackend::SingBox, RoutingBackend::Shoes]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unavailable_core_is_rejected_without_starting_a_process() {
+        let root = std::env::temp_dir().join(format!("crab-routing-unavailable-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        let manager = RouteManager::with_paths(
+            &root,
+            root.join("missing-sing-box"),
+            root.join("missing-shoes"),
+        );
+        let error = manager
+            .apply(
+                "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls",
+                RoutingBackend::SingBox,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sing-box") && error.contains("unavailable"));
+        assert!(manager.running_core().is_none());
+    }
+
     #[test]
     fn parses_vless_without_exposing_secret() {
         let profile = parse_share_url(
@@ -1579,6 +1684,28 @@ mod tests {
         );
         let raw = fs::read_to_string(root.join(PROFILES_FILE)).unwrap();
         assert!(raw.contains("\"selected_core\": \"shoes\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_active_profile_is_inactive_when_selected_core_is_missing() {
+        let root = std::env::temp_dir().join(format!("crab-routing-missing-core-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        let store = ProfileStore::load(&root).unwrap();
+        let profile = store
+            .create(ProfileInput {
+                name: "demo".into(),
+                url: "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls"
+                    .into(),
+            })
+            .unwrap();
+        store.set_active(&profile.id).unwrap();
+
+        let status = store.routing_status(None, &[]);
+        assert_eq!(status.active_profile, None);
+        assert!(status.available_cores.is_empty());
+        assert!(!store.list_for_available(&[])[0].active);
+        assert_eq!(store.active_id(), Some(profile.id));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -1,12 +1,15 @@
 PROJECT := crab-dump
 IMAGE ?= $(PROJECT):latest
+RUNTIME_TARGET ?= runtime-all
 CARGO ?= cargo
 COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
 
 .PHONY: help check build release test fmt fmt-check lint verify dry-run \
-	docker-build docker-smoke docker-run compose-up compose-down compose-logs clean
+	docker-build docker-build-none docker-build-sing-box docker-build-shoes \
+	docker-build-all docker-smoke docker-run compose-build compose-up \
+	compose-down compose-logs clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -38,7 +41,19 @@ dry-run: ## Validate configuration and pg_dump availability
 	$(CARGO) run --release -- --dry-run
 
 docker-build: ## Build the Docker image
-	docker build -t $(IMAGE) .
+	docker build --target $(RUNTIME_TARGET) -t $(IMAGE) .
+
+docker-build-none: ## Build the runtime image without routing cores
+	docker build --target runtime-none -t $(PROJECT):none .
+
+docker-build-sing-box: ## Build the runtime image with sing-box only
+	docker build --target runtime-sing-box -t $(PROJECT):sing-box .
+
+docker-build-shoes: ## Build the runtime image with shoes only
+	docker build --target runtime-shoes -t $(PROJECT):shoes .
+
+docker-build-all: ## Build the runtime image with both routing cores
+	docker build --target runtime-all -t $(PROJECT):all .
 
 docker-smoke: docker-build ## Verify the image contains the real CLI
 	@help_output="$$(docker run --rm --entrypoint /usr/local/bin/crab-dump $(IMAGE) --help)" \
@@ -55,16 +70,22 @@ docker-smoke: docker-build ## Verify the image contains the real CLI
 		$(IMAGE) --dry-run
 
 docker-run: ## Run a one-shot backup with Docker Compose
-	$(COMPOSE) run --rm crab-dump
+	ROUTING_TARGET=$(RUNTIME_TARGET) IMAGE_TAG=$(IMAGE) $(COMPOSE) run --rm crab-dump
 
-compose-up: ## Start the scheduled Compose service
-	$(COMPOSE) up -d
+compose-build: ## Build the Compose-selected runtime image
+	ROUTING_TARGET=$(RUNTIME_TARGET) IMAGE_TAG=$(IMAGE) $(COMPOSE) build
+
+compose-up: compose-build ## Build and start the selected runtime image
+	ROUTING_TARGET=$(RUNTIME_TARGET) IMAGE_TAG=$(IMAGE) $(COMPOSE) up --force-recreate
 
 compose-down: ## Stop the Compose service
 	$(COMPOSE) down
 
 compose-logs: ## Follow Compose service logs
 	$(COMPOSE) logs -f crab-dump
+
+compose-up-shoes:
+	docker compose down && make compose-up RUNTIME_TARGET=runtime-shoes IMAGE=crab-dump:shoes
 
 clean: ## Remove Rust build artifacts
 	$(CARGO) clean

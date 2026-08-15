@@ -37,11 +37,24 @@ cargo build --release
 
 **Option B — Docker (image with `pg_dump` baked in):**
 ```bash
-docker build -t crab-dump .
+docker build --target runtime-none -t crab-dump:none .
+docker build --target runtime-sing-box -t crab-dump:sing-box .
+docker build --target runtime-shoes -t crab-dump:shoes .
+docker build --target runtime-all -t crab-dump:all .
 # or: docker compose build
 ```
-The runtime image is based on `postgres:17-bookworm`, so it ships a matching
-`pg_dump` — no need to install Postgres client tools on the host.
+`runtime-all` is the default and includes both routing cores. The other targets
+include no core or only the named core; routing remains unavailable when its
+executable is not present. Every image ships a matching `pg_dump`, so no
+Postgres client tools are needed on the host.
+
+Compose selects the target with `ROUTING_TARGET` and the image tag with
+`IMAGE_TAG`:
+
+```bash
+ROUTING_TARGET=runtime-sing-box docker compose build
+ROUTING_TARGET=runtime-sing-box docker compose up -d
+```
 
 ### 2. (Optional) Generate an age keypair
 
@@ -73,14 +86,19 @@ avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
 
 ### 3a. Dashboard-managed routing profiles
 
-Docker releases bundle pinned `sing-box` and `shoes` executables. Local Cargo builds need
-the supported `sing-box` executable installed separately, or can set
+The `runtime-all` Docker target bundles pinned `sing-box` and `shoes`
+executables; the single-core targets bundle only their named executable. Local
+Cargo builds need the supported `sing-box` executable installed separately, or can set
 `SING_BOX_PATH` to its path. Log in as the dashboard administrator and use the
 the routing section to create, test, select, and explicitly apply VMess,
 VLESS, Shadowsocks SIP002, or Trojan share URLs. The dashboard persists the
 selected core and records which cores each profile supports; core changes
 require routing to be disabled. Operators and viewers can
 neither modify profiles nor see their URLs or credentials.
+
+For Docker deployments, leave `SING_BOX_PATH` and `SHOES_PATH` unset in `.env`.
+Those paths refer to files inside the container; host-local paths will not work
+there. Rebuild the selected image after changing the routing target.
 
 Profiles and the active selection are stored in `./data/routing_profiles.json`.
 The file and generated `sing-box` configuration are written atomically with

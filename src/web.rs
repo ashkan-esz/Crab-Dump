@@ -1550,15 +1550,18 @@ async fn delete_telegram_user(
     }
 }
 
-async fn api_routing_profiles(store: web::Data<Arc<ProfileStore>>) -> impl Responder {
-    HttpResponse::Ok().json(store.list())
+async fn api_routing_profiles(
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+) -> impl Responder {
+    HttpResponse::Ok().json(store.list_for_available(&route.available_cores()))
 }
 
 async fn api_routing_status(
     store: web::Data<Arc<ProfileStore>>,
     route: web::Data<Arc<RouteManager>>,
 ) -> impl Responder {
-    HttpResponse::Ok().json(store.routing_status(route.running_core()))
+    HttpResponse::Ok().json(store.routing_status(route.running_core(), &route.available_cores()))
 }
 
 #[derive(Deserialize)]
@@ -1579,7 +1582,14 @@ async fn select_routing_core(
                 .json(serde_json::json!({"error": "core must be sing-box or shoes"}));
         }
     };
-    if store.active_id().is_some() || route.running_core().is_some() {
+    if !route.is_available(core) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("The {} routing core is unavailable in this image.", core.as_str())
+        }));
+    }
+    let persisted_route_is_active =
+        store.active_id().is_some() && route.is_available(store.selected_core());
+    if persisted_route_is_active || route.running_core().is_some() {
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": "Disable routing before changing the selected core."
         }));
@@ -1587,7 +1597,8 @@ async fn select_routing_core(
     match store.set_selected_core(core) {
         Ok(()) => {
             audit_action(&req, "routing_core_select", core.as_str(), "ok");
-            HttpResponse::Ok().json(store.routing_status(route.running_core()))
+            HttpResponse::Ok()
+                .json(store.routing_status(route.running_core(), &route.available_cores()))
         }
         Err(_) => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": "profile storage unavailable"})),
@@ -1596,7 +1607,7 @@ async fn select_routing_core(
 
 fn probe_compatible_cores(route: &RouteManager, url: &str) -> Option<Vec<RoutingBackend>> {
     let mut compatible = Vec::new();
-    for core in RoutingBackend::ALL {
+    for core in route.available_cores() {
         if route.start_temporary(url, core).is_ok() {
             compatible.push(core);
         }
@@ -1742,7 +1753,7 @@ fn check_all_profiles(
     api_base: &str,
 ) -> RoutingCheckResponse {
     let mut results = Vec::new();
-    for summary in store.list() {
+    for summary in store.list_for_available(&route.available_cores()) {
         let mut result = RoutingCheckResult {
             id: summary.id.clone(),
             name: summary.name.clone(),
@@ -1842,6 +1853,14 @@ async fn apply_routing_profile(
         return HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}));
     };
     let selected_core = store.selected_core();
+    if !route.is_available(selected_core) {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!(
+                "The selected {} routing core is unavailable in this image.",
+                selected_core.as_str()
+            )
+        }));
+    }
     if !store
         .compatible_cores(&id)
         .is_some_and(|cores| cores.contains(&selected_core))
@@ -1915,7 +1934,12 @@ async fn apply_routing_profile(
     route.commit();
     audit_action(&req, "routing_profile_apply", &id, "ok");
     let _ = proxy;
-    HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
+    HttpResponse::Ok().json(
+        store
+            .list_for_available(&route.available_cores())
+            .into_iter()
+            .find(|profile| profile.id == id),
+    )
 }
 
 async fn disable_routing(
@@ -1979,13 +2003,19 @@ async fn disable_routing(
 async fn select_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
     path: web::Path<String>,
 ) -> impl Responder {
     let id = path.into_inner();
     match store.set_active(&id) {
         Ok(true) => {
             audit_action(&req, "routing_profile_select", &id, "ok");
-            HttpResponse::Ok().json(store.list().into_iter().find(|profile| profile.id == id))
+            HttpResponse::Ok().json(
+                store
+                    .list_for_available(&route.available_cores())
+                    .into_iter()
+                    .find(|profile| profile.id == id),
+            )
         }
         Ok(false) => {
             HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}))

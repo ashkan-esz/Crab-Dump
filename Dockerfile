@@ -60,7 +60,7 @@ RUN apk add --no-cache build-base \
          --rev "$SHOES_REVISION" --locked \
     && test -x /usr/local/cargo/bin/shoes
 
-FROM alpine:3.21
+FROM alpine:3.21 AS runtime-base
 
 WORKDIR /app
 
@@ -71,14 +71,26 @@ RUN apk add --no-cache \
     && chown -R postgres:postgres /app
 
 COPY --from=builder --chown=postgres:postgres /build/final-target/release/crab-dump /app/crab-dump
-COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
-COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
-
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
       org.opencontainers.image.source="https://github.com/ashkan/crab-dump"
 
+ENTRYPOINT ["./crab-dump"]
+
+FROM runtime-base AS runtime-none
+
+FROM runtime-base AS runtime-sing-box
+
+COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
+
+FROM runtime-base AS runtime-shoes
+
+COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
+
+FROM runtime-base AS runtime-all
+
+COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
+COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
+
 #HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 #    CMD ["sh", "-c", "wget -q -O /dev/null \"http://127.0.0.1:${API_PORT:-1111}/healthz\" || exit 1"]
-
-ENTRYPOINT ["./crab-dump"]
