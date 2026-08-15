@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG SING_BOX_VERSION=1.11.15
+ARG SHOES_REVISION=7a5a8ee3bd1c52bc15ec57e074e95e374d41f275
 
 FROM golang:1.23-alpine@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f AS singbox-builder
 
@@ -50,6 +51,15 @@ COPY index.html users.html routing.html ./
 RUN CARGO_TARGET_DIR=/build/final-target cargo build --release \
     && strip --strip-unneeded /build/final-target/release/crab-dump
 
+FROM rust:1-alpine AS shoes-builder
+
+ARG SHOES_REVISION
+
+RUN apk add --no-cache build-base \
+    && cargo install --git https://github.com/cfal/shoes.git \
+         --rev "$SHOES_REVISION" --locked \
+    && test -x /usr/local/cargo/bin/shoes
+
 FROM alpine:3.21
 
 WORKDIR /app
@@ -62,6 +72,7 @@ RUN apk add --no-cache \
 
 COPY --from=builder --chown=postgres:postgres /build/final-target/release/crab-dump /app/crab-dump
 COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
+COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
 
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \

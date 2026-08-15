@@ -2343,9 +2343,10 @@ mod tests {
                     None,
                     None,
                 )))
-                .app_data(web::Data::new(Arc::new(RouteManager::new(
+                .app_data(web::Data::new(Arc::new(RouteManager::with_backend(
                     "/tmp/crab-routing-health-web",
                     "/bin/false",
+                    crate::routing::RoutingBackend::SingBox,
                 ))))
                 .route("/healthz", web::get().to(healthz))
                 .wrap(from_fn(dashboard_auth)),

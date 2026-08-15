@@ -1,4 +1,4 @@
-//! Dashboard-managed routing share profiles and the bundled sing-box core.
+//! Dashboard-managed routing share profiles and selectable local routing cores.
 //!
 //! Secrets live only in the restricted profile file and the generated config
 //! file. Public summaries and all errors intentionally omit URLs and
@@ -15,8 +15,40 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SING_BOX_PATH: &str = "/usr/local/bin/sing-box";
-const CONFIG_FILE: &str = "sing-box.json";
+pub const DEFAULT_SHOES_PATH: &str = "/usr/local/bin/shoes";
+const SING_BOX_CONFIG_FILE: &str = "sing-box.json";
+const SHOES_CONFIG_FILE: &str = "shoes.yaml";
 const PROFILES_FILE: &str = "routing_profiles.json";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoutingBackend {
+    SingBox,
+    Shoes,
+}
+
+impl RoutingBackend {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "sing-box" | "sing_box" | "singbox" => Ok(Self::SingBox),
+            "shoes" => Ok(Self::Shoes),
+            _ => anyhow::bail!("ROUTING_CORE must be `sing-box` or `shoes`"),
+        }
+    }
+
+    fn config_file(self) -> &'static str {
+        match self {
+            Self::SingBox => SING_BOX_CONFIG_FILE,
+            Self::Shoes => SHOES_CONFIG_FILE,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SingBox => "sing-box",
+            Self::Shoes => "shoes",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,6 +99,8 @@ pub struct ParsedProfile {
     pub path: Option<String>,
     pub tls: bool,
     pub sni: Option<String>,
+    pub reality_public_key: Option<String>,
+    pub reality_short_id: Option<String>,
 }
 
 impl std::fmt::Debug for ParsedProfile {
@@ -302,7 +336,8 @@ struct ActiveCore {
 
 #[derive(Debug)]
 pub struct RouteManager {
-    sing_box_path: PathBuf,
+    backend: RoutingBackend,
+    executable_path: PathBuf,
     work_dir: PathBuf,
     active: Mutex<Option<ActiveCore>>,
     pending_previous: Mutex<Option<ActiveCore>>,
@@ -328,9 +363,14 @@ impl Drop for TemporaryRoute {
 }
 
 impl RouteManager {
-    pub fn new(work_dir: impl Into<PathBuf>, sing_box_path: impl Into<PathBuf>) -> Self {
+    pub fn with_backend(
+        work_dir: impl Into<PathBuf>,
+        executable_path: impl Into<PathBuf>,
+        backend: RoutingBackend,
+    ) -> Self {
         Self {
-            sing_box_path: sing_box_path.into(),
+            backend,
+            executable_path: executable_path.into(),
             work_dir: work_dir.into(),
             active: Mutex::new(None),
             pending_previous: Mutex::new(None),
@@ -379,18 +419,30 @@ impl RouteManager {
     pub fn start_temporary(&self, url: &str) -> Result<(ParsedProfile, TemporaryRoute)> {
         let profile = parse_share_url(url)?;
         let port = free_port()?;
-        let config = generate_config(&profile, port)?;
-        fs::create_dir_all(&self.work_dir).context("creating sing-box work directory")?;
-        let config_path = self
-            .work_dir
-            .join(format!("routing-check-{}-{port}.json", std::process::id()));
-        if let Err(error) = write_config(&config_path, &config) {
+        let config = generate_backend_config(self.backend, &profile, port)?;
+        fs::create_dir_all(&self.work_dir)
+            .with_context(|| format!("creating {} work directory", self.backend.label()))?;
+        let config_path = self.work_dir.join(format!(
+            "routing-check-{}-{port}.{}",
+            std::process::id(),
+            if self.backend == RoutingBackend::SingBox {
+                "json"
+            } else {
+                "yaml"
+            }
+        ));
+        if let Err(error) = write_backend_config(self.backend, &config_path, &config) {
             let _ = fs::remove_file(&config_path);
             return Err(error);
         }
 
-        let mut child = match Command::new(&self.sing_box_path)
-            .args(["run", "-c"])
+        let mut command = Command::new(&self.executable_path);
+        if self.backend == RoutingBackend::SingBox {
+            command.args(["run", "-c"]);
+        } else {
+            command.arg("--no-reload");
+        }
+        let mut child = match command
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -428,32 +480,46 @@ impl RouteManager {
     pub fn apply(&self, url: &str) -> Result<String> {
         let profile = parse_share_url(url)?;
         let port = free_port()?;
-        let config = generate_config(&profile, port)?;
-        fs::create_dir_all(&self.work_dir).context("creating sing-box work directory")?;
-        let config_path = self.work_dir.join(CONFIG_FILE);
-        let tmp_path = self.work_dir.join("sing-box.json.tmp");
-        let bytes = serde_json::to_vec_pretty(&config).context("serializing sing-box config")?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp_path)
-            .context("writing sing-box config")?;
-        restrict(&file)?;
-        file.write_all(&bytes).context("writing sing-box config")?;
-        file.sync_all().context("flushing sing-box config")?;
-        drop(file);
-        fs::rename(&tmp_path, &config_path).context("installing sing-box config")?;
-        restrict_path(&config_path)?;
+        let config = generate_backend_config(self.backend, &profile, port)?;
+        fs::create_dir_all(&self.work_dir)
+            .with_context(|| format!("creating {} work directory", self.backend.label()))?;
+        let config_path = self.work_dir.join(self.backend.config_file());
+        let tmp_path = self
+            .work_dir
+            .join(format!("{}.tmp", self.backend.config_file()));
+        if let Err(error) = write_backend_config(self.backend, &tmp_path, &config) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&tmp_path, &config_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error).context("installing managed routing config");
+        }
+        if let Err(error) = restrict_path(&config_path) {
+            let _ = fs::remove_file(&config_path);
+            return Err(error);
+        }
 
-        let mut child = Command::new(&self.sing_box_path)
-            .args(["run", "-c"])
+        let mut command = Command::new(&self.executable_path);
+        if self.backend == RoutingBackend::SingBox {
+            command.args(["run", "-c"]);
+        } else {
+            command.arg("--no-reload");
+        }
+        let mut child = match command
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .context("starting managed routing core")?;
+            .context("starting managed routing core")
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_file(&config_path);
+                return Err(error);
+            }
+        };
         if !wait_for_listener(port) {
             let _ = child.kill();
             let _ = child.wait();
@@ -469,7 +535,10 @@ impl RouteManager {
                 .filter(|output| !output.is_empty())
                 .unwrap_or_else(|| "no diagnostic was emitted".to_string());
             let _ = fs::remove_file(&config_path);
-            anyhow::bail!("managed routing core did not open its local listener: {diagnostic}");
+            anyhow::bail!(
+                "{} did not open its local listener: {diagnostic}",
+                self.backend.label()
+            );
         }
 
         let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -533,19 +602,41 @@ impl RouteManager {
     }
 }
 
-fn write_config(path: &Path, config: &serde_json::Value) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(config).context("serializing sing-box config")?;
+fn generate_backend_config(
+    backend: RoutingBackend,
+    profile: &ParsedProfile,
+    port: u16,
+) -> Result<serde_json::Value> {
+    match backend {
+        RoutingBackend::SingBox => generate_config(profile, port),
+        RoutingBackend::Shoes => generate_shoes_config(profile, port),
+    }
+}
+
+fn write_backend_config(
+    backend: RoutingBackend,
+    path: &Path,
+    config: &serde_json::Value,
+) -> Result<()> {
+    let bytes = match backend {
+        RoutingBackend::SingBox => {
+            serde_json::to_vec_pretty(config).context("serializing sing-box config")?
+        }
+        RoutingBackend::Shoes => serde_yaml::to_string(config)
+            .context("serializing shoes config")?
+            .into_bytes(),
+    };
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)
-        .context("writing temporary sing-box config")?;
+        .with_context(|| format!("writing temporary {} config", backend.label()))?;
     restrict(&file)?;
     file.write_all(&bytes)
-        .context("writing temporary sing-box config")?;
+        .with_context(|| format!("writing temporary {} config", backend.label()))?;
     file.sync_all()
-        .context("flushing temporary sing-box config")?;
+        .with_context(|| format!("flushing temporary {} config", backend.label()))?;
     Ok(())
 }
 
@@ -556,19 +647,27 @@ impl Drop for RouteManager {
 }
 
 fn sanitize_core_diagnostic(output: &str) -> String {
-    let line = output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default();
-    let lower = line.to_ascii_lowercase();
-    if ["password", "uuid", "server", "url", "token", "secret"]
-        .iter()
-        .any(|term| lower.contains(term))
+    let lower = output.to_ascii_lowercase();
+    if [
+        "password",
+        "uuid",
+        "server",
+        "url",
+        "token",
+        "secret",
+        "public_key",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
     {
         "invalid managed routing configuration".to_string()
     } else {
-        line.to_string()
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_string()
     }
 }
 
@@ -638,6 +737,8 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile> {
         path: nonempty(string("path")),
         tls: matches!(string("tls"), "tls" | "1"),
         sni: nonempty(string("sni")),
+        reality_public_key: None,
+        reality_short_id: None,
     })
 }
 
@@ -687,6 +788,14 @@ fn parse_vless(input: &str) -> Result<ParsedProfile> {
         path: params.get("path").map(|v| percent_decode(v)),
         tls: security != "none",
         sni: params.get("sni").map(|v| percent_decode(v)),
+        reality_public_key: params
+            .get("pbk")
+            .or_else(|| params.get("publicKey"))
+            .map(|v| percent_decode(v)),
+        reality_short_id: params
+            .get("sid")
+            .or_else(|| params.get("shortId"))
+            .map(|v| percent_decode(v)),
     })
 }
 
@@ -729,6 +838,8 @@ fn parse_shadowsocks(input: &str) -> Result<ParsedProfile> {
         path: None,
         tls: false,
         sni: None,
+        reality_public_key: None,
+        reality_short_id: None,
     })
 }
 
@@ -773,6 +884,8 @@ fn parse_trojan(input: &str) -> Result<ParsedProfile> {
         path: None,
         tls: true,
         sni: params.get("sni").map(|value| percent_decode(value)),
+        reality_public_key: None,
+        reality_short_id: None,
     })
 }
 
@@ -849,6 +962,104 @@ fn generate_config(profile: &ParsedProfile, port: u16) -> Result<serde_json::Val
             "tag": "direct"
         }]
     }))
+}
+
+fn generate_shoes_config(profile: &ParsedProfile, port: u16) -> Result<serde_json::Value> {
+    if matches!(profile.transport.as_str(), "grpc" | "http") {
+        anyhow::bail!(
+            "shoes backend does not support {} transport for this routing profile",
+            profile.transport
+        );
+    }
+
+    let base = match profile.kind {
+        ProfileKind::Shadowsocks => serde_json::json!({
+            "type": "shadowsocks",
+            "cipher": profile.method,
+            "password": profile.password,
+        }),
+        ProfileKind::Trojan => serde_json::json!({
+            "type": "trojan",
+            "password": profile.password,
+        }),
+        ProfileKind::Vmess => serde_json::json!({
+            "type": "vmess",
+            "cipher": shoes_vmess_cipher(&profile.security)?,
+            "user_id": profile.uuid,
+            "udp_enabled": true,
+        }),
+        ProfileKind::Vless => serde_json::json!({
+            "type": "vless",
+            "user_id": profile.uuid,
+            "udp_enabled": true,
+        }),
+    };
+
+    let mut transport = base;
+    if profile.transport == "ws" {
+        let mut websocket = serde_json::json!({
+            "type": "websocket",
+            "protocol": transport,
+        });
+        if let Some(path) = profile.path.as_ref() {
+            websocket["matching_path"] = serde_json::json!(path);
+        }
+        if let Some(host) = profile.host.as_ref() {
+            websocket["matching_headers"] = serde_json::json!({"Host": host});
+        }
+        transport = websocket;
+    }
+
+    if profile.security == "reality" {
+        let public_key = profile
+            .reality_public_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Reality profile is missing its public key"))?;
+        let sni = profile
+            .sni
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Reality profile is missing its SNI"))?;
+        transport = serde_json::json!({
+            "type": "reality",
+            "public_key": public_key,
+            "short_id": profile.reality_short_id.as_deref().unwrap_or(""),
+            "sni_hostname": sni,
+            "vision": profile.kind == ProfileKind::Vless
+                && profile.transport == "tcp",
+            "protocol": transport,
+        });
+    } else if profile.tls {
+        transport = serde_json::json!({
+            "type": "tls",
+            "verify": true,
+            "sni_hostname": profile.sni.as_deref().unwrap_or(&profile.address),
+            "vision": profile.kind == ProfileKind::Vless && profile.transport == "tcp",
+            "protocol": transport,
+        });
+    }
+
+    Ok(serde_json::json!([{
+        "address": format!("127.0.0.1:{port}"),
+        "protocol": {"type": "socks", "udp_enabled": true},
+        "rules": [{
+            "masks": "0.0.0.0/0",
+            "action": "allow",
+            "client_chain": {
+                "address": format!("{}:{}", profile.address, profile.port),
+                "protocol": transport,
+            }
+        }]
+    }]))
+}
+
+fn shoes_vmess_cipher(security: &str) -> Result<&'static str> {
+    match security {
+        "" | "auto" => Ok("chacha20-poly1305"),
+        "aes-128-gcm" => Ok("aes-128-gcm"),
+        "chacha20-poly1305" => Ok("chacha20-poly1305"),
+        "none" => Ok("none"),
+        _ => anyhow::bail!("shoes backend does not support VMess cipher `{security}`"),
+    }
 }
 
 fn clean_name(name: &str) -> Result<String> {
@@ -981,7 +1192,11 @@ mod tests {
 
     #[test]
     fn route_manager_without_active_core_is_healthy() {
-        let manager = RouteManager::new("/tmp/crab-routing-health", "/bin/false");
+        let manager = RouteManager::with_backend(
+            "/tmp/crab-routing-health",
+            "/bin/false",
+            RoutingBackend::SingBox,
+        );
         assert!(manager.is_healthy());
     }
 
@@ -1072,6 +1287,8 @@ mod tests {
                 ProfileKind::Vmess | ProfileKind::Vless | ProfileKind::Trojan
             ),
             sni: None,
+            reality_public_key: None,
+            reality_short_id: None,
         };
 
         for kind in [ProfileKind::Vmess, ProfileKind::Vless] {
@@ -1102,6 +1319,75 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn generates_shoes_yaml_shape_for_tcp_and_websocket_profiles() {
+        let tcp = parse_share_url(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&sni=example.com",
+        )
+        .unwrap();
+        let tcp_config = generate_shoes_config(&tcp, 12345).unwrap();
+        assert_eq!(tcp_config[0]["address"], "127.0.0.1:12345");
+        assert_eq!(tcp_config[0]["protocol"]["type"], "socks");
+        assert_eq!(
+            tcp_config[0]["rules"][0]["client_chain"]["protocol"]["type"],
+            "tls"
+        );
+        assert_eq!(
+            tcp_config[0]["rules"][0]["client_chain"]["protocol"]["protocol"]["type"],
+            "vless"
+        );
+
+        let ws = parse_share_url(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=ws&security=tls&path=%2Ftg&host=cdn.example&sni=cdn.example",
+        )
+        .unwrap();
+        let ws_config = generate_shoes_config(&ws, 12345).unwrap();
+        let protocol = &ws_config[0]["rules"][0]["client_chain"]["protocol"];
+        assert_eq!(protocol["type"], "tls");
+        assert_eq!(protocol["protocol"]["type"], "websocket");
+        assert_eq!(protocol["protocol"]["matching_path"], "/tg");
+        assert_eq!(
+            protocol["protocol"]["matching_headers"]["Host"],
+            "cdn.example"
+        );
+    }
+
+    #[test]
+    fn shoes_rejects_transports_without_a_documented_mapping() {
+        let profile = parse_share_url(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=grpc&security=tls",
+        )
+        .unwrap();
+        assert!(generate_shoes_config(&profile, 12345).is_err());
+    }
+
+    #[test]
+    fn shoes_supports_reality_client_wrapping() {
+        let profile = parse_share_url(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality&sni=www.example.com&pbk=public-key&sid=0123",
+        )
+        .unwrap();
+        let config = generate_shoes_config(&profile, 12345).unwrap();
+        let reality = &config[0]["rules"][0]["client_chain"]["protocol"];
+        assert_eq!(reality["type"], "reality");
+        assert_eq!(reality["public_key"], "public-key");
+        assert_eq!(reality["short_id"], "0123");
+        assert_eq!(reality["protocol"]["type"], "vless");
+    }
+
+    #[test]
+    fn parses_routing_backend_selection() {
+        assert_eq!(
+            RoutingBackend::parse("sing-box").unwrap(),
+            RoutingBackend::SingBox
+        );
+        assert_eq!(
+            RoutingBackend::parse("shoes").unwrap(),
+            RoutingBackend::Shoes
+        );
+        assert!(RoutingBackend::parse("unknown").is_err());
     }
 
     #[test]
