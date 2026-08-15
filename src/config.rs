@@ -86,17 +86,16 @@ pub enum Schedule {
 #[derive(Clone)]
 pub struct SharedConfig {
     /// Global compression codec used for every database backup.
-    pub compression_codec: CompressionCodec,
+    pub compression_codec: Option<CompressionCodec>,
     /// Codec-native compression level.
-    pub compression_level: i32,
+    pub compression_level: Option<i32>,
     /// Whether zstd frames include a checksum.
-    pub compression_checksum: bool,
+    pub compression_checksum: Option<bool>,
     /// Telegram bot token from @BotFather.
     pub tg_bot_token: String,
     /// Target chats for uploaded chunks (numeric IDs or `@channelusername`).
     pub tg_chat_ids: Vec<String>,
-    /// age X25519 recipient public key (`age1…`). `None` → compressed but
-    /// NOT encrypted.
+    /// age X25519 recipient public key (`age1…`). `None` → not encrypted.
     pub age_recipient: Option<String>,
     /// Maximum chunk size in MiB (Telegram limit: 50 MiB).
     pub chunk_size_mb: u64,
@@ -510,26 +509,40 @@ fn validate_optional_dashboard_credentials(
 }
 
 fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
-    let compression_codec =
-        CompressionCodec::parse(raw.compression_codec.as_deref().ok_or_else(|| {
-            anyhow!("COMPRESSION_CODEC is required (set to zstd, gzip, or brotli)")
-        })?)?;
-    let compression_level = match raw.compression_level.as_ref() {
-        None => compression_codec.default_level(),
-        Some(RawCompressionLevel::Integer(level)) => i32::try_from(*level)
-            .with_context(|| format!("COMPRESSION_LEVEL is outside the i32 range: {level}"))?,
-        Some(RawCompressionLevel::Text(level)) => level
-            .parse::<i32>()
-            .with_context(|| format!("COMPRESSION_LEVEL must be an integer, got `{level}`"))?,
+    let compression_codec = raw
+        .compression_codec
+        .as_deref()
+        .map(CompressionCodec::parse)
+        .transpose()?;
+    let compression_level = match (compression_codec, raw.compression_level.as_ref()) {
+        (None, Some(_)) => bail!("COMPRESSION_LEVEL requires COMPRESSION_CODEC"),
+        (None, None) => None,
+        (Some(codec), None) => Some(codec.default_level()),
+        (Some(_), Some(RawCompressionLevel::Integer(level))) => Some(
+            i32::try_from(*level)
+                .with_context(|| format!("COMPRESSION_LEVEL is outside the i32 range: {level}"))?,
+        ),
+        (Some(_), Some(RawCompressionLevel::Text(level))) => Some(
+            level
+                .parse::<i32>()
+                .with_context(|| format!("COMPRESSION_LEVEL must be an integer, got `{level}`"))?,
+        ),
     };
-    compression_codec.validate_level(compression_level)?;
-    let compression_checksum = raw.compression_checksum.unwrap_or(true);
-    if compression_codec != CompressionCodec::Zstd && raw.compression_checksum.is_some() {
-        bail!(
-            "COMPRESSION_CHECKSUM is only supported with zstd, not {}",
-            compression_codec.as_str()
-        );
+    if let (Some(codec), Some(level)) = (compression_codec, compression_level) {
+        codec.validate_level(level)?;
     }
+    if raw.compression_checksum.is_some() && compression_codec.is_none() {
+        bail!("COMPRESSION_CHECKSUM requires COMPRESSION_CODEC");
+    }
+    if let Some(codec) = compression_codec {
+        if codec != CompressionCodec::Zstd && raw.compression_checksum.is_some() {
+            bail!(
+                "COMPRESSION_CHECKSUM is only supported with zstd, not {}",
+                codec.as_str()
+            );
+        }
+    }
+    let compression_checksum = compression_codec.map(|_| raw.compression_checksum.unwrap_or(true));
 
     let tg_bot_token = raw
         .tg_bot_token
@@ -1062,9 +1075,9 @@ mod tests {
     #[test]
     fn chunk_size_bytes_computes_correctly() {
         let cfg = SharedConfig {
-            compression_codec: CompressionCodec::Zstd,
-            compression_level: 3,
-            compression_checksum: true,
+            compression_codec: Some(CompressionCodec::Zstd),
+            compression_level: Some(3),
+            compression_checksum: Some(true),
             tg_bot_token: "t".into(),
             tg_chat_ids: vec!["c".into()],
             age_recipient: None,
@@ -1148,6 +1161,14 @@ mod tests {
         }
     }
 
+    fn shared_raw_without_compression() -> RawConfigFile {
+        RawConfigFile {
+            tg_bot_token: Some("t".into()),
+            tg_chat_ids: Some(vec!["c".into()]),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn max_parallel_defaults_and_reads_config() {
         assert_eq!(
@@ -1164,14 +1185,11 @@ mod tests {
     }
 
     #[test]
-    fn compression_codec_is_required_and_parses_from_merged_values() {
-        let missing = build_shared_config(&RawConfigFile {
-            tg_bot_token: Some("t".into()),
-            tg_chat_ids: Some(vec!["c".into()]),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(missing.to_string().contains("COMPRESSION_CODEC"));
+    fn missing_compression_codec_means_uncompressed() {
+        let cfg = build_shared_config(&shared_raw_without_compression()).unwrap();
+        assert_eq!(cfg.compression_codec, None);
+        assert_eq!(cfg.compression_level, None);
+        assert_eq!(cfg.compression_checksum, None);
 
         let raw = RawConfigFile {
             compression_codec: Some("brotli".into()),
@@ -1179,8 +1197,8 @@ mod tests {
             ..shared_raw()
         };
         let cfg = build_shared_config(&raw).unwrap();
-        assert_eq!(cfg.compression_codec, CompressionCodec::Brotli);
-        assert_eq!(cfg.compression_level, 7);
+        assert_eq!(cfg.compression_codec, Some(CompressionCodec::Brotli));
+        assert_eq!(cfg.compression_level, Some(7));
 
         let parsed: RawConfigFile = toml::from_str(
             r#"
@@ -1209,7 +1227,7 @@ mod tests {
                 ..shared_raw()
             })
             .unwrap();
-            assert_eq!(cfg.compression_level, level as i32);
+            assert_eq!(cfg.compression_level, Some(level as i32));
         }
 
         for (codec, level) in [("zstd", 23), ("gzip", 10), ("brotli", 12)] {
@@ -1231,6 +1249,20 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("only supported with zstd"), "{error}");
+
+        for raw in [
+            RawConfigFile {
+                compression_level: Some(RawCompressionLevel::Integer(3)),
+                ..shared_raw_without_compression()
+            },
+            RawConfigFile {
+                compression_checksum: Some(true),
+                ..shared_raw_without_compression()
+            },
+        ] {
+            let error = build_shared_config(&raw).unwrap_err().to_string();
+            assert!(error.contains("requires COMPRESSION_CODEC"), "{error}");
+        }
 
         let error = build_shared_config(&RawConfigFile {
             compression_level: Some(RawCompressionLevel::Text("not-a-level".into())),
@@ -1257,9 +1289,9 @@ mod tests {
             },
         );
         let cfg = build_shared_config(&merged).unwrap();
-        assert_eq!(cfg.compression_codec, CompressionCodec::Zstd);
-        assert_eq!(cfg.compression_level, 8);
-        assert!(!cfg.compression_checksum);
+        assert_eq!(cfg.compression_codec, Some(CompressionCodec::Zstd));
+        assert_eq!(cfg.compression_level, Some(8));
+        assert_eq!(cfg.compression_checksum, Some(false));
     }
 
     /// Zero would stall the run instead of limiting it — reject at startup.

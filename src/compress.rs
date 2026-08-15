@@ -30,6 +30,10 @@ impl CompressionCodec {
         }
     }
 
+    pub fn display_name(self) -> &'static str {
+        self.as_str()
+    }
+
     pub fn suffix(self) -> &'static str {
         match self {
             Self::Zstd => ".zst",

@@ -1,7 +1,7 @@
-//! crab-dump: stream compressed, optionally encrypted Postgres dumps to Telegram.
+//! crab-dump: stream optionally compressed and encrypted Postgres dumps to Telegram.
 //!
 //! Multi-database aware: spawns independent pipelines per configured server,
-//! each running `pg_dump → compression → age? → chunk → upload`, at most
+//! each running `pg_dump → compression? → age? → chunk → upload`, at most
 //! `MAX_PARALLEL_DATABASES` of them at a time. A database that fails is
 //! reported and skipped — never fatal to its peers.
 //!
@@ -789,6 +789,8 @@ struct BackupResult {
     total_bytes: u64,
     /// Whether age encryption was applied to the stream.
     encrypted: bool,
+    /// Compression codec name, or `uncompressed` for raw dumps.
+    compression: &'static str,
     /// SHA-256 digest of the final byte stream (reassembly verification).
     sha256: [u8; 32],
     /// Wall-clock time elapsed for the entire backup cycle.
@@ -946,7 +948,8 @@ fn run_database(
         ..Default::default()
     };
 
-    // Wire-contract filename: `{db}_{utc_ts}.sql.{codec}[.age]`. Duplicate
+    // Wire-contract filename: `{db}_{utc_ts}.sql.{codec}[.age]`, or `.dump`
+    // when compression is disabled. Duplicate
     // display names are rejected at config time, so the timestamped prefix
     // remains unique for a database's run.
     let stamp = dump_timestamp(started)?;
@@ -1097,8 +1100,10 @@ fn backup_pipeline(
     }
 
     // ── Build the streaming pipeline ───────────────────────────────────────
-    //   encrypted:  pg_dump | compression | age  | chunked files
-    //   plain:      pg_dump | compression        | chunked files
+    //   encrypted compressed: pg_dump | compression | age  | chunked files
+    //   plain compressed:     pg_dump | compression        | chunked files
+    //   encrypted raw:        pg_dump             | age  | chunked files
+    //   plain raw:             pg_dump                    | chunked files
     let mut sink = match age_recipient {
         Some(recipient) => {
             tracing::info!(db = db_name, "encryption enabled (age X25519)");
@@ -1108,17 +1113,26 @@ fn backup_pipeline(
                 ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
             )
             .context("wrapping chunker in age StreamWriter")?;
-            let compressor = compress::encoder(
-                age_writer,
-                cfg.compression_codec,
-                cfg.compression_level,
-                cfg.compression_checksum,
-            )
-            .context("building compression encoder")?;
-            Sink::Encrypted(compressor)
+            match cfg.compression_codec {
+                Some(codec) => {
+                    let level = cfg
+                        .compression_level
+                        .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
+                    let checksum = cfg.compression_checksum.ok_or_else(|| {
+                        anyhow!("compression checksum missing for configured codec")
+                    })?;
+                    Sink::EncryptedCompressed(
+                        compress::encoder(age_writer, codec, level, checksum)
+                            .context("building compression encoder")?,
+                    )
+                }
+                None => Sink::EncryptedRaw(age_writer),
+            }
         }
         None => {
-            if options.no_encryption {
+            if cfg.compression_codec.is_none() {
+                tracing::info!(db = db_name, "compression disabled (raw dump)");
+            } else if options.no_encryption {
                 tracing::warn!(
                     db = db_name,
                     "--no-encryption — dump will be compressed but NOT encrypted"
@@ -1130,14 +1144,21 @@ fn backup_pipeline(
                 );
             }
             let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
-            let compressor = compress::encoder(
-                chunker,
-                cfg.compression_codec,
-                cfg.compression_level,
-                cfg.compression_checksum,
-            )
-            .context("building compression encoder")?;
-            Sink::Plain(compressor)
+            match cfg.compression_codec {
+                Some(codec) => {
+                    let level = cfg
+                        .compression_level
+                        .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
+                    let checksum = cfg.compression_checksum.ok_or_else(|| {
+                        anyhow!("compression checksum missing for configured codec")
+                    })?;
+                    Sink::PlainCompressed(
+                        compress::encoder(chunker, codec, level, checksum)
+                            .context("building compression encoder")?,
+                    )
+                }
+                None => Sink::PlainRaw(chunker),
+            }
         }
     };
 
@@ -1190,9 +1211,15 @@ fn backup_pipeline(
         1,
         "package",
         if encrypted {
-            "Flushing compression + encryption, writing chunks …"
-        } else {
+            if cfg.compression_codec.is_some() {
+                "Flushing compression + encryption, writing chunks …"
+            } else {
+                "Flushing encryption, writing chunks …"
+            }
+        } else if cfg.compression_codec.is_some() {
             "Flushing compression, writing chunks …"
+        } else {
+            "Writing raw dump chunks …"
         },
     );
     if cancellation_requested(cancellation) {
@@ -1242,7 +1269,7 @@ fn backup_pipeline(
                 total_bytes,
                 chunks_count,
                 encrypted,
-                cfg.compression_codec.as_str(),
+                compression_label(cfg.compression_codec),
             )
         } else {
             telegram::format_backup_summary(
@@ -1251,7 +1278,7 @@ fn backup_pipeline(
                 total_bytes,
                 chunks_count,
                 encrypted,
-                cfg.compression_codec.as_str(),
+                compression_label(cfg.compression_codec),
             )
         };
         for chat_id in source.notification_chat_ids(options) {
@@ -1394,6 +1421,7 @@ fn backup_pipeline(
         db_name: db_name.to_string(),
         total_bytes,
         encrypted,
+        compression: compression_label(cfg.compression_codec),
         sha256: hash,
         elapsed_secs: elapsed.as_secs_f64(),
         chunks_count,
@@ -1661,11 +1689,12 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
 
     for (i, r) in results.iter().enumerate() {
         println!(
-            "server {}: {} (bytes={}, chunks={}, encrypted={}, sha256={}, duration={:.1}s)",
+            "server {}: {} (bytes={}, chunks={}, compression={}, encrypted={}, sha256={}, duration={:.1}s)",
             i,
             r.db_name,
             r.total_bytes,
             r.chunks_count,
+            r.compression,
             r.encrypted,
             hex::encode(r.sha256),
             r.elapsed_secs,
@@ -1688,22 +1717,28 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
 /// Implementing `Write` delegates to the zstd encoder for the main loop.
 /// Unwinding through `finish()` peels off each layer in reverse order.
 enum Sink {
-    Encrypted(compress::Encoder<'static, age::stream::StreamWriter<ChunkWriter>>),
-    Plain(compress::Encoder<'static, ChunkWriter>),
+    EncryptedCompressed(compress::Encoder<'static, age::stream::StreamWriter<ChunkWriter>>),
+    PlainCompressed(compress::Encoder<'static, ChunkWriter>),
+    EncryptedRaw(age::stream::StreamWriter<ChunkWriter>),
+    PlainRaw(ChunkWriter),
 }
 
 impl Write for Sink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            Sink::Encrypted(e) => e.write(buf),
-            Sink::Plain(e) => e.write(buf),
+            Sink::EncryptedCompressed(e) => e.write(buf),
+            Sink::PlainCompressed(e) => e.write(buf),
+            Sink::EncryptedRaw(e) => e.write(buf),
+            Sink::PlainRaw(e) => e.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Sink::Encrypted(e) => e.flush(),
-            Sink::Plain(e) => e.flush(),
+            Sink::EncryptedCompressed(e) => e.flush(),
+            Sink::PlainCompressed(e) => e.flush(),
+            Sink::EncryptedRaw(e) => e.flush(),
+            Sink::PlainRaw(e) => e.flush(),
         }
     }
 }
@@ -1719,15 +1754,13 @@ impl Sink {
     ///   3. `ChunkWriter::finish()` → `Result<(paths, hash, total)>`
     fn finish(self) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
         match self {
-            Sink::Plain(encoder) => {
-                // Finish zstd, get back the owned ChunkWriter, finalize it.
+            Sink::PlainCompressed(encoder) => {
                 let chunker = encoder.finish().context("compression finish")?;
                 chunker
                     .finish()
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
-            Sink::Encrypted(encoder) => {
-                // Finish zstd → get age StreamWriter, finish that → get ChunkWriter.
+            Sink::EncryptedCompressed(encoder) => {
                 let age_writer = encoder.finish().context("compression finish")?;
                 let chunker = age_writer
                     .finish()
@@ -1736,18 +1769,36 @@ impl Sink {
                     .finish()
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
+            Sink::EncryptedRaw(age_writer) => {
+                let chunker = age_writer
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("age writer finish: {e}"))?;
+                chunker
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
+            }
+            Sink::PlainRaw(chunker) => chunker
+                .finish()
+                .map_err(|e| anyhow::anyhow!("chunker finish: {e}")),
         }
     }
 }
 
 /// Convert a Unix epoch timestamp to a readable, filename-safe UTC timestamp
 /// (`YYYY-MM-DD_HH:mm:ss`) for dump and history filenames.
-fn backup_extension(codec: compress::CompressionCodec, encrypted: bool) -> String {
-    if encrypted {
-        format!(".sql{}.age", codec.suffix())
-    } else {
+fn backup_extension(codec: Option<compress::CompressionCodec>, encrypted: bool) -> String {
+    let suffix = codec.map_or(".dump".to_string(), |codec| {
         format!(".sql{}", codec.suffix())
+    });
+    if encrypted {
+        format!("{suffix}.age")
+    } else {
+        suffix
     }
+}
+
+fn compression_label(codec: Option<compress::CompressionCodec>) -> &'static str {
+    codec.map_or("uncompressed", compress::CompressionCodec::display_name)
 }
 
 fn dump_timestamp(t: SystemTime) -> Result<String> {
@@ -1865,6 +1916,32 @@ mod tests {
         chunk::cleanup_prefix(&root, "history-2026-08-123456");
         assert!(!paths[0].exists());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn raw_sink_reassembles_single_and_multipart_streams() {
+        for (label, limit, expected_parts) in [("single", 8192u64, 1usize), ("multi", 1024, 5)] {
+            let root = std::env::temp_dir().join(format!(
+                "crab-dump-raw-sink-{}-{}",
+                std::process::id(),
+                label
+            ));
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::create_dir_all(&root).unwrap();
+            let original: Vec<u8> = (0..5000).map(|n| (n % 251) as u8).collect();
+            let mut sink = Sink::PlainRaw(ChunkWriter::new(&root, "raw.dump", limit));
+            sink.write_all(&original).unwrap();
+            let (parts, _, total) = sink.finish().unwrap();
+
+            assert_eq!(parts.len(), expected_parts);
+            assert_eq!(total, original.len() as u64);
+            let reassembled = root.join("reassembled");
+            chunk::reassemble(&parts, &reassembled).unwrap();
+            assert_eq!(std::fs::read(&reassembled).unwrap(), original);
+            chunk::cleanup_prefix(&root, "raw.dump");
+            std::fs::remove_file(&reassembled).unwrap();
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     /// The concurrency limit is the whole point of the parameter: never more
@@ -1991,9 +2068,11 @@ mod tests {
             (compress::CompressionCodec::Gzip, ".sql.gz"),
             (compress::CompressionCodec::Brotli, ".sql.br"),
         ] {
-            assert_eq!(backup_extension(codec, false), suffix);
-            assert_eq!(backup_extension(codec, true), format!("{suffix}.age"));
+            assert_eq!(backup_extension(Some(codec), false), suffix);
+            assert_eq!(backup_extension(Some(codec), true), format!("{suffix}.age"));
         }
+        assert_eq!(backup_extension(None, false), ".dump");
+        assert_eq!(backup_extension(None, true), ".dump.age");
     }
 
     #[test]

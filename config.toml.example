@@ -17,7 +17,7 @@
 # Telegram bot token from @BotFather.
 tg_bot_token = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-# Compression is required: "zstd", "gzip", or "brotli".
+# Optional compression: "zstd", "gzip", or "brotli". Omit for raw .dump files.
 compression_codec = "zstd"
 # Optional codec-native level: zstd default 3, gzip default 6, brotli default 5.
 # compression_level = 3
