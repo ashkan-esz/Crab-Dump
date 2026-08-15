@@ -62,6 +62,13 @@ assert.match(html, /id="resourceCpuFill"/);
 assert.match(html, /id="resourceMemoryFill"/);
 assert.match(html, /id="resourceDiskFill"/);
 assert.match(body, /api\/status\/resources/);
+assert.match(html, /id="compressionCard"/);
+assert.match(html, /id="compressionCodec"/);
+assert.match(html, /id="compressionLevel"/);
+assert.match(html, /id="compressionChecksum"/);
+assert.match(body, /api\/compression-config/);
+assert.match(body, /next backup cycle/);
+assert.match(body, /Only an administrator can edit compression settings/);
 assert.match(body, /api\/status\/database\/\$\{encodeURIComponent\(name\)\}\/cancel/);
 assert.match(body, /CANCELLED/);
 assert.match(body, /cancelDatabase\(db\.name\)/);
@@ -147,11 +154,20 @@ const actionHistory = historyMarkup({
 });
 const manualHistory = historyMarkup({
     stats: {},
-    records: [{ started_at: '2026-08-13T00:00:00Z', source: 'manual', recipient: 'Alice', status: 'success' }],
+    records: [{
+        started_at: '2026-08-13T00:00:00Z',
+        source: 'manual',
+        recipient: 'Alice',
+        status: 'success',
+        compression_type: 'zstd',
+        compression_level: 7,
+    }],
 });
 assert.match(manualHistory, /<td class="manual-source">Manual<\/td>/);
 assert.match(manualHistory, /<td>Alice<\/td>/);
 assert.match(manualHistory, /<th>Receiver<\/th>/);
+assert.match(manualHistory, /<th>Compression<\/th>/);
+assert.match(manualHistory, /<td>zstd 7<\/td>/);
 assert.equal(dbView({ enabled: true, state: 'UP', stage: 'cancelled' }).badge, 'CANCELLED');
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
 assert.match(actionHistory, /<td class="action-disable">disable<\/td>/);

@@ -39,6 +39,14 @@ pub struct HistoryRecord {
     pub packaged_bytes: u64,
     pub chunk_count: usize,
     pub sha256: Option<String>,
+    /// Effective compression codec for this attempt. Older records omit this
+    /// field and are shown as unknown rather than being misclassified.
+    #[serde(default = "default_compression_type")]
+    pub compression_type: String,
+    /// Effective codec level. None means compression was disabled or the
+    /// record predates compression metadata.
+    #[serde(default)]
+    pub compression_level: Option<i32>,
     pub encrypted: bool,
     pub duration_secs: f64,
     pub upload_duration_secs: f64,
@@ -48,6 +56,10 @@ pub struct HistoryRecord {
 
 fn default_source() -> String {
     "scheduled".into()
+}
+
+fn default_compression_type() -> String {
+    "unknown".into()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -438,6 +450,8 @@ mod tests {
             packaged_bytes: 5,
             chunk_count: 1,
             sha256: Some("00".repeat(32)),
+            compression_type: "zstd".into(),
+            compression_level: Some(3),
             encrypted: false,
             duration_secs: 1.0,
             upload_duration_secs: 0.5,
@@ -463,6 +477,8 @@ mod tests {
             "packaged_bytes",
             "chunk_count",
             "sha256",
+            "compression_type",
+            "compression_level",
             "encrypted",
             "duration_secs",
             "upload_duration_secs",
@@ -483,6 +499,16 @@ mod tests {
         let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.source, "scheduled");
         assert_eq!(parsed.recipient, None);
+    }
+
+    #[test]
+    fn old_records_without_compression_metadata_deserialize_as_unknown() {
+        let mut value = serde_json::to_value(record("2026-08-01T00:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("compression_type");
+        value.as_object_mut().unwrap().remove("compression_level");
+        let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.compression_type, "unknown");
+        assert_eq!(parsed.compression_level, None);
     }
 
     #[test]

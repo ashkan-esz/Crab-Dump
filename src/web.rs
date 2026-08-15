@@ -28,6 +28,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::compression_config::{CompressionConfigStore, CompressionSettings};
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 use crate::resource_usage::ResourceCollector;
@@ -90,6 +91,26 @@ static SCHEDULE_LABEL: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(S
 /// Human-readable history-upload schedule, or empty when disabled.
 static HISTORY_SCHEDULE_LABEL: LazyLock<RwLock<String>> =
     LazyLock::new(|| RwLock::new(String::new()));
+
+/// Dashboard-managed compression settings. Initialized once during startup
+/// and read by each backup at the beginning of its database run.
+static COMPRESSION_CONFIG: LazyLock<RwLock<Option<Arc<CompressionConfigStore>>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+pub fn set_compression_config(store: Arc<CompressionConfigStore>) {
+    *COMPRESSION_CONFIG
+        .write()
+        .expect("compression config lock poisoned") = Some(store);
+}
+
+pub fn compression_config() -> Arc<CompressionConfigStore> {
+    COMPRESSION_CONFIG
+        .read()
+        .expect("compression config lock poisoned")
+        .as_ref()
+        .expect("compression config store not initialized")
+        .clone()
+}
 
 // ===========================================================================
 // Per-database dump statuses (HashMap keyed by display name)
@@ -635,6 +656,94 @@ pub struct ConfigResponse {
     pub manual_backup_available: bool,
 }
 
+#[derive(Serialize)]
+struct CompressionConfigResponse {
+    codec: String,
+    level: Option<i32>,
+    checksum: Option<bool>,
+    source: &'static str,
+    applies: &'static str,
+    codecs: [&'static str; 4],
+    level_ranges: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct CompressionConfigRequest {
+    codec: String,
+    level: Option<i32>,
+    checksum: Option<bool>,
+}
+
+fn compression_config_response(
+    settings: CompressionSettings,
+    overridden: bool,
+) -> CompressionConfigResponse {
+    CompressionConfigResponse {
+        codec: settings.codec_name().to_string(),
+        level: settings.level,
+        checksum: settings.checksum,
+        source: if overridden {
+            "dashboard override"
+        } else {
+            "startup configuration"
+        },
+        applies: "next backup cycle",
+        codecs: ["none", "zstd", "gzip", "brotli"],
+        level_ranges: serde_json::json!({
+            "none": null,
+            "zstd": {"min": 1, "max": 22},
+            "gzip": {"min": 0, "max": 9},
+            "brotli": {"min": 0, "max": 11}
+        }),
+    }
+}
+
+async fn api_compression_config() -> impl Responder {
+    let store = compression_config();
+    HttpResponse::Ok().json(compression_config_response(
+        store.current(),
+        store.is_overridden(),
+    ))
+}
+
+async fn update_compression_config(
+    req: HttpRequest,
+    payload: web::Json<CompressionConfigRequest>,
+) -> impl Responder {
+    let codec = payload.codec.trim();
+    let codec = (!codec.eq_ignore_ascii_case("none")).then_some(codec);
+    let settings = match CompressionSettings::from_parts(codec, payload.level, payload.checksum) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": error.to_string()
+            }));
+        }
+    };
+    let store = compression_config();
+    match store.update(settings) {
+        Ok(settings) => {
+            let username = req
+                .extensions()
+                .get::<AuthenticatedUser>()
+                .map(|user| user.username.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::info!(
+                user = %username,
+                codec = settings.codec_name(),
+                "dashboard compression configuration updated"
+            );
+            HttpResponse::Ok().json(compression_config_response(settings, true))
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "dashboard compression configuration update failed");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "compression configuration could not be saved"
+            }))
+        }
+    }
+}
+
 /// GET /api/config — returns the current dashboard port.
 ///
 /// Exposes server metadata (port, uptime, hostname) so the dashboard can
@@ -944,6 +1053,8 @@ async fn api_database_action(
                     packaged_bytes: 0,
                     chunk_count: 0,
                     sha256: None,
+                    compression_type: "none".into(),
+                    compression_level: None,
                     encrypted: false,
                     duration_secs: 0.0,
                     upload_duration_secs: 0.0,
@@ -1073,6 +1184,8 @@ async fn api_database_action(
         packaged_bytes: 0,
         chunk_count: 0,
         sha256: None,
+        compression_type: "none".into(),
+        compression_level: None,
         encrypted: false,
         duration_secs: 0.0,
         upload_duration_secs: 0.0,
@@ -2116,6 +2229,14 @@ pub async fn start_server(
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
+            .route(
+                "/api/compression-config",
+                web::get().to(api_compression_config),
+            )
+            .route(
+                "/api/compression-config",
+                web::put().to(update_compression_config),
+            )
             .route("/api/status/service", web::get().to(api_service_status))
             .route(
                 "/api/status/service/test",
@@ -2756,6 +2877,8 @@ mod tests {
                     packaged_bytes: ordinal,
                     chunk_count: 1,
                     sha256: None,
+                    compression_type: "zstd".into(),
+                    compression_level: Some(3),
                     encrypted: false,
                     duration_secs: 1.0,
                     upload_duration_secs: 0.0,

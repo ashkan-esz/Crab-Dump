@@ -21,6 +21,7 @@ use reqwest::blocking::Client;
 
 mod chunk;
 mod compress;
+mod compression_config;
 mod config;
 mod cron;
 mod database_state;
@@ -34,6 +35,7 @@ mod telegram_users;
 mod web;
 
 use chunk::ChunkWriter;
+use compression_config::{CompressionConfigStore, CompressionSettings};
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
@@ -91,6 +93,16 @@ fn main() -> Result<()> {
         .map(DatabaseConfig::display_name)
         .collect::<Vec<_>>();
     let data_dir = PathBuf::from(DATA_DIR);
+    let compression_store = CompressionConfigStore::load(
+        data_dir.join("compression-config.json"),
+        CompressionSettings {
+            codec: shared_cfg.compression_codec,
+            level: shared_cfg.compression_level,
+            checksum: shared_cfg.compression_checksum,
+        },
+    )
+    .context("loading dashboard compression configuration")?;
+    web::set_compression_config(Arc::clone(&compression_store));
     let database_states = Arc::new(DatabaseStateStore::load(&data_dir, &names));
     web::set_database_state_store(Arc::clone(&database_states));
     let telegram_users = Arc::new(
@@ -566,6 +578,7 @@ fn run_manual_requests(
         })
         .collect::<Vec<_>>();
     if !indices.is_empty() {
+        let cycle_cfg = compression_snapshot(cfg);
         let options = requests
             .iter()
             .map(|request| {
@@ -582,7 +595,7 @@ fn run_manual_requests(
         let _operation_gate = web::acquire_backup_route_gate();
         web::set_cycle_running(true);
         let _ = execute_database_indices(
-            cfg,
+            &cycle_cfg,
             databases,
             &indices,
             client,
@@ -706,6 +719,7 @@ fn run_cycle(
     client: &ClientHandle,
     source: BackupSource,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
+    let cycle_cfg = compression_snapshot(cfg);
     let controller = web::manual_backup_controller();
     let active = databases
         .iter()
@@ -730,7 +744,7 @@ fn run_cycle(
         })
         .collect::<std::collections::HashMap<_, _>>();
     let (results, failures) = execute_database_indices(
-        cfg,
+        &cycle_cfg,
         databases,
         &active,
         client,
@@ -748,6 +762,17 @@ fn run_cycle(
     );
 
     (results, failures)
+}
+
+/// Snapshot dashboard-managed compression once for a complete backup cycle.
+/// Every database in that cycle therefore uses identical packaging settings.
+fn compression_snapshot(cfg: &SharedConfig) -> SharedConfig {
+    let settings = web::compression_config().current();
+    let mut snapshot = cfg.clone();
+    snapshot.compression_codec = settings.codec;
+    snapshot.compression_level = settings.level;
+    snapshot.compression_checksum = settings.checksum;
+    snapshot
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -993,6 +1018,8 @@ fn run_database(
                 packaged_bytes: success.total_bytes,
                 chunk_count: success.chunks_count,
                 sha256: Some(hex::encode(success.sha256)),
+                compression_type: compression_label(cfg.compression_codec).into(),
+                compression_level: cfg.compression_level,
                 encrypted: success.encrypted,
                 duration_secs,
                 upload_duration_secs: metrics.upload_duration_secs,
@@ -1032,6 +1059,8 @@ fn run_database(
                 packaged_bytes: metrics.packaged_bytes,
                 chunk_count: metrics.chunks_count,
                 sha256: metrics.sha256.map(hex::encode),
+                compression_type: compression_label(cfg.compression_codec).into(),
+                compression_level: cfg.compression_level,
                 encrypted: metrics.encrypted,
                 duration_secs,
                 upload_duration_secs: metrics.upload_duration_secs,
@@ -1118,9 +1147,7 @@ fn backup_pipeline(
                     let level = cfg
                         .compression_level
                         .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
-                    let checksum = cfg.compression_checksum.ok_or_else(|| {
-                        anyhow!("compression checksum missing for configured codec")
-                    })?;
+                    let checksum = compression_checksum(codec, cfg.compression_checksum);
                     Sink::EncryptedCompressed(
                         compress::encoder(age_writer, codec, level, checksum)
                             .context("building compression encoder")?,
@@ -1149,9 +1176,7 @@ fn backup_pipeline(
                     let level = cfg
                         .compression_level
                         .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
-                    let checksum = cfg.compression_checksum.ok_or_else(|| {
-                        anyhow!("compression checksum missing for configured codec")
-                    })?;
+                    let checksum = compression_checksum(codec, cfg.compression_checksum);
                     Sink::PlainCompressed(
                         compress::encoder(chunker, codec, level, checksum)
                             .context("building compression encoder")?,
@@ -1599,6 +1624,8 @@ fn execute_database_indices(
                         packaged_bytes: 0,
                         chunk_count: 0,
                         sha256: None,
+                        compression_type: compression_label(cfg.compression_codec).into(),
+                        compression_level: cfg.compression_level,
                         encrypted: !options_by_db
                             .get(&databases[i].display_name())
                             .is_some_and(|options| options.no_encryption)
@@ -1721,6 +1748,14 @@ enum Sink {
     PlainCompressed(compress::Encoder<'static, ChunkWriter>),
     EncryptedRaw(age::stream::StreamWriter<ChunkWriter>),
     PlainRaw(ChunkWriter),
+}
+
+fn compression_checksum(codec: compress::CompressionCodec, configured: Option<bool>) -> bool {
+    if codec == compress::CompressionCodec::Zstd {
+        configured.unwrap_or(true)
+    } else {
+        false
+    }
 }
 
 impl Write for Sink {
@@ -2073,6 +2108,23 @@ mod tests {
         }
         assert_eq!(backup_extension(None, false), ".dump");
         assert_eq!(backup_extension(None, true), ".dump.age");
+    }
+
+    #[test]
+    fn non_zstd_codecs_do_not_require_a_checksum_setting() {
+        assert!(!compression_checksum(
+            compress::CompressionCodec::Gzip,
+            None
+        ));
+        assert!(!compression_checksum(
+            compress::CompressionCodec::Brotli,
+            None
+        ));
+        assert!(compression_checksum(compress::CompressionCodec::Zstd, None));
+        assert!(!compression_checksum(
+            compress::CompressionCodec::Zstd,
+            Some(false)
+        ));
     }
 
     #[test]

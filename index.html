@@ -203,6 +203,77 @@
             margin-top: .45rem;
         }
         .resource-error { color: var(--warn); }
+        .compression-card { grid-column: 1 / -1; }
+        .compression-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+        .compression-source {
+            color: var(--text-muted);
+            font: .68rem var(--mono);
+            white-space: nowrap;
+        }
+        .compression-form {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1rem;
+            align-items: end;
+        }
+        .compression-field {
+            display: flex;
+            flex-direction: column;
+            gap: .4rem;
+            min-width: 0;
+        }
+        .compression-field label {
+            color: var(--text-muted);
+            font-size: .76rem;
+        }
+        .compression-field select,
+        .compression-field input[type="number"] {
+            width: 100%;
+            min-height: 2.35rem;
+            padding: .5rem .65rem;
+            color: var(--text);
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font: .82rem var(--mono);
+        }
+        .compression-field select:focus,
+        .compression-field input:focus {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+        .compression-check {
+            display: flex;
+            align-items: center;
+            gap: .55rem;
+            min-height: 2.35rem;
+            color: var(--text);
+            font-size: .82rem;
+        }
+        .compression-help,
+        .compression-status {
+            color: var(--text-muted);
+            font-size: .73rem;
+        }
+        .compression-status { min-height: 1.1rem; }
+        .compression-status.success { color: var(--up); }
+        .compression-status.error { color: var(--err); }
+        .compression-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-top: .25rem;
+        }
+        @media (max-width: 640px) {
+            .compression-form { grid-template-columns: 1fr; }
+            .compression-actions { align-items: flex-start; flex-direction: column; }
+        }
         @media (max-width: 640px) {
             .resource-grid { grid-template-columns: 1fr; }
         }
@@ -967,6 +1038,39 @@
             <div class="resource-foot" id="resourceError" role="status"></div>
         </div>
 
+        <!-- Compression settings -->
+        <div class="card compression-card" id="compressionCard">
+            <div class="compression-header">
+                <span class="card-title">Compression</span>
+                <span class="compression-source" id="compressionSource">Loading…</span>
+            </div>
+            <form id="compressionForm" class="compression-form">
+                <div class="compression-field">
+                    <label for="compressionCodec">Codec</label>
+                    <select id="compressionCodec">
+                        <option value="none">None</option>
+                        <option value="zstd">zstd</option>
+                        <option value="gzip">gzip</option>
+                        <option value="brotli">brotli</option>
+                    </select>
+                    <span class="compression-help">Global for all databases.</span>
+                </div>
+                <div class="compression-field">
+                    <label for="compressionLevel">Level</label>
+                    <input id="compressionLevel" type="number" inputmode="numeric">
+                    <span class="compression-help" id="compressionLevelHelp">-</span>
+                </div>
+                <label class="compression-check">
+                    <input id="compressionChecksum" type="checkbox">
+                    Include zstd frame checksum
+                </label>
+                <div class="compression-actions">
+                    <span class="compression-status" id="compressionStatus" role="status"></span>
+                    <button class="btn primary" id="compressionSave" type="submit">Save compression</button>
+                </div>
+            </form>
+        </div>
+
     </div>
 
     <!-- Database-level overview (rendered dynamically) -->
@@ -1042,6 +1146,8 @@
     let telegramUsers = [];
     let manualBackupAvailable = false;
     let latestDatabases = [];
+    let compressionDirty = false;
+    let compressionRanges = {};
 
     // ── Helpers ────────────────────────────────────────────────────
     function formatUptime(seconds) {
@@ -1220,6 +1326,100 @@
         if (timestamp) {
             try { timeEl.textContent = new Date(timestamp).toLocaleString(); }
             catch { timeEl.textContent = timestamp; }
+        }
+    }
+
+    function setCompressionStatus(message, kind = '') {
+        const status = document.getElementById('compressionStatus');
+        status.textContent = message;
+        status.className = `compression-status ${kind}`.trim();
+    }
+
+    function renderCompressionConfig(data) {
+        compressionRanges = data.level_ranges || {};
+        document.getElementById('compressionSource').textContent =
+            `${data.source} · ${data.applies}`;
+        if (compressionDirty) return;
+        const codec = document.getElementById('compressionCodec');
+        const level = document.getElementById('compressionLevel');
+        const checksum = document.getElementById('compressionChecksum');
+        codec.value = data.codec;
+        level.value = data.level ?? '';
+        checksum.checked = data.checksum === true;
+        updateCompressionFields();
+    }
+
+    function updateCompressionFields() {
+        const codec = document.getElementById('compressionCodec').value;
+        const level = document.getElementById('compressionLevel');
+        const checksum = document.getElementById('compressionChecksum');
+        const range = compressionRanges[codec];
+        const enabled = codec !== 'none';
+        level.disabled = !enabled;
+        checksum.disabled = codec !== 'zstd';
+        if (range) {
+            level.min = range.min;
+            level.max = range.max;
+            document.getElementById('compressionLevelHelp').textContent =
+                `Valid values: ${range.min} through ${range.max}`;
+        } else {
+            level.removeAttribute('min');
+            level.removeAttribute('max');
+            document.getElementById('compressionLevelHelp').textContent =
+                'Disabled when compression is off';
+        }
+        if (!enabled) {
+            level.value = '';
+            checksum.checked = false;
+        } else if (codec !== 'zstd') {
+            checksum.checked = false;
+        }
+    }
+
+    async function loadCompressionConfig() {
+        try {
+            const data = await fetchStatus('/api/compression-config');
+            renderCompressionConfig(data);
+        } catch (error) {
+            setCompressionStatus('Compression settings unavailable.', 'error');
+        }
+    }
+
+    async function saveCompressionConfig(event) {
+        event.preventDefault();
+        const codec = document.getElementById('compressionCodec').value;
+        const levelInput = document.getElementById('compressionLevel');
+        const payload = {
+            codec,
+            level: codec === 'none' ? null : Number(levelInput.value),
+            checksum: codec === 'zstd'
+                ? document.getElementById('compressionChecksum').checked
+                : null,
+        };
+        const button = document.getElementById('compressionSave');
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        setCompressionStatus('Saving…');
+        try {
+            const response = await apiFetch('/api/compression-config', {
+                method: 'PUT',
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                if (response.status === 403) {
+                    throw new Error('Only an administrator can edit compression settings.');
+                }
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+            compressionDirty = false;
+            renderCompressionConfig(data);
+            setCompressionStatus('Saved. Applies to the next backup cycle.', 'success');
+        } catch (error) {
+            setCompressionStatus(error.message || 'Could not save compression settings.', 'error');
+        } finally {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
         }
     }
 
@@ -1515,6 +1715,7 @@
                 <td>${historyValue(record.duration_secs)}s</td>
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
                 <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
+                <td>${escapeHtml(record.compression_type || 'unknown')}${record.compression_level == null ? '' : ` ${record.compression_level}`}</td>
                 <td>${record.chunk_count || 0}</td>
                 <td>${record.upload_retries || 0}</td>
                 <td class="history-error">${escapeHtml(record.error || '-')}</td>
@@ -1532,7 +1733,7 @@
             </div>
             <div class="history-stats">${stats}</div>
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
-                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Compression</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>` : '<div class="history-muted">No backup history yet.</div>'}
             <div class="history-controls">
@@ -1969,6 +2170,7 @@
                 // Re-read the config each poll: the schedule is static, but the
                 // phase and countdown are not.
                 loadConfig(),
+                loadCompressionConfig(),
                 fetchStatus('/api/status/service').then(data => {
                     applyState(document.getElementById('tgCard'), document.getElementById('tgDot'), data.state);
                     setStatus(document.getElementById('tgMsg'), document.getElementById('tgTime'), data.state, data.message, data.timestamp);
@@ -2015,6 +2217,17 @@
     // ── Init ───────────────────────────────────────────────────────
     async function init() {
         setupManualBackupModal();
+        document.getElementById('compressionForm').addEventListener('submit', saveCompressionConfig);
+        document.getElementById('compressionCodec').addEventListener('change', () => {
+            compressionDirty = true;
+            updateCompressionFields();
+        });
+        document.getElementById('compressionLevel').addEventListener('input', () => {
+            compressionDirty = true;
+        });
+        document.getElementById('compressionChecksum').addEventListener('change', () => {
+            compressionDirty = true;
+        });
         // refreshDashboard() loads the config too, so one call covers both.
         await refreshDashboard();
         setInterval(() => refreshDashboard(), 2000);

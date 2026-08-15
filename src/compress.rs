@@ -52,7 +52,7 @@ impl CompressionCodec {
 
     pub fn validate_level(self, level: i32) -> Result<()> {
         let valid = match self {
-            Self::Zstd => (-131_072..=22).contains(&level),
+            Self::Zstd => (1..=22).contains(&level),
             Self::Gzip => (0..=9).contains(&level),
             Self::Brotli => (0..=11).contains(&level),
         };
@@ -60,7 +60,7 @@ impl CompressionCodec {
             bail!(
                 "COMPRESSION_LEVEL must be {} for {}, got {level}",
                 match self {
-                    Self::Zstd => "between -131072 and 22",
+                    Self::Zstd => "between 1 and 22",
                     Self::Gzip => "between 0 and 9",
                     Self::Brotli => "between 0 and 11",
                 },
@@ -177,5 +177,13 @@ mod tests {
         round_trip(CompressionCodec::Gzip, 6, false)?;
         round_trip(CompressionCodec::Brotli, 5, false)?;
         Ok(())
+    }
+
+    #[test]
+    fn zstd_levels_start_at_one() {
+        assert!(CompressionCodec::Zstd.validate_level(1).is_ok());
+        assert!(CompressionCodec::Zstd.validate_level(22).is_ok());
+        assert!(CompressionCodec::Zstd.validate_level(0).is_err());
+        assert!(CompressionCodec::Zstd.validate_level(-1).is_err());
     }
 }

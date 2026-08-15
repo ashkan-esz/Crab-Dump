@@ -176,7 +176,7 @@ directory yourself).
 | `DASHBOARD_VIEWER_USERNAME/PASSWORD` | no | | optional read-only status account |
 | `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
 | `COMPRESSION_CODEC`  | no       |                | `zstd`, `gzip`, or `brotli`; omit for uncompressed `.dump`; also `compression_codec` in `config.toml` |
-| `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `-131072..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
+| `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `1..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
 | `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; rejected without a codec and for gzip/brotli |
 | `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
