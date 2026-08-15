@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 use crate::resource_usage::ResourceCollector;
-use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager};
+use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore};
 
@@ -1554,12 +1554,81 @@ async fn api_routing_profiles(store: web::Data<Arc<ProfileStore>>) -> impl Respo
     HttpResponse::Ok().json(store.list())
 }
 
+async fn api_routing_status(
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+) -> impl Responder {
+    HttpResponse::Ok().json(store.routing_status(route.running_core()))
+}
+
+#[derive(Deserialize)]
+struct RoutingCoreInput {
+    core: String,
+}
+
+async fn select_routing_core(
+    req: HttpRequest,
+    store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
+    payload: web::Json<RoutingCoreInput>,
+) -> impl Responder {
+    let core = match RoutingBackend::parse(&payload.core) {
+        Ok(core) => core,
+        Err(_) => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "core must be sing-box or shoes"}));
+        }
+    };
+    if store.active_id().is_some() || route.running_core().is_some() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Disable routing before changing the selected core."
+        }));
+    }
+    match store.set_selected_core(core) {
+        Ok(()) => {
+            audit_action(&req, "routing_core_select", core.as_str(), "ok");
+            HttpResponse::Ok().json(store.routing_status(route.running_core()))
+        }
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "profile storage unavailable"})),
+    }
+}
+
+fn probe_compatible_cores(route: &RouteManager, url: &str) -> Option<Vec<RoutingBackend>> {
+    let mut compatible = Vec::new();
+    for core in RoutingBackend::ALL {
+        if route.start_temporary(url, core).is_ok() {
+            compatible.push(core);
+        }
+    }
+    if compatible.is_empty() {
+        None
+    } else {
+        Some(compatible)
+    }
+}
+
 async fn create_routing_profile(
     req: HttpRequest,
     store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
     payload: web::Json<ProfileInput>,
 ) -> impl Responder {
-    match store.create(payload.into_inner()) {
+    let input = payload.into_inner();
+    let route_for_probe = route.get_ref().clone();
+    let url = input.url.clone();
+    let compatible =
+        match tokio::task::spawn_blocking(move || probe_compatible_cores(&route_for_probe, &url))
+            .await
+        {
+            Ok(Some(cores)) => cores,
+            _ => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "The profile is incompatible with every routing core."
+                }));
+            }
+        };
+    match store.create_with_compatibility(input, compatible) {
         Ok(summary) => {
             audit_action(&req, "routing_profile_create", &summary.id, "ok");
             HttpResponse::Created().json(summary)
@@ -1574,9 +1643,25 @@ async fn update_routing_profile(
     req: HttpRequest,
     path: web::Path<String>,
     store: web::Data<Arc<ProfileStore>>,
+    route: web::Data<Arc<RouteManager>>,
     payload: web::Json<ProfileInput>,
 ) -> impl Responder {
-    match store.update(&path.into_inner(), payload.into_inner()) {
+    let id = path.into_inner();
+    let input = payload.into_inner();
+    let route_for_probe = route.get_ref().clone();
+    let url = input.url.clone();
+    let compatible =
+        match tokio::task::spawn_blocking(move || probe_compatible_cores(&route_for_probe, &url))
+            .await
+        {
+            Ok(Some(cores)) => cores,
+            _ => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "The profile is incompatible with every routing core."
+                }));
+            }
+        };
+    match store.update_with_compatibility(&id, input, compatible) {
         Ok(Some(summary)) => {
             audit_action(&req, "routing_profile_update", &summary.id, "ok");
             HttpResponse::Ok().json(summary)
@@ -1674,7 +1759,7 @@ fn check_all_profiles(
             continue;
         };
 
-        match route.start_temporary(&url) {
+        match route.start_temporary(&url, store.selected_core()) {
             Ok((parsed, temporary)) => {
                 result.transport = Some(parsed.transport);
                 result.tls = Some(parsed.tls);
@@ -1756,12 +1841,24 @@ async fn apply_routing_profile(
     let Some(url) = store.get_url(&id) else {
         return HttpResponse::NotFound().json(serde_json::json!({"error": "profile not found"}));
     };
+    let selected_core = store.selected_core();
+    if !store
+        .compatible_cores(&id)
+        .is_some_and(|cores| cores.contains(&selected_core))
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "This profile is not compatible with the selected {} core.",
+                selected_core.as_str()
+            )
+        }));
+    }
     if route.test(&url).is_err() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "The routing profile is invalid and could not be applied."
         }));
     }
-    let proxy = match route.apply(&url) {
+    let proxy = match route.apply(&url, selected_core) {
         Ok(proxy) => proxy,
         Err(error) => {
             let message = if error.chain().any(|cause| {
@@ -2014,6 +2111,8 @@ pub async fn start_server(
                 web::delete().to(delete_telegram_user),
             )
             .route("/api/routing/profiles", web::get().to(api_routing_profiles))
+            .route("/api/routing/status", web::get().to(api_routing_status))
+            .route("/api/routing/core", web::post().to(select_routing_core))
             .route(
                 "/api/routing/profiles",
                 web::post().to(create_routing_profile),

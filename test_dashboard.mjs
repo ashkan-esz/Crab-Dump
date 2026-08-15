@@ -245,4 +245,8 @@ assert.match(routingHtml, /role="status"/);
 assert.match(routingHtml, /setProfilesBusy/);
 assert.match(routingHtml, /setMessage\(e\.message,'error'\)/);
 assert.match(routingHtml, /finally\{setProfilesBusy\(false\)\}/);
+assert.match(routingHtml, /api\/routing\/status/);
+assert.match(routingHtml, /api\/routing\/core/);
+assert.match(routingHtml, /compatible_cores/);
+assert.match(routingHtml, /coreSelect/);
 console.log('Routing disable workspace contract OK');

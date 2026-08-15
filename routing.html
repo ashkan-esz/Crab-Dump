@@ -15,6 +15,13 @@ ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between
 <p><a href="/" style="color:#93c5fd">← dashboard</a></p>
 <h1>Routing profiles</h1>
 <p class="muted">Credentials are never returned by the API. Mutations require administrator access.</p>
+<section id="routingStatus" class="status muted" aria-live="polite">Loading routing state…</section>
+<label>Selected routing core
+<select id="coreSelect" onchange="selectCore(this.value)">
+<option value="sing-box">sing-box</option>
+<option value="shoes">shoes</option>
+</select>
+</label>
 <form id="profileForm">
 <label>Name<input id="profileName" required maxlength="100"></label>
 <label>Share URL<input id="profileUrl" type="password" required autocomplete="off" placeholder="vmess://, vless://, ss://, or trojan://…"></label>
@@ -30,8 +37,9 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(opt.method)h['x-csrf-token']=csrf()||'';const r=await fetch(path,{...opt,headers:h});if(!r.ok)throw Error((await r.json().catch(()=>({}))).error||`HTTP ${r.status}`);return r.status===204?null:r.json()}
 function setMessage(text,tone=''){message.textContent=text;message.className=`status ${tone}`.trim()}
 function setProfilesBusy(busy){document.querySelectorAll('#profiles button').forEach(button=>{button.disabled=busy})}
-let checkResults={};
-async function refresh(){const ps=await api('/api/routing/profiles');profiles.innerHTML=ps.map(p=>{const r=checkResults[p.id];const status=r?`<span class="${r.ok?'active':'muted'}"> · ${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';return `<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="${p.active?'active':'muted'}">${p.active?'ACTIVE':''}</span>${status}</span><span><button onclick="testP('${p.id}')">Test</button><button onclick="applyP('${p.id}')">Apply</button>${p.active?'<button onclick="disableRouting()">Disable</button>':''}<button onclick="deleteP('${p.id}')">Delete</button></span></li>`}).join('')||'<li class="muted">No profiles saved.</li>'}
+let checkResults={};let routingState=null;
+async function refresh(){const [ps,s]=await Promise.all([api('/api/routing/profiles'),api('/api/routing/status')]);routingState=s;coreSelect.value=s.selected_core;const routeActive=Boolean(s.active_profile||s.running_core);coreSelect.disabled=routeActive;routingStatus.textContent=`Selected core: ${s.selected_core} · Running core: ${s.running_core||'none'} · Active profile: ${s.active_profile||'none'}${routeActive?' · Disable routing to change core.':''}`;profiles.innerHTML=ps.map(p=>{const r=checkResults[p.id];const compatible=p.compatible_cores||[];const canApply=compatible.includes(s.selected_core);const status=r?`<span class="${r.ok?'active':'muted'}"> · ${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';return `<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="muted">[${compatible.join(', ')}]</span> <span class="${p.active?'active':'muted'}">${p.active?'ACTIVE':''}</span>${status}${canApply?'':`<span class="muted"> · incompatible with ${esc(s.selected_core)}</span>`}</span><span><button onclick="testP('${p.id}')">Test</button><button onclick="applyP('${p.id}')" ${canApply?'':'disabled'}>Apply</button>${p.active?'<button onclick="disableRouting()">Disable</button>':''}<button onclick="deleteP('${p.id}')">Delete</button></span></li>`}).join('')||'<li class="muted">No profiles saved.</li>'}
+async function selectCore(core){try{await api('/api/routing/core',{method:'POST',body:JSON.stringify({core})});setMessage(`Selected ${core}`,'success');await refresh()}catch(e){setMessage(e.message,'error');await refresh()}}
 async function testP(id){try{const r=await api(`/api/routing/profiles/${id}/test`,{method:'POST'});setMessage(`Valid ${r.kind} profile (${r.transport||'tcp'})`,'success')}catch(e){setMessage(e.message,'error')}}
 async function checkAllProfiles(){const button=document.getElementById('checkAll');button.disabled=true;checkSummary.textContent='Checking…';try{const r=await api('/api/routing/profiles/check-all',{method:'POST'});checkResults=Object.fromEntries(r.results.map(x=>[x.id,x]));checkSummary.textContent=`${r.passed}/${r.checked} passed`;message.textContent=r.valid?'All configurations passed':'Some configurations failed';await refresh()}catch(e){checkSummary.textContent=e.message}finally{button.disabled=false}}
 async function applyP(id){setProfilesBusy(true);try{await api(`/api/routing/profiles/${id}/apply`,{method:'POST'});setMessage('Profile applied','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}

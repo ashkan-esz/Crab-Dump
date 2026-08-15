@@ -12,7 +12,6 @@ services:
       DASHBOARD_HOST: "0.0.0.0"
       SING_BOX_PATH: /usr/local/bin/sing-box
       SHOES_PATH: /usr/local/bin/shoes
-      ROUTING_CORE: shoes
       HISTORY_DIR: /app/history
       WORK_DIR: /app/work
       MAX_PARALLEL_DATABASES: "1"

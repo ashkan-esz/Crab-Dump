@@ -73,11 +73,13 @@ avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
 
 ### 3a. Dashboard-managed routing profiles
 
-Docker releases bundle a pinned `sing-box` executable. Local Cargo builds need
+Docker releases bundle pinned `sing-box` and `shoes` executables. Local Cargo builds need
 the supported `sing-box` executable installed separately, or can set
 `SING_BOX_PATH` to its path. Log in as the dashboard administrator and use the
 the routing section to create, test, select, and explicitly apply VMess,
-VLESS, Shadowsocks SIP002, or Trojan share URLs. Operators and viewers can
+VLESS, Shadowsocks SIP002, or Trojan share URLs. The dashboard persists the
+selected core and records which cores each profile supports; core changes
+require routing to be disabled. Operators and viewers can
 neither modify profiles nor see their URLs or credentials.
 
 Profiles and the active selection are stored in `./data/routing_profiles.json`.

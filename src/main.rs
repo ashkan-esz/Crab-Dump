@@ -37,9 +37,7 @@ use chunk::ChunkWriter;
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
 use history::{HistoryRecord, HistoryStore};
-use routing::{
-    ProfileStore, RouteManager, RoutingBackend, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH,
-};
+use routing::{ProfileStore, RouteManager, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH};
 
 type ClientHandle = Arc<RwLock<Arc<Client>>>;
 
@@ -101,24 +99,12 @@ fn main() -> Result<()> {
     );
     let routing_profiles =
         Arc::new(ProfileStore::load(&data_dir).context("loading routing profiles")?);
-    let routing_backend = RoutingBackend::parse(
-        &std::env::var("ROUTING_CORE").unwrap_or_else(|_| "sing-box".to_string()),
-    )?;
-    let (routing_path, routing_dir) = match routing_backend {
-        RoutingBackend::SingBox => (
-            std::env::var("SING_BOX_PATH").unwrap_or_else(|_| DEFAULT_SING_BOX_PATH.to_string()),
-            "sing-box",
-        ),
-        RoutingBackend::Shoes => (
-            std::env::var("SHOES_PATH").unwrap_or_else(|_| DEFAULT_SHOES_PATH.to_string()),
-            "shoes",
-        ),
-    };
-    let route_manager = Arc::new(RouteManager::with_backend(
-        shared_cfg.work_dir.join(routing_dir),
-        routing_path,
-        routing_backend,
+    let route_manager = Arc::new(RouteManager::with_paths(
+        shared_cfg.work_dir.join("routing"),
+        std::env::var("SING_BOX_PATH").unwrap_or_else(|_| DEFAULT_SING_BOX_PATH.to_string()),
+        std::env::var("SHOES_PATH").unwrap_or_else(|_| DEFAULT_SHOES_PATH.to_string()),
     ));
+    let routing_backend = routing_profiles.selected_core();
     if let Some(active_url) = routing_profiles.active_url() {
         if shared_cfg.socks_proxy.is_some() {
             anyhow::bail!(
@@ -127,7 +113,7 @@ fn main() -> Result<()> {
         }
         if !cli.dry_run {
             route_manager
-                .apply(&active_url)
+                .apply(&active_url, routing_backend)
                 .context("starting active dashboard routing profile")?;
         }
     }

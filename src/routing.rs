@@ -20,8 +20,10 @@ const SING_BOX_CONFIG_FILE: &str = "sing-box.json";
 const SHOES_CONFIG_FILE: &str = "shoes.yaml";
 const PROFILES_FILE: &str = "routing_profiles.json";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RoutingBackend {
+    #[default]
     SingBox,
     Shoes,
 }
@@ -31,8 +33,14 @@ impl RoutingBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "sing-box" | "sing_box" | "singbox" => Ok(Self::SingBox),
             "shoes" => Ok(Self::Shoes),
-            _ => anyhow::bail!("ROUTING_CORE must be `sing-box` or `shoes`"),
+            _ => anyhow::bail!("routing core must be `sing-box` or `shoes`"),
         }
+    }
+
+    pub const ALL: [Self; 2] = [Self::SingBox, Self::Shoes];
+
+    pub fn as_str(self) -> &'static str {
+        self.label()
     }
 
     fn config_file(self) -> &'static str {
@@ -65,12 +73,16 @@ struct StoredProfile {
     name: String,
     url: String,
     kind: ProfileKind,
+    #[serde(default)]
+    compatible_cores: Vec<RoutingBackend>,
     created_at: u64,
     updated_at: u64,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct ProfileFile {
+    #[serde(default)]
+    selected_core: RoutingBackend,
     profiles: Vec<StoredProfile>,
     active_id: Option<String>,
 }
@@ -80,7 +92,16 @@ pub struct ProfileSummary {
     pub id: String,
     pub name: String,
     pub kind: ProfileKind,
+    pub compatible_cores: Vec<RoutingBackend>,
     pub active: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RoutingStatus {
+    pub selected_core: RoutingBackend,
+    pub running_core: Option<RoutingBackend>,
+    pub active_profile: Option<String>,
+    pub available_cores: Vec<RoutingBackend>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -151,7 +172,17 @@ impl ProfileStore {
     pub fn load(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let path = data_dir.into().join(PROFILES_FILE);
         let state = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).context("reading routing profiles")?,
+            Ok(contents) => {
+                let mut state: ProfileFile =
+                    serde_json::from_str(&contents).context("reading routing profiles")?;
+                for profile in &mut state.profiles {
+                    if profile.compatible_cores.is_empty() {
+                        profile.compatible_cores = derive_compatible_cores(&profile.url)
+                            .unwrap_or_else(|_| vec![RoutingBackend::SingBox]);
+                    }
+                }
+                state
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProfileFile::default(),
             Err(error) => return Err(error).context("opening routing profiles"),
         };
@@ -170,6 +201,7 @@ impl ProfileStore {
                 id: profile.id.clone(),
                 name: profile.name.clone(),
                 kind: profile.kind,
+                compatible_cores: profile.compatible_cores.clone(),
                 active: state.active_id.as_deref() == Some(profile.id.as_str()),
             })
             .collect()
@@ -195,7 +227,20 @@ impl ProfileStore {
             .map(|profile| profile.url.clone())
     }
 
+    #[cfg(test)]
     pub fn create(&self, input: ProfileInput) -> Result<ProfileSummary> {
+        let compatible = derive_compatible_cores(&input.url)?;
+        self.create_with_compatibility(input, compatible)
+    }
+
+    pub fn create_with_compatibility(
+        &self,
+        input: ProfileInput,
+        compatible_cores: Vec<RoutingBackend>,
+    ) -> Result<ProfileSummary> {
+        if compatible_cores.is_empty() {
+            anyhow::bail!("routing profile is incompatible with every routing core");
+        }
         let parsed = parse_share_url(&input.url)?;
         let name = clean_name(&input.name)?;
         let mut state = self.state.lock().expect("profile store lock poisoned");
@@ -207,6 +252,7 @@ impl ProfileStore {
             name,
             url: input.url,
             kind: parsed.kind,
+            compatible_cores: compatible_cores.clone(),
             created_at: now,
             updated_at: now,
         });
@@ -223,11 +269,20 @@ impl ProfileStore {
                 .name
                 .clone(),
             kind: parsed.kind,
+            compatible_cores,
             active: false,
         })
     }
 
-    pub fn update(&self, id: &str, input: ProfileInput) -> Result<Option<ProfileSummary>> {
+    pub fn update_with_compatibility(
+        &self,
+        id: &str,
+        input: ProfileInput,
+        compatible_cores: Vec<RoutingBackend>,
+    ) -> Result<Option<ProfileSummary>> {
+        if compatible_cores.is_empty() {
+            anyhow::bail!("routing profile is incompatible with every routing core");
+        }
         let parsed = parse_share_url(&input.url)?;
         let name = clean_name(&input.name)?;
         let mut state = self.state.lock().expect("profile store lock poisoned");
@@ -238,11 +293,13 @@ impl ProfileStore {
         profile.name = name;
         profile.url = input.url;
         profile.kind = parsed.kind;
+        profile.compatible_cores = compatible_cores;
         profile.updated_at = epoch();
         let summary = ProfileSummary {
             id: profile.id.clone(),
             name: profile.name.clone(),
             kind: profile.kind,
+            compatible_cores: profile.compatible_cores.clone(),
             active: state.active_id.as_deref() == Some(id),
         };
         if let Err(error) = self.persist(&state) {
@@ -306,6 +363,47 @@ impl ProfileStore {
             .clone()
     }
 
+    pub fn selected_core(&self) -> RoutingBackend {
+        self.state
+            .lock()
+            .expect("profile store lock poisoned")
+            .selected_core
+    }
+
+    pub fn set_selected_core(&self, core: RoutingBackend) -> Result<()> {
+        let mut state = self.state.lock().expect("profile store lock poisoned");
+        if state.selected_core == core {
+            return Ok(());
+        }
+        let previous = state.clone();
+        state.selected_core = core;
+        if let Err(error) = self.persist(&state) {
+            *state = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn routing_status(&self, running_core: Option<RoutingBackend>) -> RoutingStatus {
+        let state = self.state.lock().expect("profile store lock poisoned");
+        RoutingStatus {
+            selected_core: state.selected_core,
+            running_core,
+            active_profile: state.active_id.clone(),
+            available_cores: RoutingBackend::ALL.to_vec(),
+        }
+    }
+
+    pub fn compatible_cores(&self, id: &str) -> Option<Vec<RoutingBackend>> {
+        self.state
+            .lock()
+            .expect("profile store lock poisoned")
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.compatible_cores.clone())
+    }
+
     fn persist(&self, state: &ProfileFile) -> Result<()> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).context("creating profile data directory")?;
@@ -329,6 +427,7 @@ impl ProfileStore {
 
 #[derive(Debug)]
 struct ActiveCore {
+    backend: RoutingBackend,
     child: Child,
     config_path: PathBuf,
     proxy: String,
@@ -336,8 +435,8 @@ struct ActiveCore {
 
 #[derive(Debug)]
 pub struct RouteManager {
-    backend: RoutingBackend,
-    executable_path: PathBuf,
+    sing_box_path: PathBuf,
+    shoes_path: PathBuf,
     work_dir: PathBuf,
     active: Mutex<Option<ActiveCore>>,
     pending_previous: Mutex<Option<ActiveCore>>,
@@ -363,18 +462,46 @@ impl Drop for TemporaryRoute {
 }
 
 impl RouteManager {
+    pub fn with_paths(
+        work_dir: impl Into<PathBuf>,
+        sing_box_path: impl Into<PathBuf>,
+        shoes_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            sing_box_path: sing_box_path.into(),
+            shoes_path: shoes_path.into(),
+            work_dir: work_dir.into(),
+            active: Mutex::new(None),
+            pending_previous: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
     pub fn with_backend(
         work_dir: impl Into<PathBuf>,
         executable_path: impl Into<PathBuf>,
         backend: RoutingBackend,
     ) -> Self {
-        Self {
-            backend,
-            executable_path: executable_path.into(),
-            work_dir: work_dir.into(),
-            active: Mutex::new(None),
-            pending_previous: Mutex::new(None),
+        let path = executable_path.into();
+        match backend {
+            RoutingBackend::SingBox => Self::with_paths(work_dir, path, DEFAULT_SHOES_PATH),
+            RoutingBackend::Shoes => Self::with_paths(work_dir, DEFAULT_SING_BOX_PATH, path),
         }
+    }
+
+    fn executable_path(&self, backend: RoutingBackend) -> &Path {
+        match backend {
+            RoutingBackend::SingBox => &self.sing_box_path,
+            RoutingBackend::Shoes => &self.shoes_path,
+        }
+    }
+
+    pub fn running_core(&self) -> Option<RoutingBackend> {
+        self.active
+            .lock()
+            .expect("route manager lock poisoned")
+            .as_ref()
+            .map(|core| core.backend)
     }
 
     pub fn active_proxy(&self) -> Option<String> {
@@ -416,28 +543,32 @@ impl RouteManager {
     ///
     /// This deliberately does not touch `active` or `pending_previous`, so a
     /// check can never replace, stop, or otherwise mutate the active route.
-    pub fn start_temporary(&self, url: &str) -> Result<(ParsedProfile, TemporaryRoute)> {
+    pub fn start_temporary(
+        &self,
+        url: &str,
+        backend: RoutingBackend,
+    ) -> Result<(ParsedProfile, TemporaryRoute)> {
         let profile = parse_share_url(url)?;
         let port = free_port()?;
-        let config = generate_backend_config(self.backend, &profile, port)?;
+        let config = generate_backend_config(backend, &profile, port)?;
         fs::create_dir_all(&self.work_dir)
-            .with_context(|| format!("creating {} work directory", self.backend.label()))?;
+            .with_context(|| format!("creating {} work directory", backend.label()))?;
         let config_path = self.work_dir.join(format!(
             "routing-check-{}-{port}.{}",
             std::process::id(),
-            if self.backend == RoutingBackend::SingBox {
+            if backend == RoutingBackend::SingBox {
                 "json"
             } else {
                 "yaml"
             }
         ));
-        if let Err(error) = write_backend_config(self.backend, &config_path, &config) {
+        if let Err(error) = write_backend_config(backend, &config_path, &config) {
             let _ = fs::remove_file(&config_path);
             return Err(error);
         }
 
-        let mut command = Command::new(&self.executable_path);
-        if self.backend == RoutingBackend::SingBox {
+        let mut command = Command::new(self.executable_path(backend));
+        if backend == RoutingBackend::SingBox {
             command.args(["run", "-c"]);
         } else {
             command.arg("--no-reload");
@@ -468,6 +599,7 @@ impl RouteManager {
             profile,
             TemporaryRoute {
                 core: Some(ActiveCore {
+                    backend,
                     child,
                     config_path,
                     proxy: format!("socks5h://127.0.0.1:{port}"),
@@ -477,17 +609,15 @@ impl RouteManager {
         ))
     }
 
-    pub fn apply(&self, url: &str) -> Result<String> {
+    pub fn apply(&self, url: &str, backend: RoutingBackend) -> Result<String> {
         let profile = parse_share_url(url)?;
         let port = free_port()?;
-        let config = generate_backend_config(self.backend, &profile, port)?;
+        let config = generate_backend_config(backend, &profile, port)?;
         fs::create_dir_all(&self.work_dir)
-            .with_context(|| format!("creating {} work directory", self.backend.label()))?;
-        let config_path = self.work_dir.join(self.backend.config_file());
-        let tmp_path = self
-            .work_dir
-            .join(format!("{}.tmp", self.backend.config_file()));
-        if let Err(error) = write_backend_config(self.backend, &tmp_path, &config) {
+            .with_context(|| format!("creating {} work directory", backend.label()))?;
+        let config_path = self.work_dir.join(backend.config_file());
+        let tmp_path = self.work_dir.join(format!("{}.tmp", backend.config_file()));
+        if let Err(error) = write_backend_config(backend, &tmp_path, &config) {
             let _ = fs::remove_file(&tmp_path);
             return Err(error);
         }
@@ -500,8 +630,8 @@ impl RouteManager {
             return Err(error);
         }
 
-        let mut command = Command::new(&self.executable_path);
-        if self.backend == RoutingBackend::SingBox {
+        let mut command = Command::new(self.executable_path(backend));
+        if backend == RoutingBackend::SingBox {
             command.args(["run", "-c"]);
         } else {
             command.arg("--no-reload");
@@ -537,13 +667,14 @@ impl RouteManager {
             let _ = fs::remove_file(&config_path);
             anyhow::bail!(
                 "{} did not open its local listener: {diagnostic}",
-                self.backend.label()
+                backend.label()
             );
         }
 
         let proxy = format!("socks5h://127.0.0.1:{port}");
         let mut active = self.active.lock().expect("route manager lock poisoned");
         let previous = active.replace(ActiveCore {
+            backend,
             child,
             config_path,
             proxy: proxy.clone(),
@@ -611,6 +742,14 @@ fn generate_backend_config(
         RoutingBackend::SingBox => generate_config(profile, port),
         RoutingBackend::Shoes => generate_shoes_config(profile, port),
     }
+}
+
+fn derive_compatible_cores(url: &str) -> Result<Vec<RoutingBackend>> {
+    let profile = parse_share_url(url)?;
+    Ok(RoutingBackend::ALL
+        .into_iter()
+        .filter(|backend| generate_backend_config(*backend, &profile, 1).is_ok())
+        .collect())
 }
 
 fn write_backend_config(
@@ -1424,6 +1563,57 @@ mod tests {
         let raw = fs::read_to_string(root.join(PROFILES_FILE)).unwrap();
         assert!(raw.contains("11111111"));
         assert!(!root.join("routing_profiles.json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selected_core_defaults_and_persists() {
+        let root = std::env::temp_dir().join(format!("crab-routing-core-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        let store = ProfileStore::load(&root).unwrap();
+        assert_eq!(store.selected_core(), RoutingBackend::SingBox);
+        store.set_selected_core(RoutingBackend::Shoes).unwrap();
+        assert_eq!(
+            ProfileStore::load(&root).unwrap().selected_core(),
+            RoutingBackend::Shoes
+        );
+        let raw = fs::read_to_string(root.join(PROFILES_FILE)).unwrap();
+        assert!(raw.contains("\"selected_core\": \"shoes\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compatibility_matrix_rejects_shoes_only_transports() {
+        let tcp =
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=tls";
+        let grpc =
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=grpc&security=tls";
+        assert_eq!(
+            derive_compatible_cores(tcp).unwrap(),
+            vec![RoutingBackend::SingBox, RoutingBackend::Shoes]
+        );
+        assert_eq!(
+            derive_compatible_cores(grpc).unwrap(),
+            vec![RoutingBackend::SingBox]
+        );
+    }
+
+    #[test]
+    fn legacy_profiles_derive_compatibility_and_default_core() {
+        let root = std::env::temp_dir().join(format!("crab-routing-legacy-{}", epoch()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(PROFILES_FILE),
+            r#"{"profiles":[{"id":"1","name":"grpc","url":"vless://11111111-1111-1111-1111-111111111111@example.com:443?type=grpc&security=tls","kind":"vless","created_at":1,"updated_at":1}],"active_id":null}"#,
+        )
+        .unwrap();
+        let store = ProfileStore::load(&root).unwrap();
+        assert_eq!(store.selected_core(), RoutingBackend::SingBox);
+        assert_eq!(
+            store.list()[0].compatible_cores,
+            vec![RoutingBackend::SingBox]
+        );
         let _ = fs::remove_dir_all(root);
     }
 

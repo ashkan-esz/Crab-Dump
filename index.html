@@ -904,6 +904,7 @@
         <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">-</strong></span>
         <span class="info-chip"><span class="icon">&#x1f5d3;</span> Backup: <strong id="infoBackupSchedule">-</strong></span>
         <span class="info-chip"><span class="icon">&#x1f4c5;</span> History upload: <strong id="infoHistorySchedule">-</strong></span>
+        <span class="info-chip"><span class="icon">&#x1f500;</span> Routing: <strong id="infoRoutingCore">-</strong></span>
         <span class="info-chip" id="infoPhaseChip"><span class="icon">&#x1f504;</span> State: <strong id="infoPhase">-</strong></span>
     </div>
 
@@ -1978,6 +1979,11 @@
                     setStatus(document.getElementById('dumpMsg'), document.getElementById('dumpTime'), data.state, data.message, data.timestamp);
                 }),
                 fetchStatus('/api/status/resources').then(renderResources),
+                fetchStatus('/api/routing/status').then(data => {
+                    const running = data.running_core ? `running ${data.running_core}` : 'disabled';
+                    document.getElementById('infoRoutingCore').textContent =
+                        `${data.selected_core} · ${running}`;
+                }),
                 fetchStatus('/api/status/databases').then(data => {
                     latestDatabases = data;
                     renderDatabases(data);
