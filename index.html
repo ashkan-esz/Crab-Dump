@@ -2285,21 +2285,34 @@
     let loginPromise = null;
     let loginFailed = false;
     let sessionEstablished = false;
+    function requestCredentials() {
+        return new Promise(resolve => {
+            const dialog = document.createElement('dialog');
+            dialog.innerHTML = '<form method="dialog"><h2>Dashboard sign in</h2><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><menu><button type="button" data-cancel>Cancel</button><button type="submit">Sign in</button></menu></form>';
+            const form = dialog.querySelector('form');
+            const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
+            dialog.querySelector('[data-cancel]').onclick = () => finish(null);
+            dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
+            form.onsubmit = event => { event.preventDefault(); finish({ username: form.elements.username.value, password: form.elements.password.value }); };
+            document.body.append(dialog);
+            dialog.showModal();
+            form.elements.username.focus();
+        });
+    }
     async function ensureSession() {
         if (sessionEstablished) return true;
         if (loginFailed) return false;
         if (loginPromise) return loginPromise;
         loginPromise = (async () => {
-            const username = window.prompt('Dashboard username');
-            const password = username === null ? null : window.prompt('Dashboard password');
-            if (username === null || password === null) {
+            const credentials = await requestCredentials();
+            if (!credentials) {
                 loginFailed = true;
                 return false;
             }
             const login = await fetch('/api/auth/login', {
                 method: 'POST', credentials: 'same-origin',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, password}),
+                body: JSON.stringify(credentials),
             });
             loginFailed = !login.ok;
             sessionEstablished = login.ok;
