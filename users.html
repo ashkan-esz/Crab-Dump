@@ -48,6 +48,8 @@
     a { color: var(--accent); }
     code, .mono { font-family: var(--mono); }
     .page { width: min(1180px, 100%); margin: 0 auto; padding: 28px 24px 48px; }
+    .skip-link { position: fixed; top: .75rem; left: .75rem; z-index: var(--z-toast); padding: .55rem .75rem; color: var(--text); background: var(--surface); border: 1px solid var(--accent); border-radius: 7px; transform: translateY(-160%); transition: transform .15s ease; }
+    .skip-link:focus { transform: translateY(0); }
     .page-header {
       display: flex; align-items: flex-start; justify-content: space-between;
       gap: 20px; padding-bottom: 24px; border-bottom: 1px solid var(--border);
@@ -219,8 +221,12 @@
 @media(max-width:700px){.app-nav{overflow-x:auto}.app-nav-links{flex-shrink:0}}
 @media(max-width:900px){.app-role{display:none}}@media(max-width:480px){.app-brand span:last-child,.app-nav-links a span:last-child{display:none}.app-nav-links a{width:34px;justify-content:center}}
 </style>
+<style>
+@media(min-width:901px){.page{width:calc(100% - 216px);margin-left:216px;padding-left:1.5rem;padding-right:1.5rem}}
+</style>
 </head>
 <body>
+  <a class="skip-link" href="#users-main">Skip to main content</a>
   <nav class="app-nav" aria-label="Primary navigation">
     <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
     <div class="app-role" aria-label="Current dashboard role"><span>Current role</span><strong id="sidebarRole">Loading...</strong></div>
@@ -236,7 +242,7 @@
     <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
     <div class="app-nav-footer">Live status</div>
   </nav>
-  <main class="page">
+  <main id="users-main" class="page">
     <header class="page-header">
       <div>
         <p class="eyebrow">Directory</p>
@@ -266,11 +272,14 @@
             <option value="disabled">Disabled</option>
           </select>
         </div>
-        <button class="button primary" id="add-user" type="button">Add user</button>
+        <button class="button primary" id="add-user" type="button" hidden>Add user</button>
         <span class="refreshing" id="refreshing" hidden><span class="spinner" aria-hidden="true"></span>Refreshing</span>
       </div>
       <div class="notice" id="refresh-notice" hidden>
         <span id="refresh-notice-text"></span><button class="button small subtle" id="retry-refresh" type="button">Retry</button>
+      </div>
+      <div class="notice" id="permission-notice" hidden>
+        <span>Viewer access is read-only. Only administrators can add, edit, enable, disable, or delete users.</span>
       </div>
       <div class="table-shell">
         <div class="table-scroll" id="table-scroll" aria-busy="false">
@@ -319,6 +328,7 @@
     <section class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
       <h2 id="delete-title">Delete user?</h2>
       <p id="delete-description"></p>
+      <p class="field-error" id="delete-error" role="alert" hidden></p>
       <div class="dialog-footer">
         <button class="button" id="cancel-delete" type="button">Cancel</button>
         <button class="button danger" id="confirm-delete" type="button">Delete user</button>
@@ -335,6 +345,7 @@
   let deleteTarget = null;
   let lastFocus = null;
   let toastTimer = null;
+  let admin = false;
   const state = { query: '', status: 'all' };
   const $ = id => document.getElementById(id);
 
@@ -392,8 +403,10 @@
         <td class="chat-cell mono">${escapeHtml(user.chat_id)}</td>
         <td class="status-cell"><span class="status ${user.enabled ? 'enabled' : 'disabled'}"><span class="dot" aria-hidden="true"></span>${user.enabled ? 'Enabled' : 'Disabled'}</span></td>
         <td><div class="actions">
+          ${admin ? `
           <span class="desktop-actions"><button class="button small row-toggle" type="button" data-action="toggle" data-chat-id="${escapeHtml(user.chat_id)}">${user.enabled ? 'Disable' : 'Enable'}</button> <button class="button small" type="button" data-action="edit" data-chat-id="${escapeHtml(user.chat_id)}">Edit</button> <button class="button small danger" type="button" data-action="delete" data-chat-id="${escapeHtml(user.chat_id)}">Delete</button></span>
           <details class="overflow-menu"><summary aria-label="More actions for ${escapeHtml(user.name)}">•••</summary><span class="menu"><button type="button" data-action="toggle" data-chat-id="${escapeHtml(user.chat_id)}">${user.enabled ? 'Disable' : 'Enable'}</button><button type="button" data-action="edit" data-chat-id="${escapeHtml(user.chat_id)}">Edit</button><button class="danger" type="button" data-action="delete" data-chat-id="${escapeHtml(user.chat_id)}">Delete</button></span></details>
+          ` : '<span class="muted">Read-only</span>'}
         </div></td>
       </tr>`;
     }).join('');
@@ -470,9 +483,15 @@
   async function loadRole() {
     try {
       const config = await request('/api/config');
+      admin = config.dashboard_role === 'admin';
       $('sidebarRole').textContent = config.dashboard_role || 'viewer';
+      $('add-user').hidden = !admin;
+      $('permission-notice').hidden = admin;
+      renderRows();
     } catch {
       $('sidebarRole').textContent = 'unknown';
+      $('add-user').hidden = true;
+      $('permission-notice').hidden = false;
     }
   }
   async function loadUsers({ initial = false } = {}) {
@@ -525,6 +544,7 @@
   function openDelete(user, opener) {
     deleteTarget = user; lastFocus = opener || document.activeElement;
     setText('delete-description', `Delete ${user.name} (${user.chat_id})? This removes the directory record and cannot be undone.`);
+    setText('delete-error', ''); $('delete-error').hidden = true;
     $('delete-backdrop').classList.add('open'); $('cancel-delete').focus();
   }
   function closeDelete() {
@@ -549,10 +569,10 @@
   }
   async function deleteUser() {
     if (!deleteTarget) return;
-    const target = deleteTarget; $('confirm-delete').disabled = true;
+    const target = deleteTarget; const button = $('confirm-delete'); button.disabled = true; button.textContent = 'Deleting…';
     try { await request(`/api/telegram-users/${encodeURIComponent(target.chat_id)}`, { method: 'DELETE' }); closeDelete(); showToast('User deleted.'); await loadUsers(); }
-    catch (error) { closeDelete(); showToast(error.message, 'error'); }
-    finally { $('confirm-delete').disabled = false; }
+    catch (error) { setText('delete-error', error.message); $('delete-error').hidden = false; showToast(error.message, 'error'); }
+    finally { button.disabled = false; button.textContent = 'Delete user'; }
   }
   function clearFilters() { state.query = ''; state.status = 'all'; $('search').value = ''; $('status-filter').value = 'all'; renderRows(); }
   function closeMenus() { document.querySelectorAll('.overflow-menu[open]').forEach(menu => { menu.open = false; }); }

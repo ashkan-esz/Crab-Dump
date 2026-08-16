@@ -1034,6 +1034,20 @@
             min-width: 0;
             width: 100%;
         }
+        .skip-link {
+            position: fixed;
+            top: .75rem;
+            left: .75rem;
+            z-index: 1000;
+            padding: .55rem .75rem;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            border-radius: 7px;
+            transform: translateY(-160%);
+            transition: transform .15s ease;
+        }
+        .skip-link:focus { transform: translateY(0); }
         .app-nav {
             position: sticky;
             top: 0;
@@ -1121,6 +1135,13 @@
         }
         .header h1 { margin: 0; font-size: 1.25rem; }
         .header h1 .dot { animation: none; }
+        .header .eyebrow {
+            margin-bottom: .35rem;
+            color: var(--accent);
+            font: 700 .62rem var(--mono);
+            letter-spacing: .11em;
+            text-transform: uppercase;
+        }
         .header p { margin-top: .25rem; font-size: .75rem; }
         .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
         .header-actions .users-nav { margin-top: 0; }
@@ -1268,6 +1289,7 @@
     </style>
 </head>
 <body>
+    <a class="skip-link" href="#dashboard-main">Skip to main content</a>
 
     <nav class="app-nav" aria-label="Primary navigation">
         <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
@@ -1288,11 +1310,12 @@
         <div class="app-nav-footer">Live status</div>
     </nav>
 
-    <main class="app-content">
+    <main id="dashboard-main" class="app-content">
 
     <!-- Header -->
     <div class="header">
         <div>
+            <p class="eyebrow">Operations / Overview</p>
             <h1><span class="dot"></span>Backup operations</h1>
             <p>PostgreSQL to Telegram · live pipeline status</p>
         </div>
@@ -1826,6 +1849,7 @@
     const backupErrors = new Map();
     const cancelRequests = new Set();
     let manualBackupDatabase = null;
+    let manualBackupLastFocus = null;
 
     /**
      * Derive display state from the backend's (state, stage) pair.
@@ -2483,6 +2507,7 @@
 
     function openManualBackupModal(name) {
         manualBackupDatabase = name;
+        manualBackupLastFocus = document.activeElement;
         const modal = document.getElementById('manualBackupModal');
         const form = document.getElementById('manualBackupForm');
         const recipient = document.getElementById('manualBackupRecipient');
@@ -2520,6 +2545,10 @@
         modal.hidden = true;
         manualBackupDatabase = null;
         document.body.style.overflow = '';
+        if (manualBackupLastFocus && typeof manualBackupLastFocus.focus === 'function') {
+            manualBackupLastFocus.focus();
+        }
+        manualBackupLastFocus = null;
     }
 
     function setupManualBackupModal() {
@@ -2551,7 +2580,25 @@
             }
         };
         document.addEventListener('keydown', event => {
-            if (event.key === 'Escape' && !modal.hidden && !submit.disabled) closeManualBackupModal();
+            if (modal.hidden) return;
+            if (event.key === 'Escape' && !submit.disabled) {
+                closeManualBackupModal();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusable = [...modal.querySelectorAll(
+                'button, select, input, [href], [tabindex]:not([tabindex="-1"])',
+            )].filter(node => !node.disabled && node.offsetParent !== null);
+            if (!focusable.length) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
         });
     }
 

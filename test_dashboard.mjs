@@ -236,11 +236,17 @@ assert.match(usersHtml, /class="table-scroll"/);
 assert.match(usersHtml, /class="inspector".*role="dialog"/);
 assert.match(usersHtml, /role="alertdialog"/);
 assert.match(usersHtml, /id="cancel-delete"/);
+assert.match(usersHtml, /id="delete-error"/);
+assert.match(usersBody, /Deleting…/);
+assert.match(usersBody, /delete-error'\)\.hidden = false/);
 assert.match(usersHtml, /id="refreshing"/);
 assert.match(usersHtml, /id="refresh-notice"/);
 assert.match(usersHtml, /No matching users/);
 assert.match(usersHtml, /No users yet/);
 assert.match(usersHtml, /Add your first user/);
+assert.match(usersHtml, /Viewer access is read-only/);
+assert.match(usersBody, /admin = config\.dashboard_role === 'admin'/);
+assert.match(usersBody, /Read-only/);
 assert.match(usersHtml, /Users could not be loaded/);
 assert.match(usersBody, /state\.query\.trim\(\)/);
 assert.match(usersBody, /state\.status === 'enabled'/);
@@ -290,6 +296,15 @@ assert.match(routingHtml, /credentials:'same-origin'/);
 assert.match(routingHtml, /createElement\('dialog'\)/);
 assert.match(routingHtml, /name="routing_login_username"/);
 assert.match(routingHtml, /name="routing_login_password"/);
+assert.match(routingHtml, /previous working route/);
+assert.match(routingHtml, /profile-status/);
+assert.match(routingHtml, /routingRetry/);
+assert.match(routingHtml, /Saved profiles are unavailable until routing state loads/);
+assert.match(routingHtml, /profileSubmit/);
+assert.match(routingHtml, /setMessage\('Saving profile…','busy'\)/);
+assert.match(routingHtml, /dashboardRole==='admin'/);
+assert.match(routingHtml, /routingPermission/);
+assert.match(routingHtml, /canOperate=canAdmin\|\|dashboardRole==='operator'/);
 console.log('Routing disable workspace contract OK');
 
 // Shared operations shell contract. Every dashboard surface must expose the
@@ -298,15 +313,16 @@ const pageFiles = ['index.html', 'databases.html', 'routing.html', 'users.html']
 for (const file of pageFiles) {
     const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
     assert.match(source, /<nav class="app-nav" aria-label="Primary navigation">/);
-    if (file !== 'databases.html') {
-        assert.match(source, /id="sidebarRole"/);
-        assert.match(source, /Current role/);
-    } else {
-        assert.doesNotMatch(source, /id="sidebarRole"/);
-    }
+    assert.match(source, /class="skip-link"/);
+    assert.match(source, /Skip to main content/);
+    assert.match(source, /prefers-reduced-motion/);
+    assert.match(source, /id="sidebarRole"/);
+    assert.match(source, /Current role/);
     for (const href of ['/', '/databases', '/routing', '/users']) {
         assert.match(source, new RegExp(`href="${href.replace('/', '\\/')}"`));
     }
+    assert.match(source, /overflow-x:\s*hidden/);
+    assert.match(source, /:focus-visible/);
     const visible = source
         .replace(/<script[\s\S]*?<\/script>/gi, '')
         .replace(/<style[\s\S]*?<\/style>/gi, '');
@@ -318,12 +334,16 @@ assert.match(html, /id="dbSection"/);
 assert.match(html, /class="db-grid"/);
 assert.match(html, /role="table" aria-label="Live database backup status"/);
 assert.match(body, /el\.setAttribute\('role', 'row'\)/);
-assert.match(html, /<main class="app-content">/);
+assert.match(html, /<main id="dashboard-main" class="app-content">/);
 assert.match(html, /id="refreshInterval"/);
 assert.match(body, /crab-dump\.refresh-interval-ms/);
 assert.match(body, /function scheduleRefresh\(\)/);
 assert.match(body, /function setRefreshInterval\(value\)/);
+assert.match(html, /Operations \/ Overview/);
+assert.match(body, /manualBackupLastFocus/);
+assert.match(body, /event\.key !== 'Tab'/);
 assert.match(usersHtml, /role="alertdialog"/);
+assert.match(usersHtml, /@media\(min-width:901px\)\{\.page\{width:calc\(100% - 216px\)/);
 assert.match(body, /config\.dashboard_role/);
 assert.match(databasesHtml, /config\.dashboard_role/);
 assert.match(routingHtml, /loadRole/);
@@ -335,6 +355,11 @@ assert.match(databasesHtml, /clear-database-search/);
 assert.match(databasesHtml, /skeleton-line/);
 assert.match(databasesHtml, /Databases could not be loaded/);
 assert.match(databasesHtml, /retry-database-load/);
+assert.match(databasesHtml, /PostgreSQL credentials are never displayed/);
+assert.match(databasesHtml, /Environment managed/);
+assert.doesNotMatch(databasesHtml, /<td class="muted">\$\{esc\(db\.url\)\}<\/td>/);
+assert.match(databasesHtml, /permission-notice/);
+assert.match(databasesHtml, /id="state" class="muted" role="status" aria-live="polite"/);
 assert.match(databasesHtml, /ensureSession/);
 assert.match(databasesHtml, /api\/auth\/login/);
 assert.match(databasesHtml, /r\.status===401/);
@@ -344,4 +369,9 @@ assert.match(databasesHtml, /credentials:'same-origin'/);
 assert.match(databasesHtml, /createElement\('dialog'\)/);
 assert.match(databasesHtml, /name="username"/);
 assert.match(databasesHtml, /name="password"/);
+assert.match(databasesHtml, /aria-modal="true"/);
+assert.match(databasesHtml, /role="alert"/);
+assert.match(databasesHtml, /save-database/);
+assert.match(databasesHtml, /Saving…/);
+assert.match(databasesHtml, /form\.setAttribute\('aria-busy','true'\)/);
 console.log('shared operations shell and state-region contract OK');

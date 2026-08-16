@@ -8,18 +8,43 @@ body{max-width:none;margin:0;padding:0;font:15px system-ui;background:#080c14;co
 form,li{border:1px solid #334155;border-radius:8px;padding:1rem;margin:1rem 0;background:#111827}
 input{display:block;width:100%;box-sizing:border-box;margin:.35rem 0 .75rem;padding:.6rem;background:#0f172a;color:inherit;border:1px solid #475569;border-radius:5px}
 button{margin:.2rem;padding:.45rem .7rem;color:inherit;background:#1e293b;border:1px solid #475569;border-radius:5px}
-button:disabled{cursor:wait;opacity:.6}.status{min-height:1.4rem;padding:.55rem .7rem;border-radius:5px}.status.error{color:#fecaca;background:#450a0a;border:1px solid #7f1d1d}.status.success{color:#bbf7d0;background:#052e16;border:1px solid #166534}
+button:disabled{cursor:wait;opacity:.6}.status{min-height:1.4rem;padding:.55rem .7rem;border-radius:5px}.status.error{color:#fecaca;background:#450a0a;border:1px solid #7f1d1d}.status.success{color:#bbf7d0;background:#052e16;border:1px solid #166534}.status[aria-busy="true"]{color:#bfdbfe;background:#172554;border:1px solid #1d4ed8}
 ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between;gap:1rem;align-items:center}.muted{color:#94a3b8}.active{color:#86efac}
 .app-nav{position:fixed;inset:0 auto 0 0;display:flex;flex-direction:column;width:248px;padding:1.35rem 1rem;background:#0c121d;border-right:1px solid #334155}.app-brand{display:flex;align-items:center;gap:.7rem;padding:.2rem .55rem 1.7rem;color:#dbeafe;text-decoration:none;font-weight:750}.app-brand .dot{width:9px;height:9px;border-radius:50%;background:#60a5fa}.app-nav-label{margin:1rem .65rem .45rem;color:#94a3b8;font:700 .62rem ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase}.app-nav-links{display:grid;gap:.25rem}.app-nav-links a{display:flex;gap:.65rem;align-items:center;min-height:38px;padding:.55rem .65rem;border:1px solid transparent;border-radius:7px;color:#94a3b8;text-decoration:none;font-size:.8rem}.app-nav-links a:hover,.app-nav-links a[aria-current=page]{color:#dbeafe;background:#172033;border-color:#334155}.app-nav-links a[aria-current=page]{color:#60a5fa}.app-nav-footer{margin-top:auto;padding:1rem .65rem 0;color:#94a3b8;font:.65rem/1.5 ui-monospace,monospace}main,.routing-main{display:block;width:min(980px,calc(100% - 3rem));margin-left:calc(248px + (100% - 248px - min(980px,calc(100% - 3rem)))/2);padding:1.35rem 0 3rem}.routing-main>h1{margin:.5rem 0 0}.routing-main>form,.routing-main>ul,.routing-main>section,.routing-main>label,.routing-main>p{max-width:980px}button,input,select{font:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}@media(max-width:900px){.app-nav{width:72px;padding-inline:.55rem;align-items:center}.app-brand{padding-inline:0}.app-brand span:last-child,.app-nav-label,.app-nav-links a span:last-child,.app-nav-footer{display:none}.app-nav-links a{width:42px;justify-content:center;padding-inline:0}.routing-main{width:calc(100% - 120px);margin-left:96px}}@media(max-width:640px){.app-nav{position:static;display:flex;flex-direction:row;align-items:center;width:100%;padding:.65rem .8rem;border-right:0;border-bottom:1px solid #334155}.app-brand{padding:0 .25rem;margin-right:auto}.app-nav-links{display:flex;gap:.2rem}.app-nav-links a{width:auto;min-height:32px;padding:.4rem .5rem}.app-nav-links a span:last-child{display:inline;font-size:.65rem}.routing-main{width:calc(100% - 1.5rem);margin:0 auto;padding-top:1rem}.profile{align-items:flex-start;flex-direction:column}}
 </style>
 <style>
-@media(min-width:901px){.app-nav{position:fixed;inset:0 auto 0 0;width:216px}.routing-main,main{margin-left:calc(216px + (100% - 216px - min(980px,calc(100% - 3rem)))/2)}}
+:root{--surface:#0d141f;--surface-raised:#172033;--radius:10px;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+.skip-link{position:fixed;top:.75rem;left:.75rem;z-index:1000;padding:.55rem .75rem;color:#dbeafe;background:#0d141f;border:1px solid #60a5fa;border-radius:7px;transform:translateY(-160%);transition:transform .15s ease}.skip-link:focus{transform:translateY(0)}
+body{font-size:15px;background:#080c14}
+.routing-main{max-width:1180px;width:100%;padding:0 1.5rem 3rem}
+.routing-main>p:first-child{margin:0;padding-top:1.35rem;color:#94a3b8;font:700 11px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.routing-main>p:first-child a{text-decoration:none}
+.routing-main>h1{padding:1.35rem 0 .25rem;margin:0;border-top:1px solid #334155;font-size:clamp(1.45rem,2vw,1.85rem);letter-spacing:-.025em}
+.routing-main>h1+p{max-width:700px;margin:0;color:#94a3b8}
+.routing-main>label{display:grid;gap:.45rem;margin:1.4rem 0 0;padding:1rem;background:var(--surface);border:1px solid #334155;border-radius:var(--radius);color:#94a3b8;font-size:.8rem;font-weight:650}
+.routing-main>label select{margin:0}
+.routing-main>form{display:grid;grid-template-columns:1fr 1.4fr auto;align-items:end;gap:.85rem;margin:1rem 0;padding:1rem;background:var(--surface);border:1px solid #334155;border-radius:var(--radius)}
+.routing-main>form label{margin:0}.routing-main>form button{min-height:42px}
+#profiles{display:grid;gap:.55rem;margin-top:1rem}
+#profiles>li{margin:0;padding:1rem 1.1rem;border-color:#334155;background:#111827;border-radius:var(--radius)}
+.profile{align-items:center}.profile>span:first-child{min-width:0;overflow-wrap:anywhere}.profile>span:last-child{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.35rem}
+.profile b{font-size:1rem}.profile .active,.profile .profile-status.active{display:inline-flex;padding:.2rem .5rem;border:1px solid rgba(74,222,128,.3);border-radius:999px;background:rgba(34,197,94,.12);font-size:.72rem}
+.profile .profile-status.failed{display:inline-flex;padding:.2rem .5rem;border:1px solid rgba(248,113,113,.3);border-radius:999px;background:rgba(239,68,68,.12);color:#f87171;font-size:.72rem}
+.routing-retry{margin-left:.6rem;padding:.35rem .6rem;font-size:.78rem}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}
+@media(max-width:900px){.routing-main{width:calc(100% - 72px);margin-left:72px}.app-nav{width:72px}.app-role{display:none}}
+@media(max-width:640px){.routing-main{width:100%;margin:0;padding:0 .75rem 2rem}.routing-main>form{grid-template-columns:1fr}.routing-main>form button{width:100%}.profile{align-items:flex-start;flex-direction:column}.profile>span:last-child{justify-content:flex-start}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+</style>
+<style>
+@media(min-width:901px){.app-nav{position:fixed;inset:0 auto 0 0;width:216px}.routing-main,main{width:calc(100% - 216px);margin-left:216px}}
 @media(max-width:900px){.app-nav{position:fixed}}@media(max-width:640px){.app-nav{position:static}}
 .app-role{display:grid;gap:.25rem;margin:-.9rem .45rem 1rem;padding:.6rem .65rem;border:1px solid #334155;border-radius:7px;background:#111827;color:#94a3b8;font:.62rem/1.3 ui-monospace,monospace}.app-role span{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase}.app-role strong{color:#60a5fa;font-size:.78rem;font-weight:700;text-transform:capitalize}
 @media(max-width:640px){.app-nav{overflow-x:auto}.app-nav-links{flex-shrink:0}}
 @media(max-width:900px){.app-role{display:none}}@media(max-width:480px){.app-brand span:last-child,.app-nav-links a span:last-child{display:none}.app-nav-links a{width:34px;justify-content:center}}
 </style>
 <body>
+<a class="skip-link" href="#routing-main">Skip to main content</a>
 <nav class="app-nav" aria-label="Primary navigation">
   <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
   <div class="app-role" aria-label="Current dashboard role"><span>Current role</span><strong id="sidebarRole">Loading...</strong></div>
@@ -35,11 +60,12 @@ ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between
   <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
   <div class="app-nav-footer">Live status</div>
 </nav>
-<main class="routing-main">
-<p><a href="/">Overview</a></p>
+<main id="routing-main" class="routing-main">
+<p><a href="/">Overview</a> / Operations</p>
 <h1>Routing profiles</h1>
-<p class="muted">Credentials are never returned by the API. Mutations require administrator access.</p>
-<section id="routingStatus" class="status muted" aria-live="polite">Loading routing state…</section>
+<p class="muted">Switch the managed local route without exposing profile URLs or credentials. A failed replacement keeps the previous working route.</p>
+<section id="routingStatus" class="status muted" aria-live="polite" aria-busy="true">Loading routing state…<button id="routingRetry" class="routing-retry" type="button" hidden>Try again</button></section>
+<p id="routingPermission" class="muted" hidden>Viewer access is read-only. Ask an administrator to manage routing profiles.</p>
 <label>Selected routing core
 <select id="coreSelect" onchange="selectCore(this.value)">
 <option value="sing-box">sing-box</option>
@@ -49,12 +75,12 @@ ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between
 <form id="profileForm">
 <label>Name<input id="profileName" required maxlength="100"></label>
 <label>Share URL<input id="profileUrl" type="password" required autocomplete="off" placeholder="vmess://, vless://, ss://, or trojan://…"></label>
-<button type="submit">Create profile</button>
+<button id="profileSubmit" type="submit">Create profile</button>
 </form>
 <p id="message" class="status muted" role="status" aria-live="polite"></p>
 <p><button id="checkAll" onclick="checkAllProfiles()">Check all configurations</button>
 <span id="checkSummary" class="muted"></span></p>
-<ul id="profiles"></ul>
+<ul id="profiles" aria-label="Saved routing profiles"></ul>
 <script>
 const csrf=()=>document.cookie.split('; ').find(v=>v.startsWith('crab_csrf='))?.split('=').slice(1).join('=');
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -62,18 +88,19 @@ let loginPromise=null;let loginFailed=false;let sessionEstablished=false;
 function requestCredentials(){return new Promise(resolve=>{const dialog=document.createElement('dialog');dialog.innerHTML='<form method="dialog"><h2>Dashboard sign in</h2><label>Username<input id="routingLoginUsername" name="routing_login_username" autocomplete="username" required></label><label>Password<input id="routingLoginPassword" name="routing_login_password" type="password" autocomplete="current-password" required></label><menu><button type="button" data-cancel>Cancel</button><button type="submit">Sign in</button></menu></form>';const form=dialog.querySelector('form');const finish=value=>{dialog.close();dialog.remove();resolve(value)};dialog.querySelector('[data-cancel]').onclick=()=>finish(null);dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null)});form.onsubmit=event=>{event.preventDefault();finish({username:form.elements.routing_login_username.value,password:form.elements.routing_login_password.value})};document.body.append(dialog);dialog.showModal();form.elements.routing_login_username.focus()})}
 async function ensureSession(){if(sessionEstablished)return true;if(loginFailed)return false;if(loginPromise)return loginPromise;loginPromise=(async()=>{const credentials=await requestCredentials();if(!credentials){loginFailed=true;return false}const login=await fetch('/api/auth/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});loginFailed=!login.ok;sessionEstablished=login.ok;return login.ok})().catch(()=>{loginFailed=true;return false}).finally(()=>{loginPromise=null});return loginPromise}
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(['POST','PUT','DELETE'].includes(opt.method))h['X-CSRF-Token']=csrf()||'';let r=await fetch(path,{credentials:'same-origin',...opt,headers:h});if(r.status===401){sessionEstablished=false;if(await ensureSession()){if(['POST','PUT','DELETE'].includes(opt.method))h['X-CSRF-Token']=csrf()||'';r=await fetch(path,{credentials:'same-origin',...opt,headers:h})}}if(!r.ok)throw Error((await r.json().catch(()=>({}))).error||`HTTP ${r.status}`);return r.status===204?null:r.json()}
-function setMessage(text,tone=''){message.textContent=text;message.className=`status ${tone}`.trim()}
+function setMessage(text,tone=''){message.textContent=text;message.className=`status ${tone}`.trim();message.setAttribute('aria-busy',tone==='busy'?'true':'false')}
 function setProfilesBusy(busy){document.querySelectorAll('#profiles button').forEach(button=>{button.disabled=busy})}
-let checkResults={};let routingState=null;
-async function refresh(){const [ps,s]=await Promise.all([api('/api/routing/profiles'),api('/api/routing/status')]);routingState=s;coreSelect.value=s.selected_core;const routeActive=Boolean(s.active_profile||s.running_core);coreSelect.disabled=routeActive;routingStatus.textContent=`Selected core: ${s.selected_core} · Running core: ${s.running_core||'none'} · Active profile: ${s.active_profile||'none'}${routeActive?' · Disable routing to change core.':''}`;profiles.innerHTML=ps.map(p=>{const r=checkResults[p.id];const compatible=p.compatible_cores||[];const canApply=compatible.includes(s.selected_core);const status=r?`<span class="${r.ok?'active':'muted'}"> · ${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';return `<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="muted">[${compatible.join(', ')}]</span> <span class="${p.active?'active':'muted'}">${p.active?'ACTIVE':''}</span>${status}${canApply?'':`<span class="muted"> · incompatible with ${esc(s.selected_core)}</span>`}</span><span><button onclick="testP('${p.id}')">Test</button><button onclick="applyP('${p.id}')" ${canApply?'':'disabled'}>Apply</button>${p.active?'<button onclick="disableRouting()">Disable</button>':''}<button onclick="deleteP('${p.id}')">Delete</button></span></li>`}).join('')||'<li class="muted">No profiles saved.</li>'}
+let checkResults={};let routingState=null;let dashboardRole='viewer';
+async function refresh(){routingStatus.setAttribute('aria-busy','true');routingRetry.hidden=true;const [ps,s]=await Promise.all([api('/api/routing/profiles'),api('/api/routing/status')]);routingState=s;coreSelect.value=s.selected_core;const routeActive=Boolean(s.active_profile||s.running_core);const canAdmin=dashboardRole==='admin';const canOperate=canAdmin||dashboardRole==='operator';coreSelect.disabled=routeActive||!canAdmin;document.getElementById('profileForm').hidden=!canAdmin;document.getElementById('checkAll').hidden=!canAdmin;document.getElementById('routingPermission').hidden=canAdmin;routingStatus.textContent=`Selected core: ${s.selected_core} · Running core: ${s.running_core||'none'} · Active profile: ${s.active_profile||'none'}${routeActive?' · Disable routing to change core.':''}`;routingStatus.append(routingRetry);routingRetry.hidden=true;routingStatus.setAttribute('aria-busy','false');profiles.innerHTML=ps.map(p=>{const r=checkResults[p.id];const compatible=p.compatible_cores||[];const canApply=compatible.includes(s.selected_core)&&canOperate;const status=r?`<span class="profile-status ${r.ok?'active':'failed'}">${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';return `<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="muted">[${compatible.join(', ')}]</span> ${p.active?'<span class="active">ACTIVE</span>':''} ${status}${compatible.includes(s.selected_core)?'':`<span class="muted"> · incompatible with ${esc(s.selected_core)}</span>`}</span><span>${canAdmin?`<button onclick="testP('${p.id}')">Test</button>`:''}<button onclick="applyP('${p.id}')" ${canApply?'':'disabled'}>Apply</button>${p.active&&canOperate?'<button onclick="disableRouting()">Disable</button>':''}${canAdmin?`<button class="danger" onclick="deleteP('${p.id}')">Delete</button>`:''}</span></li>`}).join('')||'<li class="muted">No profiles saved. Add a profile to make a managed route available.</li>'}
 async function selectCore(core){try{await api('/api/routing/core',{method:'POST',body:JSON.stringify({core})});setMessage(`Selected ${core}`,'success');await refresh()}catch(e){setMessage(e.message,'error');await refresh()}}
 async function testP(id){try{const r=await api(`/api/routing/profiles/${id}/test`,{method:'POST'});setMessage(`Valid ${r.kind} profile (${r.transport||'tcp'})`,'success')}catch(e){setMessage(e.message,'error')}}
 async function checkAllProfiles(){const button=document.getElementById('checkAll');button.disabled=true;checkSummary.textContent='Checking…';try{const r=await api('/api/routing/profiles/check-all',{method:'POST'});checkResults=Object.fromEntries(r.results.map(x=>[x.id,x]));checkSummary.textContent=`${r.passed}/${r.checked} passed`;message.textContent=r.valid?'All configurations passed':'Some configurations failed';await refresh()}catch(e){checkSummary.textContent=e.message}finally{button.disabled=false}}
 async function applyP(id){setProfilesBusy(true);try{await api(`/api/routing/profiles/${id}/apply`,{method:'POST'});setMessage('Profile applied','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
 async function disableRouting(){if(!confirm('Disable the active routing profile? Saved profiles will remain available.'))return;setProfilesBusy(true);try{await api('/api/routing/disable',{method:'POST'});setMessage('Routing disabled','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
 async function deleteP(id){if(!confirm('Delete this profile?'))return;try{await api(`/api/routing/profiles/${id}`,{method:'DELETE'});await refresh()}catch(e){setMessage(e.message,'error')}}
-async function loadRole(){try{const c=await api('/api/config');sidebarRole.textContent=c.dashboard_role||'viewer'}catch(e){sidebarRole.textContent='unknown'}}
-profileForm.onsubmit=async e=>{e.preventDefault();try{await api('/api/routing/profiles',{method:'POST',body:JSON.stringify({name:profileName.value,url:profileUrl.value})});profileName.value='';profileUrl.value='';setMessage('Profile created','success');await refresh()}catch(x){setMessage(x.message,'error')}};Promise.all([refresh(),loadRole()]).catch(e=>setMessage(e.message,'error'));
+async function loadRole(){try{const c=await api('/api/config');dashboardRole=c.dashboard_role||'viewer';sidebarRole.textContent=dashboardRole}catch(e){dashboardRole='viewer';sidebarRole.textContent='unknown'}}
+async function loadRouting(){try{await refresh()}catch(e){routingStatus.textContent='Routing state could not be loaded.';routingStatus.className='status error';routingStatus.setAttribute('aria-busy','false');routingRetry.hidden=false;profiles.innerHTML='<li class="muted">Saved profiles are unavailable until routing state loads.</li>';}}
+profileForm.onsubmit=async e=>{e.preventDefault();const submit=document.getElementById('profileSubmit');submit.disabled=true;setMessage('Saving profile…','busy');try{await api('/api/routing/profiles',{method:'POST',body:JSON.stringify({name:profileName.value,url:profileUrl.value})});profileName.value='';profileUrl.value='';setMessage('Profile created','success');await refresh()}catch(x){setMessage(x.message,'error')}finally{submit.disabled=false}};routingRetry.onclick=loadRouting;Promise.all([loadRouting(),loadRole()]).then(()=>refresh()).catch(e=>setMessage(e.message,'error'));
 </script>
 </main>
 </body>
