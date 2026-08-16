@@ -229,6 +229,7 @@ console.log('dashboard timeline, history formatting, and expansion state OK');
 // mutation wiring at the HTML/JavaScript boundary.
 const usersHtml = readFileSync(new URL('./users.html', import.meta.url), 'utf8');
 const usersBody = usersHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
+const databasesHtml = readFileSync(new URL('./databases.html', import.meta.url), 'utf8');
 
 assert.match(usersHtml, /<table>/);
 assert.match(usersHtml, /class="table-scroll"/);
@@ -281,3 +282,48 @@ assert.match(routingHtml, /api\/routing\/core/);
 assert.match(routingHtml, /compatible_cores/);
 assert.match(routingHtml, /coreSelect/);
 console.log('Routing disable workspace contract OK');
+
+// Shared operations shell contract. Every dashboard surface must expose the
+// same destinations so operators do not have to hunt for a return link.
+const pageFiles = ['index.html', 'databases.html', 'routing.html', 'users.html'];
+for (const file of pageFiles) {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+    assert.match(source, /<nav class="app-nav" aria-label="Primary navigation">/);
+    if (file !== 'databases.html') {
+        assert.match(source, /id="sidebarRole"/);
+        assert.match(source, /Current role/);
+    } else {
+        assert.doesNotMatch(source, /id="sidebarRole"/);
+    }
+    for (const href of ['/', '/databases', '/routing', '/users']) {
+        assert.match(source, new RegExp(`href="${href.replace('/', '\\/')}"`));
+    }
+    const visible = source
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '');
+    assert.doesNotMatch(visible, /—|–/, `${file} contains a visible dash variant`);
+}
+assert.match(html, /id="resourceCard"/);
+assert.match(html, /id="compressionCard"/);
+assert.match(html, /id="dbSection"/);
+assert.match(html, /class="db-grid"/);
+assert.match(html, /role="table" aria-label="Live database backup status"/);
+assert.match(body, /el\.setAttribute\('role', 'row'\)/);
+assert.match(html, /<main class="app-content">/);
+assert.match(html, /id="refreshInterval"/);
+assert.match(body, /crab-dump\.refresh-interval-ms/);
+assert.match(body, /function scheduleRefresh\(\)/);
+assert.match(body, /function setRefreshInterval\(value\)/);
+assert.match(usersHtml, /role="alertdialog"/);
+assert.match(body, /config\.dashboard_role/);
+assert.match(databasesHtml, /config\.dashboard_role/);
+assert.match(routingHtml, /loadRole/);
+assert.match(usersBody, /loadRole/);
+assert.match(databasesHtml, /id="database-search"/);
+assert.match(databasesHtml, /No matching databases/);
+assert.match(databasesHtml, /No databases configured/);
+assert.match(databasesHtml, /clear-database-search/);
+assert.match(databasesHtml, /skeleton-line/);
+assert.match(databasesHtml, /Databases could not be loaded/);
+assert.match(databasesHtml, /retry-database-load/);
+console.log('shared operations shell and state-region contract OK');
