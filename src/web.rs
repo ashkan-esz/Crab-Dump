@@ -469,7 +469,11 @@ pub fn set_db_transfer_with_chunk(
     if let Some(entry) = statuses.get_mut(db_name) {
         entry.bytes_done = bytes_done;
         entry.bytes_total = bytes_total;
-        entry.speed_bps = speed_bps;
+        entry.speed_bps = if speed_bps.is_finite() && speed_bps >= 0.0 {
+            speed_bps
+        } else {
+            0.0
+        };
         entry.current_chunk = chunk.number;
         entry.chunk_count = chunk.count;
         entry.current_chunk_done = chunk.done;
@@ -2418,6 +2422,16 @@ mod tests {
             snapshot("test-chunk-progress"),
             (0, "done", 0, 0, 0.0, 0, 0, 0, 0)
         );
+    }
+
+    #[test]
+    fn invalid_transfer_speeds_are_suppressed() {
+        set_db_status("test-invalid-speed", 1, "upload", "uploading");
+
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            set_db_transfer("test-invalid-speed", 1, 2, invalid);
+            assert_eq!(snapshot("test-invalid-speed").4, 0.0);
+        }
     }
 
     /// Read the dump size for one entry.

@@ -8,11 +8,12 @@
 //! Runs once and exits by default (for cron / systemd timers). Set
 //! `BACKUP_INTERVAL` to keep the process alive and repeat the cycle itself.
 
+use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDateTime;
@@ -1321,7 +1322,8 @@ fn backup_pipeline(
     // ── Upload chunks to Telegram ──────────────────────────────────────────
     // Each chunk is retained until every currently active destination has been
     // attempted. A failed destination is skipped for subsequent chunks.
-    let upload_started = SystemTime::now();
+    let upload_started = Instant::now();
+    let upload_speed = Arc::new(Mutex::new(UploadSpeedTracker::new(upload_started)));
     let sent_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut upload_stats = telegram::UploadStats::default();
     upload_chunks_to_destinations(
@@ -1340,11 +1342,15 @@ fn backup_pipeline(
                 .unwrap_or(0);
             let db_name = db_name.to_string();
             let base_done = sent_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let live_speed = upload_speed
+                .lock()
+                .expect("upload speed tracker lock poisoned")
+                .update(base_done, Instant::now());
             web::set_db_transfer_with_chunk(
                 &db_name,
                 base_done,
                 total_bytes,
-                rate(base_done, &upload_started),
+                live_speed,
                 web::ChunkProgress {
                     number: chunk_index + 1,
                     count: chunks_count,
@@ -1352,12 +1358,17 @@ fn backup_pipeline(
                     total: chunk_total,
                 },
             );
+            let upload_speed = Arc::clone(&upload_speed);
             let progress = std::sync::Arc::new(move |chunk_done| {
+                let live_speed = upload_speed
+                    .lock()
+                    .expect("upload speed tracker lock poisoned")
+                    .update(base_done + chunk_done, Instant::now());
                 web::set_db_transfer_with_chunk(
                     &db_name,
                     base_done,
                     total_bytes,
-                    rate(base_done + chunk_done, &upload_started),
+                    live_speed,
                     web::ChunkProgress {
                         number: chunk_index + 1,
                         count: chunks_count,
@@ -1387,7 +1398,11 @@ fn backup_pipeline(
                 "upload",
                 format!("Uploading to Telegram — {}/{chunks_count} chunks", i + 1),
             );
-            web::set_db_transfer(db_name, sent, total_bytes, rate(sent, &upload_started));
+            let live_speed = upload_speed
+                .lock()
+                .expect("upload speed tracker lock poisoned")
+                .update(sent, Instant::now());
+            web::set_db_transfer(db_name, sent, total_bytes, live_speed);
         },
         &mut upload_stats,
         Some(cancellation),
@@ -1395,7 +1410,7 @@ fn backup_pipeline(
     .with_context(|| format!("uploading backup chunks (db={db_name})"))?;
     metrics.upload_attempts += upload_stats.attempts;
     metrics.upload_retries += upload_stats.retries;
-    metrics.upload_duration_secs = upload_started.elapsed().unwrap_or_default().as_secs_f64();
+    metrics.upload_duration_secs = upload_started.elapsed().as_secs_f64();
 
     if source.sends_notifications() && chunks_count > 1 {
         let message = if source == BackupSource::Scheduled {
@@ -1429,7 +1444,10 @@ fn backup_pipeline(
         db_name,
         total_bytes,
         total_bytes,
-        rate(total_bytes, &upload_started),
+        upload_speed
+            .lock()
+            .expect("upload speed tracker lock poisoned")
+            .complete(total_bytes, Instant::now()),
     );
 
     Ok(BackupResult {
@@ -1462,15 +1480,155 @@ fn record_history(
     }
 }
 
-/// Average throughput in bytes/second for `bytes` transferred since `since`.
-///
-/// Returns 0.0 when no measurable time has passed, rather than infinity.
-fn rate(bytes: u64, since: &SystemTime) -> f64 {
-    let secs = since.elapsed().unwrap_or_default().as_secs_f64();
-    if secs > 0.0 {
-        bytes as f64 / secs
-    } else {
-        0.0
+#[cfg(test)]
+mod upload_speed_tests {
+    use super::*;
+
+    fn at(milliseconds: u64) -> Instant {
+        Instant::now() + Duration::from_millis(milliseconds)
+    }
+
+    #[test]
+    fn speed_is_zero_at_start_and_for_zero_bytes() {
+        let started = at(0);
+        let mut tracker = UploadSpeedTracker::new(started);
+
+        assert_eq!(tracker.update(0, started), 0.0);
+        assert_eq!(tracker.update(0, started + SPEED_SAMPLE_INTERVAL), 0.0);
+        assert_eq!(tracker.complete(0, started + Duration::from_secs(1)), 0.0);
+    }
+
+    #[test]
+    fn speed_stays_zero_until_sample_threshold() {
+        let started = at(0);
+        let mut tracker = UploadSpeedTracker::new(started);
+
+        assert_eq!(
+            tracker.update(
+                1_000,
+                started + SPEED_SAMPLE_INTERVAL - Duration::from_millis(1)
+            ),
+            0.0
+        );
+        assert_eq!(tracker.update(1_000, started + SPEED_SAMPLE_INTERVAL), 0.0);
+    }
+
+    #[test]
+    fn speed_uses_a_bounded_moving_average() {
+        let started = at(0);
+        let mut tracker = UploadSpeedTracker::new(started);
+
+        assert_eq!(
+            tracker.update(100, started + Duration::from_millis(100)),
+            0.0
+        );
+        assert_eq!(
+            tracker.update(300, started + Duration::from_millis(200)),
+            0.0
+        );
+        assert_eq!(
+            tracker.update(600, started + Duration::from_millis(300)),
+            2_000.0
+        );
+    }
+
+    #[test]
+    fn completion_reports_exact_cumulative_average() {
+        let started = at(0);
+        let tracker = UploadSpeedTracker::new(started);
+
+        assert_eq!(
+            tracker.complete(2_000, started + Duration::from_secs(2)),
+            1_000.0
+        );
+    }
+
+    #[test]
+    fn elapsed_time_is_monotonic() {
+        let started = at(0);
+        let mut tracker = UploadSpeedTracker::new(started);
+
+        assert_eq!(
+            tracker.update(100, started + Duration::from_millis(100)),
+            0.0
+        );
+        assert_eq!(
+            tracker.update(200, started + Duration::from_millis(50)),
+            0.0
+        );
+        assert_eq!(
+            tracker.update(200, started + Duration::from_millis(200)),
+            0.0
+        );
+        assert_eq!(
+            tracker.update(300, started + Duration::from_millis(300)),
+            1_000.0
+        );
+    }
+}
+
+const SPEED_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+const SPEED_SAMPLE_COUNT: usize = 4;
+const SPEED_MIN_SAMPLES: usize = 3;
+
+/// Tracks recent upload throughput without allowing wall-clock adjustments or
+/// the first progress callback to produce an unbounded spike.
+#[derive(Debug)]
+struct UploadSpeedTracker {
+    started: Instant,
+    last_sample_at: Instant,
+    last_sample_bytes: u64,
+    recent_rates: VecDeque<f64>,
+}
+
+impl UploadSpeedTracker {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            last_sample_at: started,
+            last_sample_bytes: 0,
+            recent_rates: VecDeque::with_capacity(SPEED_SAMPLE_COUNT),
+        }
+    }
+
+    fn update(&mut self, bytes: u64, now: Instant) -> f64 {
+        let Some(elapsed) = now.checked_duration_since(self.last_sample_at) else {
+            return self.current_rate();
+        };
+        if elapsed < SPEED_SAMPLE_INTERVAL || bytes <= self.last_sample_bytes {
+            return self.current_rate();
+        }
+
+        let rate = (bytes - self.last_sample_bytes) as f64 / elapsed.as_secs_f64();
+        self.last_sample_at = now;
+        self.last_sample_bytes = bytes;
+        if rate.is_finite() && rate >= 0.0 {
+            if self.recent_rates.len() == SPEED_SAMPLE_COUNT {
+                self.recent_rates.pop_front();
+            }
+            self.recent_rates.push_back(rate);
+        }
+        self.current_rate()
+    }
+
+    fn complete(&self, bytes: u64, now: Instant) -> f64 {
+        let Some(elapsed) = now.checked_duration_since(self.started) else {
+            return 0.0;
+        };
+        let secs = elapsed.as_secs_f64();
+        if bytes == 0 || secs <= 0.0 {
+            0.0
+        } else {
+            bytes as f64 / secs
+        }
+    }
+
+    fn current_rate(&self) -> f64 {
+        if self.recent_rates.len() < SPEED_MIN_SAMPLES {
+            0.0
+        } else {
+            self.recent_rates.iter().sum::<f64>() / self.recent_rates.len() as f64
+        }
     }
 }
 

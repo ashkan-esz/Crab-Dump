@@ -1237,7 +1237,7 @@
 
     /** Format throughput; a dash when nothing is moving. */
     function fmtSpeed(bps) {
-        return bps > 0 ? `${fmtBytes(bps)}/s` : '-';
+        return Number.isFinite(bps) && bps > 0 ? `${fmtBytes(bps)}/s` : '-';
     }
 
     function fmtPercent(value) {

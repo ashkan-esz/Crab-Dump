@@ -135,6 +135,9 @@ assert.equal(fmtBytes(1536), '1.5 KB');
 assert.equal(fmtBytes(10 * 1024), '10 KB');
 assert.equal(fmtBytes(2.5 * 1024 ** 3), '2.5 GiB');
 assert.equal(fmtSpeed(0), '-');                     // idle, not "0 B/s"
+assert.equal(fmtSpeed(Number.NaN), '-');
+assert.equal(fmtSpeed(Number.POSITIVE_INFINITY), '-');
+assert.equal(fmtSpeed(-1), '-');
 assert.equal(fmtSpeed(4 * 1024 ** 2), '4.0 MB/s');
 
 assert.equal(telegramDestinationText(0), '0 destinations');
