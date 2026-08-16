@@ -572,6 +572,7 @@ fn run_manual_requests(
                     BackupOptions {
                         chat_ids: vec![request.chat_id.clone()],
                         recipient: Some(request.recipient_name.clone()),
+                        encryption_mode: request.no_encryption.then_some(EncryptionMode::None),
                     },
                 )
             })
@@ -721,6 +722,7 @@ fn run_cycle(
                 BackupOptions {
                     chat_ids: cfg.tg_chat_ids.clone(),
                     recipient: None,
+                    encryption_mode: None,
                 },
             )
         })
@@ -824,6 +826,20 @@ struct AttemptMetrics {
 struct BackupOptions {
     chat_ids: Vec<String>,
     recipient: Option<String>,
+    /// A per-request encryption override. `None` means use the configured
+    /// mode; `Some(EncryptionMode::None)` is the admin-only plaintext manual
+    /// backup option.
+    encryption_mode: Option<EncryptionMode>,
+}
+
+fn effective_encryption_mode<'a>(
+    cfg: &'a SharedConfig,
+    options: &'a BackupOptions,
+) -> &'a EncryptionMode {
+    options
+        .encryption_mode
+        .as_ref()
+        .unwrap_or(&cfg.encryption_mode)
 }
 
 type CancellationToken = Arc<std::sync::atomic::AtomicBool>;
@@ -951,9 +967,10 @@ fn run_database(
 ) -> Result<BackupResult> {
     let started = SystemTime::now();
     let db_name = db.display_name();
+    let encryption_mode = effective_encryption_mode(cfg, options);
     let mut metrics = AttemptMetrics {
-        encrypted: cfg.encryption_mode.encrypted(),
-        encryption_mode: cfg.encryption_mode.clone(),
+        encrypted: encryption_mode.encrypted(),
+        encryption_mode: encryption_mode.clone(),
         ..Default::default()
     };
 
@@ -962,7 +979,7 @@ fn run_database(
     // display names are rejected at config time, so the timestamped prefix
     // remains unique for a database's run.
     let stamp = dump_timestamp(started)?;
-    let extension = backup_extension(cfg.compression_codec, cfg.encryption_mode.encrypted());
+    let extension = backup_extension(cfg.compression_codec, encryption_mode.encrypted());
     let base_name = format!("{db_name}_{stamp}{extension}");
 
     let result = backup_pipeline(
@@ -1093,7 +1110,7 @@ fn backup_pipeline(
     web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
 
     // ── Resolve encryption mode ────────────────────────────────────────────
-    let encryption_mode = &cfg.encryption_mode;
+    let encryption_mode = effective_encryption_mode(cfg, options);
     let encrypted = encryption_mode.encrypted();
 
     // ── Start pg_dump subprocess ───────────────────────────────────────────
@@ -1419,7 +1436,7 @@ fn backup_pipeline(
         db_name: db_name.to_string(),
         total_bytes,
         encrypted,
-        encryption_mode: cfg.encryption_mode.clone(),
+        encryption_mode: encryption_mode.clone(),
         compression: compression_label(cfg.compression_codec),
         sha256: hash,
         elapsed_secs: elapsed.as_secs_f64(),
@@ -1600,8 +1617,17 @@ fn execute_database_indices(
                         sha256: None,
                         compression_type: compression_label(cfg.compression_codec).into(),
                         compression_level: cfg.compression_level,
-                        encryption_type: cfg.encryption_mode.label().into(),
-                        encrypted: cfg.encryption_mode.encrypted(),
+                        encryption_type: options_by_db
+                            .get(&databases[i].display_name())
+                            .and_then(|options| options.encryption_mode.as_ref())
+                            .unwrap_or(&cfg.encryption_mode)
+                            .label()
+                            .into(),
+                        encrypted: options_by_db
+                            .get(&databases[i].display_name())
+                            .and_then(|options| options.encryption_mode.as_ref())
+                            .unwrap_or(&cfg.encryption_mode)
+                            .encrypted(),
                         duration_secs: 0.0,
                         upload_duration_secs: 0.0,
                         upload_attempts: 0,
@@ -2136,6 +2162,7 @@ mod tests {
         let options = BackupOptions {
             chat_ids: vec!["primary".into(), "archive".into()],
             recipient: None,
+            encryption_mode: None,
         };
         assert_eq!(
             BackupSource::Manual.notification_chat_ids(&options),

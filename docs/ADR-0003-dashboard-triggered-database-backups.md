@@ -58,6 +58,7 @@ The endpoint returns:
 
 - `202 Accepted` when the request is queued;
 - `404 Not Found` for an unknown database;
+- `403 Forbidden` when a non-administrator requests `no_encryption: true`;
 - `409 Conflict` when the database is already running, already has a pending
   manual request, is disabled, the recipient is unknown/disabled, or manual
   execution is unavailable because the process is not in long-lived scheduled
@@ -108,8 +109,9 @@ Scheduled and one-shot runs continue to upload to every configured
 `TG_CHAT_ID_*` destination and use the CLI/configured encryption decision.
 Manual runs upload only to the selected enabled dashboard user. Encryption is
 enabled by default when `AGE_RECIPIENT` is configured, while
-`no_encryption: true` bypasses age for that request. If no recipient is
-configured, the existing compressed-only behavior remains. Wire names follow
+`no_encryption: true` bypasses age for that request only for the authenticated
+`Admin` role; operators retain encrypted manual-backup access. If no
+recipient is configured, the existing compressed-only behavior remains. Wire names follow
 the restore contract: `{db}_{utc_ts}.dump.zst` or
 `{db}_{utc_ts}.dump.zst.age`, with `.partNNNN` appended for multi-part streams.
 
@@ -141,8 +143,8 @@ ADR-0002.
 Each enabled database card includes a `Backup now` button. The button:
 
 - lets the operator choose an enabled dashboard-managed Telegram user;
-- includes a checked-by-default encryption-bypass checkbox with a plaintext
-  warning;
+- includes an administrator-only, unchecked-by-default encryption-bypass
+  checkbox with a plaintext warning;
 - shows the selected receiver in the database history table;
 - shows queued/running state while the request is outstanding;
 - is disabled while the database is queued or running;

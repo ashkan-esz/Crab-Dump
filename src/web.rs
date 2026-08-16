@@ -198,6 +198,7 @@ pub struct ManualBackupRequest {
     pub database_name: String,
     pub chat_id: String,
     pub recipient_name: String,
+    pub no_encryption: bool,
 }
 
 #[derive(Debug, Default)]
@@ -668,6 +669,7 @@ pub struct ConfigResponse {
     /// Seconds until the next history upload.
     pub history_next_run_secs: Option<u64>,
     pub manual_backup_available: bool,
+    pub dashboard_role: &'static str,
 }
 
 #[derive(Serialize)]
@@ -762,7 +764,7 @@ async fn update_compression_config(
 ///
 /// Exposes server metadata (port, uptime, hostname) so the dashboard can
 /// display a rich overview panel alongside the live status cards.
-async fn api_config(cfg: web::Data<u16>) -> impl Responder {
+async fn api_config(req: HttpRequest, cfg: web::Data<u16>) -> impl Responder {
     // Lazily store the start time on the first request. `compare_exchange`
     // makes a concurrent first request settle on a single start value.
     let now_secs = now_epoch_secs();
@@ -815,6 +817,10 @@ async fn api_config(cfg: web::Data<u16>) -> impl Responder {
         backup_next_run_secs,
         history_next_run_secs,
         manual_backup_available: manual_backup_available(),
+        dashboard_role: req
+            .extensions()
+            .get::<AuthenticatedUser>()
+            .map_or("unknown", |user| user.role.as_str()),
     })
 }
 
@@ -1129,10 +1135,23 @@ async fn api_database_action(
             return HttpResponse::Conflict()
                 .json(serde_json::json!({"error": "Recipient is unknown or disabled"}));
         }
+        let no_encryption = payload.no_encryption;
+        if no_encryption
+            && req
+                .extensions()
+                .get::<AuthenticatedUser>()
+                .is_none_or(|user| user.role != DashboardRole::Admin)
+        {
+            audit_action(&req, "backup", &name, "rejected_plaintext_non_admin");
+            return HttpResponse::Forbidden().json(
+                serde_json::json!({"error": "Only administrators may upload backups without encryption"}),
+            );
+        }
         if !manual_backup_controller().request(ManualBackupRequest {
             database_name: name.clone(),
             chat_id: payload.chat_id.clone(),
             recipient_name: recipient.name,
+            no_encryption,
         }) {
             return HttpResponse::Conflict().json(
                 serde_json::json!({"error": "Database backup is already running or queued"}),
@@ -1206,6 +1225,8 @@ async fn api_database_action(
 #[derive(Debug, Deserialize)]
 struct ManualBackupPayload {
     chat_id: String,
+    #[serde(default)]
+    no_encryption: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1245,6 +1266,16 @@ pub enum DashboardRole {
     Admin,
 }
 
+impl DashboardRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DashboardCredential {
     username: String,
@@ -1263,6 +1294,7 @@ struct DashboardSession {
 #[derive(Clone)]
 struct AuthenticatedUser {
     username: String,
+    role: DashboardRole,
 }
 
 #[derive(Clone)]
@@ -1528,6 +1560,7 @@ async fn dashboard_auth(
     }
     req.extensions_mut().insert(AuthenticatedUser {
         username: session.username,
+        role: session.role,
     });
     next.call(req).await
 }
@@ -2450,6 +2483,7 @@ mod tests {
             database_name: "app".into(),
             chat_id: "-1".into(),
             recipient_name: "Alice".into(),
+            no_encryption: false,
         };
         assert!(controller.request(request.clone()));
         assert!(!controller.request(request.clone()));
@@ -2459,12 +2493,14 @@ mod tests {
             database_name: "app".into(),
             chat_id: "-2".into(),
             recipient_name: "Bob".into(),
+            no_encryption: true,
         }));
         controller.finish("app");
         assert!(controller.request(ManualBackupRequest {
             database_name: "app".into(),
             chat_id: "-2".into(),
             recipient_name: "Bob".into(),
+            no_encryption: false,
         }));
     }
 
@@ -2483,11 +2519,13 @@ mod tests {
             database_name: "first".into(),
             chat_id: "-first".into(),
             recipient_name: "First".into(),
+            no_encryption: false,
         }));
         assert!(controller.request(ManualBackupRequest {
             database_name: "second".into(),
             chat_id: "-second".into(),
             recipient_name: "Second".into(),
+            no_encryption: true,
         }));
 
         let requests = controller.take_pending();
@@ -2506,6 +2544,7 @@ mod tests {
             database_name: "queued".into(),
             chat_id: "-queued".into(),
             recipient_name: "Queued".into(),
+            no_encryption: false,
         };
         assert!(controller.request(queued));
         assert_eq!(controller.cancel("queued"), CancelResult::Queued);
@@ -2516,6 +2555,7 @@ mod tests {
             database_name: "active".into(),
             chat_id: "-active".into(),
             recipient_name: "Active".into(),
+            no_encryption: false,
         }));
         let request = controller.take_pending().pop().expect("active request");
         let token = controller
@@ -2531,6 +2571,7 @@ mod tests {
             database_name: "active".into(),
             chat_id: "-again".into(),
             recipient_name: "Again".into(),
+            no_encryption: false,
         }));
     }
 
@@ -2809,6 +2850,20 @@ mod tests {
                 }))
                 .to_request()
         };
+        let post_plain = |database: &str, chat_id: &str, role: DashboardRole| {
+            let request = aw_test::TestRequest::post()
+                .uri(&format!("/api/status/database/{database}/backup"))
+                .set_json(serde_json::json!({
+                    "chat_id": chat_id,
+                    "no_encryption": true
+                }))
+                .to_request();
+            request.extensions_mut().insert(AuthenticatedUser {
+                username: "test".into(),
+                role,
+            });
+            request
+        };
 
         assert_eq!(
             aw_test::call_service(&app, post(&name, "-missing"))
@@ -2840,8 +2895,43 @@ mod tests {
             assert_eq!(request.database_name, name);
             assert_eq!(request.chat_id, "-enabled");
             assert_eq!(request.recipient_name, "Enabled");
+            assert!(!request.no_encryption);
             manual_backup_controller().finish(&request.database_name);
         }
+        let operator_encrypted = post(&name, "-enabled");
+        operator_encrypted
+            .extensions_mut()
+            .insert(AuthenticatedUser {
+                username: "operator".into(),
+                role: DashboardRole::Operator,
+            });
+        assert_eq!(
+            aw_test::call_service(&app, operator_encrypted)
+                .await
+                .status(),
+            202
+        );
+        let request = manual_backup_controller()
+            .take_pending()
+            .pop()
+            .expect("operator encrypted request");
+        assert!(!request.no_encryption);
+        manual_backup_controller().finish(&request.database_name);
+        assert_eq!(
+            aw_test::call_service(&app, post_plain(&name, "-enabled", DashboardRole::Operator))
+                .await
+                .status(),
+            403
+        );
+        let accepted_plain =
+            aw_test::call_service(&app, post_plain(&name, "-enabled", DashboardRole::Admin)).await;
+        assert_eq!(accepted_plain.status(), 202);
+        let request = manual_backup_controller()
+            .take_pending()
+            .pop()
+            .expect("admin plaintext request");
+        assert!(request.no_encryption);
+        manual_backup_controller().finish(&request.database_name);
         set_manual_backup_available(false);
         let _ = std::fs::remove_dir_all(state_dir);
     }

@@ -668,6 +668,12 @@
             gap: .45rem;
             margin-bottom: .65rem;
         }
+        .manual-backup-no-encryption {
+            color: var(--text-muted);
+            font-size: .75rem;
+            font-weight: 600;
+        }
+        .manual-backup-no-encryption[hidden] { display: none; }
         .manual-backup-warning {
             color: var(--warn);
             background: var(--warn-bg);
@@ -1154,6 +1160,13 @@
                 </div>
                 <div class="manual-backup-encryption">
                     Encryption follows the server's <code>ENCRYPTION_TYPE</code> configuration.
+                </div>
+                <label id="manualBackupNoEncryption" class="manual-backup-no-encryption" hidden>
+                    <input id="manualBackupNoEncryptionInput" type="checkbox">
+                    Upload without encryption
+                </label>
+                <div id="manualBackupEncryptionWarning" class="manual-backup-warning" hidden>
+                    This backup will be uploaded without age encryption.
                 </div>
                 <div id="manualBackupUnavailable" class="manual-backup-unavailable" hidden></div>
                 <div id="manualBackupError" class="manual-backup-error" role="alert" hidden></div>
@@ -2091,7 +2104,7 @@
         }
     }
 
-    async function backupDatabase(name, chatId) {
+    async function backupDatabase(name, chatId, noEncryption) {
         const el = dbCards.get(name);
         const button = el?.querySelector('.db-backup');
         manualRequests.add(name);
@@ -2104,7 +2117,7 @@
             const res = await apiFetch(`/api/status/database/${encodeURIComponent(name)}/backup`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId }),
+                body: JSON.stringify({ chat_id: chatId, no_encryption: noEncryption === true }),
             });
             if (!res.ok) {
                 const error = new Error(`HTTP ${res.status}`);
@@ -2120,7 +2133,9 @@
             }
         } catch (error) {
             manualRequests.delete(name);
-            const message = error.status === 409
+            const message = error.status === 403
+                ? 'Only administrators may upload backups without encryption.'
+                : error.status === 409
                 ? 'Backup could not be queued: it is unavailable, already running, or the recipient is invalid.'
                 : 'Could not queue backup. Try again.';
             document.getElementById('manualBackupError').textContent = message;
@@ -2164,6 +2179,9 @@
         const unavailable = document.getElementById('manualBackupUnavailable');
         const error = document.getElementById('manualBackupError');
         const submit = document.getElementById('manualBackupSubmit');
+        const noEncryption = document.getElementById('manualBackupNoEncryption');
+        const noEncryptionInput = document.getElementById('manualBackupNoEncryptionInput');
+        const warning = document.getElementById('manualBackupEncryptionWarning');
         const users = telegramUsers.filter(user => user.enabled);
         document.getElementById('manualBackupDatabase').textContent = name;
         recipient.innerHTML = users.length
@@ -2176,6 +2194,9 @@
             : 'Add an enabled Telegram user to enable manual backups.';
         error.hidden = true;
         error.textContent = '';
+        noEncryption.hidden = config?.dashboard_role !== 'admin';
+        noEncryptionInput.checked = false;
+        warning.hidden = true;
         submit.disabled = !manualBackupAvailable || !users.length;
         modal.hidden = false;
         document.body.style.overflow = 'hidden';
@@ -2195,10 +2216,15 @@
         const modal = document.getElementById('manualBackupModal');
         const form = document.getElementById('manualBackupForm');
         const recipient = document.getElementById('manualBackupRecipient');
+        const noEncryptionInput = document.getElementById('manualBackupNoEncryptionInput');
+        const warning = document.getElementById('manualBackupEncryptionWarning');
         const submit = document.getElementById('manualBackupSubmit');
         document.getElementById('manualBackupClose').onclick = closeManualBackupModal;
         document.getElementById('manualBackupCancel').onclick = closeManualBackupModal;
         modal.onclick = event => { if (event.target === modal && !submit.disabled) closeManualBackupModal(); };
+        noEncryptionInput.onchange = () => {
+            warning.hidden = !noEncryptionInput.checked;
+        };
         form.onsubmit = async event => {
             event.preventDefault();
             if (!manualBackupDatabase || submit.disabled) return;
@@ -2206,7 +2232,7 @@
             submit.textContent = 'Queueing...';
             recipient.disabled = true;
             form.setAttribute('aria-busy', 'true');
-            await backupDatabase(manualBackupDatabase, recipient.value);
+            await backupDatabase(manualBackupDatabase, recipient.value, noEncryptionInput.checked);
             if (!modal.hidden) {
                 submit.disabled = false;
                 submit.textContent = 'Queue backup';
