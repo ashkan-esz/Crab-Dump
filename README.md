@@ -15,7 +15,7 @@ scheduled from cron or a systemd timer.
 |---------|----------------|-------------------------------------------------------------------|
 | Dump    | `pg_dump -Fc`  | Custom format → fast, supports selective `pg_restore`.            |
 | Compress| `zstd`, `gzip`, `brotli` | Select one globally with `COMPRESSION_CODEC`; omit it for streaming, constant-memory raw `.dump` files. |
-| Encrypt | `age` (X25519) | Optional — modern, audited, hybrid encryption to a public key. No password to leak. Set `AGE_RECIPIENT` to enable; otherwise the dump is not encrypted. |
+| Encrypt | `age` | Optional streaming encryption: `none`, X25519 recipient, or passphrase. |
 | Upload  | `reqwest`      | Direct Bot API calls; no bot-framework overhead for a one-shot job.|
 
 **Chunking** is used instead of a self-hosted Telegram Bot API server: the
@@ -56,9 +56,10 @@ ROUTING_TARGET=runtime-sing-box docker compose build
 ROUTING_TARGET=runtime-sing-box docker compose up -d
 ```
 
-### 2. (Optional) Generate an age keypair
+### 2. (Optional) Configure age encryption
 
-The backup works without encryption — only set this up if you want encrypted dumps.
+The backup works without encryption. Set `ENCRYPTION_TYPE` in `.env` for encrypted
+dumps; the selected mode applies uniformly to every database.
 
 You only need the `age` tooling for key generation and for restoring. The
 backup itself uses the `age` Rust crate internally and needs no external CLI.
@@ -70,7 +71,9 @@ rage-keygen -o identity.txt
 #   Public key: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Put the **public key** (`age1…`) in `AGE_RECIPIENT` on the backup host.
+Put the **public key** (`age1…`) in `AGE_RECIPIENT` on the backup host when using
+`ENCRYPTION_TYPE=age-recipient`. For passphrase mode, set a non-empty
+`AGE_PASSPHRASE`. Keep that secret safe for restoration.
 Keep `identity.txt` somewhere safe and offline — you'll need it to restore.
 
 ### 3. (Optional) SOCKS5 proxy
@@ -129,7 +132,6 @@ cp .env.example .env  # then edit
 set -a; source .env; set +a
 ./target/release/crab-dump            # run a backup
 ./target/release/crab-dump --dry-run  # validate config, no upload
-./target/release/crab-dump --no-encryption  # disable encryption for this run
 ```
 
 On success the binary prints a **manifest**, one line per database:
@@ -174,11 +176,12 @@ directory yourself).
 | `DASHBOARD_PASSWORD` | yes     |                | administrator password; minimum 12 characters |
 | `DASHBOARD_OPERATOR_USERNAME/PASSWORD` | no | | optional backup/database-control account |
 | `DASHBOARD_VIEWER_USERNAME/PASSWORD` | no | | optional read-only status account |
-| `AGE_RECIPIENT`      | no       | *(none)*       | `age1…` X25519 public key (omit for unencrypted) |
+| `ENCRYPTION_TYPE`    | no       | `none`         | `none`, `age-recipient`, or `age-passphrase`; `.env` only |
+| `AGE_RECIPIENT`      | conditional | *(none)*     | `age1…` X25519 public key for `age-recipient` |
+| `AGE_PASSPHRASE`     | conditional | *(none)*     | non-empty passphrase for `age-passphrase` |
 | `COMPRESSION_CODEC`  | no       |                | `zstd`, `gzip`, or `brotli`; omit for uncompressed `.dump`; also `compression_codec` in `config.toml` |
 | `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `1..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
 | `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; rejected without a codec and for gzip/brotli |
-| `--no-encryption`     | no       | off            | disable encryption for one run, even when `AGE_RECIPIENT` is set |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
 | `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
@@ -318,6 +321,7 @@ docker run --rm \
   -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
   -e TG_BOT_TOKEN="..." \
   -e TG_CHAT_ID_0="..." \
+  -e ENCRYPTION_TYPE="age-recipient" \
   -e AGE_RECIPIENT="age1..." \
   -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
   -e DASHBOARD_USERNAME="admin" \
@@ -550,7 +554,7 @@ cat "$BASE".part* | zstd -d | psql "$RESTORE_DATABASE_URL"
 ```
 
 > The `sha256` in the manifest covers the stream that was written to
-> the parts (encrypted if AGE_RECIPIENT was set, otherwise the
+> the parts (encrypted when `ENCRYPTION_TYPE` is an age mode, otherwise the
 > compressed stream before uploading). Verify before decrypting:
 > ```bash
 > Use `cat "$BASE"` for `chunks=1`, or `cat "$BASE".part*` for `chunks>1`.

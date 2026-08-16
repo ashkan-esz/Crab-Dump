@@ -1152,12 +1152,8 @@
                     <label for="manualBackupRecipient">Telegram recipient</label>
                     <select id="manualBackupRecipient" class="manual-backup-recipient"></select>
                 </div>
-                <label class="manual-backup-encryption">
-                    <input id="manualBackupNoEncryption" type="checkbox" checked>
-                    Disable encryption for this backup
-                </label>
-                <div id="manualBackupWarning" class="manual-backup-warning" hidden>
-                    Plaintext upload: anyone with access to this chat can read this backup.
+                <div class="manual-backup-encryption">
+                    Encryption follows the server's <code>ENCRYPTION_TYPE</code> configuration.
                 </div>
                 <div id="manualBackupUnavailable" class="manual-backup-unavailable" hidden></div>
                 <div id="manualBackupError" class="manual-backup-error" role="alert" hidden></div>
@@ -1796,6 +1792,7 @@
                 <td>${escapeHtml(fmtBytes(record.dump_bytes))}</td>
                 <td>${escapeHtml(fmtBytes(record.packaged_bytes))}</td>
                 <td>${escapeHtml(record.compression_type || 'unknown')}${record.compression_level == null ? '' : ` ${record.compression_level}`}</td>
+                <td>${escapeHtml(record.encryption_type || (record.encrypted ? 'unknown' : 'unknown'))}</td>
                 <td>${record.chunk_count || 0}</td>
                 <td>${record.upload_retries || 0}</td>
                 <td class="history-error">${escapeHtml(record.error || '-')}</td>
@@ -1813,7 +1810,7 @@
             </div>
             <div class="history-stats">${stats}</div>
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
-                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Compression</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Compression</th><th>Encryption</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>` : '<div class="history-muted">No backup history yet.</div>'}
             <div class="history-controls">
@@ -2094,7 +2091,7 @@
         }
     }
 
-    async function backupDatabase(name, chatId, noEncryption) {
+    async function backupDatabase(name, chatId) {
         const el = dbCards.get(name);
         const button = el?.querySelector('.db-backup');
         manualRequests.add(name);
@@ -2107,7 +2104,7 @@
             const res = await apiFetch(`/api/status/database/${encodeURIComponent(name)}/backup`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId, no_encryption: noEncryption }),
+                body: JSON.stringify({ chat_id: chatId }),
             });
             if (!res.ok) {
                 const error = new Error(`HTTP ${res.status}`);
@@ -2164,8 +2161,6 @@
         const modal = document.getElementById('manualBackupModal');
         const form = document.getElementById('manualBackupForm');
         const recipient = document.getElementById('manualBackupRecipient');
-        const noEncryption = document.getElementById('manualBackupNoEncryption');
-        const warning = document.getElementById('manualBackupWarning');
         const unavailable = document.getElementById('manualBackupUnavailable');
         const error = document.getElementById('manualBackupError');
         const submit = document.getElementById('manualBackupSubmit');
@@ -2175,9 +2170,6 @@
             ? users.map(user => `<option value="${escapeHtml(user.chat_id)}">${escapeHtml(user.name)}</option>`).join('')
             : '<option value="">No enabled recipients</option>';
         recipient.disabled = !manualBackupAvailable || !users.length;
-        noEncryption.checked = true;
-        noEncryption.disabled = !manualBackupAvailable || !users.length;
-        warning.hidden = false;
         unavailable.hidden = manualBackupAvailable && users.length > 0;
         unavailable.textContent = !manualBackupAvailable
             ? 'Manual backups are unavailable when the process is not running in scheduled mode.'
@@ -2203,27 +2195,22 @@
         const modal = document.getElementById('manualBackupModal');
         const form = document.getElementById('manualBackupForm');
         const recipient = document.getElementById('manualBackupRecipient');
-        const noEncryption = document.getElementById('manualBackupNoEncryption');
-        const warning = document.getElementById('manualBackupWarning');
         const submit = document.getElementById('manualBackupSubmit');
         document.getElementById('manualBackupClose').onclick = closeManualBackupModal;
         document.getElementById('manualBackupCancel').onclick = closeManualBackupModal;
         modal.onclick = event => { if (event.target === modal && !submit.disabled) closeManualBackupModal(); };
-        noEncryption.onchange = () => { warning.hidden = !noEncryption.checked; };
         form.onsubmit = async event => {
             event.preventDefault();
             if (!manualBackupDatabase || submit.disabled) return;
             submit.disabled = true;
             submit.textContent = 'Queueing...';
             recipient.disabled = true;
-            noEncryption.disabled = true;
             form.setAttribute('aria-busy', 'true');
-            await backupDatabase(manualBackupDatabase, recipient.value, noEncryption.checked);
+            await backupDatabase(manualBackupDatabase, recipient.value);
             if (!modal.hidden) {
                 submit.disabled = false;
                 submit.textContent = 'Queue backup';
                 recipient.disabled = false;
-                noEncryption.disabled = false;
                 form.setAttribute('aria-busy', 'false');
             }
         };

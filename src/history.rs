@@ -47,6 +47,9 @@ pub struct HistoryRecord {
     /// record predates compression metadata.
     #[serde(default)]
     pub compression_level: Option<i32>,
+    /// Effective encryption mode. Legacy records omit this field.
+    #[serde(default = "default_encryption_type")]
+    pub encryption_type: String,
     pub encrypted: bool,
     pub duration_secs: f64,
     pub upload_duration_secs: f64,
@@ -59,6 +62,10 @@ fn default_source() -> String {
 }
 
 fn default_compression_type() -> String {
+    "unknown".into()
+}
+
+fn default_encryption_type() -> String {
     "unknown".into()
 }
 
@@ -452,6 +459,7 @@ mod tests {
             sha256: Some("00".repeat(32)),
             compression_type: "zstd".into(),
             compression_level: Some(3),
+            encryption_type: "none".into(),
             encrypted: false,
             duration_secs: 1.0,
             upload_duration_secs: 0.5,
@@ -479,6 +487,7 @@ mod tests {
             "sha256",
             "compression_type",
             "compression_level",
+            "encryption_type",
             "encrypted",
             "duration_secs",
             "upload_duration_secs",
@@ -509,6 +518,14 @@ mod tests {
         let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.compression_type, "unknown");
         assert_eq!(parsed.compression_level, None);
+    }
+
+    #[test]
+    fn old_records_without_encryption_metadata_deserialize_as_unknown() {
+        let mut value = serde_json::to_value(record("2026-08-01T00:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("encryption_type");
+        let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.encryption_type, "unknown");
     }
 
     #[test]

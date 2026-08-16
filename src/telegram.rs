@@ -111,7 +111,7 @@ pub fn format_backup_summary(
     filename: &str,
     total_bytes: u64,
     parts: usize,
-    encrypted: bool,
+    encryption_type: &str,
     compression: &str,
 ) -> String {
     format_backup_summary_with_label(
@@ -120,7 +120,7 @@ pub fn format_backup_summary(
         filename,
         total_bytes,
         parts,
-        encrypted,
+        encryption_type,
         compression,
     )
 }
@@ -130,7 +130,7 @@ pub fn format_scheduled_backup_summary(
     filename: &str,
     total_bytes: u64,
     parts: usize,
-    encrypted: bool,
+    encryption_type: &str,
     compression: &str,
 ) -> String {
     format_backup_summary_with_label(
@@ -139,7 +139,7 @@ pub fn format_scheduled_backup_summary(
         filename,
         total_bytes,
         parts,
-        encrypted,
+        encryption_type,
         compression,
     )
 }
@@ -150,11 +150,10 @@ fn format_backup_summary_with_label(
     filename: &str,
     total_bytes: u64,
     parts: usize,
-    encrypted: bool,
+    encryption_type: &str,
     compression: &str,
 ) -> String {
     let part_label = if parts == 1 { "part" } else { "parts" };
-    let encryption = if encrypted { "age enabled" } else { "disabled" };
     let size_mb = total_bytes as f64 / (1024.0 * 1024.0);
     format!(
         "{label}\n\n\
@@ -163,10 +162,11 @@ fn format_backup_summary_with_label(
          📏 <b>Packaged size:</b> <code>{size_mb:.2} MB</code>\n\
          🧩 <b>Parts:</b> <code>{parts} {part_label}</code>\n\
          🗜️ <b>Compression:</b> <code>{}</code>\n\
-         🔐 <b>Encryption:</b> <code>{encryption}</code>",
+         🔐 <b>Encryption:</b> <code>{}</code>",
         escape_html(database),
         escape_html(filename),
         escape_html(compression),
+        escape_html(encryption_type),
     )
 }
 
@@ -625,7 +625,7 @@ mod tests {
             "analytics_20260812T031500Z.dump.zst.age",
             100_000_000,
             3,
-            true,
+            "age-recipient",
             "zstd",
         );
         assert!(message.contains("analytics"));
@@ -643,15 +643,15 @@ mod tests {
             "orders_20260812T031500Z.dump.zst",
             42,
             1,
-            false,
+            "none",
             "zstd",
         );
         assert!(message.contains("orders"));
         assert!(message.contains("0.00 MB"));
         assert!(message.contains("1 part"));
         assert!(message.contains("zstd"));
-        assert!(message.contains("disabled"));
-        assert!(message.contains("Encryption:</b> <code>disabled"));
+        assert!(message.contains("none"));
+        assert!(message.contains("Encryption:</b> <code>none"));
     }
 
     #[test]
@@ -670,7 +670,7 @@ mod tests {
             "analytics_20260812T031500Z.dump.zst.age",
             100_000_000,
             3,
-            true,
+            "age-passphrase",
             "zstd",
         );
         assert!(summary.contains("Scheduled backup ready"));

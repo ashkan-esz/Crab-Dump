@@ -9,7 +9,7 @@
 //!   1. TOML `[[databases]]` arrays from config.toml
 //!   2. Indexed environment variables (`DATABASE_URL_0`, `DATABASE_URL_1`, …)
 //!
-//! Shared settings (`TG_BOT_TOKEN`, `AGE_RECIPIENT`, …) apply uniformly across
+//! Shared settings (`TG_BOT_TOKEN`, `ENCRYPTION_TYPE`, …) apply uniformly across
 //! all databases. Per-database settings (`PG_DUMP_EXTRA_ARGS_N`) override the
 //! shared defaults for their respective server.
 
@@ -24,6 +24,7 @@ use serde::Deserialize;
 
 use crate::compress::CompressionCodec;
 use crate::cron::Cron;
+use crate::encrypt::EncryptionMode;
 use crate::history::HistoryStore;
 
 // ===========================================================================
@@ -95,8 +96,8 @@ pub struct SharedConfig {
     pub tg_bot_token: String,
     /// Target chats for uploaded chunks (numeric IDs or `@channelusername`).
     pub tg_chat_ids: Vec<String>,
-    /// age X25519 recipient public key (`age1…`). `None` → not encrypted.
-    pub age_recipient: Option<String>,
+    /// Global streaming encryption mode.
+    pub encryption_mode: EncryptionMode,
     /// Maximum chunk size in MiB (Telegram limit: 50 MiB).
     pub chunk_size_mb: u64,
     /// Directory for temporary chunk files; falls back to OS temp dir.
@@ -151,10 +152,7 @@ impl fmt::Debug for SharedConfig {
             .field("compression_level", &self.compression_level)
             .field("compression_checksum", &self.compression_checksum)
             .field("tg_chat_ids", &"[REDACTED]")
-            .field(
-                "age_recipient",
-                &self.age_recipient.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("encryption_mode", &self.encryption_mode)
             .field("chunk_size_mb", &self.chunk_size_mb)
             .field("work_dir", &self.work_dir)
             .field("api_port", &self.api_port)
@@ -396,7 +394,13 @@ struct RawConfigFile {
     pg_dump_extra_args: Option<String>,
     tg_bot_token: Option<String>,
     tg_chat_ids: Option<Vec<String>>,
+    /// Encryption settings are skipped by TOML and populated only from env.
+    #[serde(skip)]
+    encryption_type: Option<String>,
+    #[serde(skip)]
     age_recipient: Option<String>,
+    #[serde(skip)]
+    age_passphrase: Option<String>,
     chunk_size_mb: Option<u64>,
     work_dir: Option<String>,
     history_dir: Option<String>,
@@ -565,20 +569,56 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         bail!("TG_CHAT_ID_{index} must not be blank");
     }
 
-    let age_recipient = match raw.age_recipient.clone() {
-        Some(s) => {
-            if !s.starts_with("age1") {
-                // Truncate by characters, not bytes — a byte slice panics when
-                // the cut lands inside a multi-byte character.
+    let encryption_mode = match raw
+        .encryption_type
+        .as_deref()
+        .unwrap_or("none")
+        .trim()
+    {
+        "none" => {
+            if raw.age_recipient.is_some() || raw.age_passphrase.is_some() {
                 bail!(
-                    "AGE_RECIPIENT looks invalid: expected an X25519 recipient \
-                     starting with `age1`, got `{}`",
-                    s.chars().take(12).collect::<String>(),
+                    "ENCRYPTION_TYPE=none must not be combined with AGE_RECIPIENT or AGE_PASSPHRASE"
                 );
             }
-            Some(s)
+            EncryptionMode::None
         }
-        None => None,
+        "age-recipient" => {
+            if raw.age_passphrase.is_some() {
+                bail!(
+                    "ENCRYPTION_TYPE=age-recipient must not be combined with AGE_PASSPHRASE"
+                );
+            }
+            let recipient = raw
+                .age_recipient
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!("AGE_RECIPIENT is required when ENCRYPTION_TYPE=age-recipient")
+                })?;
+            if !recipient.starts_with("age1") {
+                bail!("AGE_RECIPIENT must be a valid age X25519 recipient starting with `age1`");
+            }
+            crate::encrypt::encryptor_for(&recipient)
+                .context("AGE_RECIPIENT is not a valid age X25519 recipient")?;
+            EncryptionMode::AgeRecipient(recipient)
+        }
+        "age-passphrase" => {
+            if raw.age_recipient.is_some() {
+                bail!("ENCRYPTION_TYPE=age-passphrase must not be combined with AGE_RECIPIENT");
+            }
+            let passphrase = raw
+                .age_passphrase
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!("AGE_PASSPHRASE is required when ENCRYPTION_TYPE=age-passphrase")
+                })?;
+            EncryptionMode::AgePassphrase(passphrase)
+        }
+        value => bail!(
+            "ENCRYPTION_TYPE must be one of `none`, `age-recipient`, or `age-passphrase`, got `{value}`"
+        ),
     };
 
     let chunk_size_mb = match raw.chunk_size_mb {
@@ -646,7 +686,7 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         compression_checksum,
         tg_bot_token,
         tg_chat_ids,
-        age_recipient,
+        encryption_mode,
         chunk_size_mb,
         work_dir,
         api_port: raw.api_port.unwrap_or(8080),
@@ -753,7 +793,9 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         pg_dump_extra_args: env("PG_DUMP_EXTRA_ARGS").or(raw.pg_dump_extra_args),
         tg_bot_token: env("TG_BOT_TOKEN").or(raw.tg_bot_token),
         tg_chat_ids: raw.tg_chat_ids,
-        age_recipient: env("AGE_RECIPIENT").or(raw.age_recipient),
+        encryption_type: get_env("ENCRYPTION_TYPE"),
+        age_recipient: get_env("AGE_RECIPIENT"),
+        age_passphrase: get_env("AGE_PASSPHRASE"),
         chunk_size_mb: env("CHUNK_SIZE_MB")
             .and_then(|v| v.parse().ok())
             .or(raw.chunk_size_mb),
@@ -1080,7 +1122,7 @@ mod tests {
             compression_checksum: Some(true),
             tg_bot_token: "t".into(),
             tg_chat_ids: vec!["c".into()],
-            age_recipient: None,
+            encryption_mode: EncryptionMode::None,
             chunk_size_mb: 49,
             work_dir: std::env::temp_dir(),
             api_port: 8080,
@@ -1182,6 +1224,92 @@ mod tests {
             ..shared_raw()
         };
         assert_eq!(build_shared_config(&raw).unwrap().max_parallel_databases, 2);
+    }
+
+    #[test]
+    fn encryption_modes_validate_required_secrets_and_defaults() {
+        let none = build_shared_config(&shared_raw()).unwrap();
+        assert_eq!(none.encryption_mode.label(), "none");
+
+        let recipient = RawConfigFile {
+            encryption_type: Some("age-recipient".into()),
+            age_recipient: Some(
+                "age1t7rxyev2z3rw82stdlrrepyc39nvn86l5078zqkf5uasdy86jp6svpy7pa".into(),
+            ),
+            ..shared_raw()
+        };
+        assert_eq!(
+            build_shared_config(&recipient)
+                .unwrap()
+                .encryption_mode
+                .label(),
+            "age-recipient"
+        );
+
+        let passphrase = RawConfigFile {
+            encryption_type: Some("age-passphrase".into()),
+            age_passphrase: Some("correct horse battery staple".into()),
+            ..shared_raw()
+        };
+        assert_eq!(
+            build_shared_config(&passphrase)
+                .unwrap()
+                .encryption_mode
+                .label(),
+            "age-passphrase"
+        );
+        let debug = format!("{:?}", build_shared_config(&passphrase).unwrap());
+        assert!(!debug.contains("correct horse"));
+    }
+
+    #[test]
+    fn encryption_modes_reject_missing_invalid_and_mismatched_secrets() {
+        for raw in [
+            RawConfigFile {
+                encryption_type: Some("age-recipient".into()),
+                ..shared_raw()
+            },
+            RawConfigFile {
+                encryption_type: Some("age-passphrase".into()),
+                ..shared_raw()
+            },
+            RawConfigFile {
+                encryption_type: Some("invalid".into()),
+                ..shared_raw()
+            },
+            RawConfigFile {
+                encryption_type: Some("none".into()),
+                age_passphrase: Some("secret".into()),
+                ..shared_raw()
+            },
+            RawConfigFile {
+                encryption_type: Some("age-recipient".into()),
+                age_recipient: Some("not-an-age-recipient".into()),
+                ..shared_raw()
+            },
+            RawConfigFile {
+                encryption_type: Some("age-passphrase".into()),
+                age_passphrase: Some(" ".into()),
+                ..shared_raw()
+            },
+        ] {
+            assert!(build_shared_config(&raw).is_err());
+        }
+    }
+
+    #[test]
+    fn encryption_settings_are_not_loaded_from_toml() {
+        let parsed: RawConfigFile = toml::from_str(
+            r#"
+            encryption_type = "age-passphrase"
+            age_recipient = "age1not-a-secret"
+            age_passphrase = "not-a-secret"
+            "#,
+        )
+        .unwrap();
+        assert!(parsed.encryption_type.is_none());
+        assert!(parsed.age_recipient.is_none());
+        assert!(parsed.age_passphrase.is_none());
     }
 
     #[test]
@@ -1701,6 +1829,7 @@ mod tests {
             tg_bot_token: Some("t".into()),
             tg_chat_ids: Some(vec!["c".into()]),
             compression_codec: Some("zstd".into()),
+            encryption_type: Some("age-recipient".into()),
             // Byte index 12 lands inside a multi-byte char — the old byte-slice
             // excerpt panicked here instead of reporting the bad value.
             age_recipient: Some("a密码密码密码".into()),

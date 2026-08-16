@@ -38,6 +38,7 @@ use chunk::ChunkWriter;
 use compression_config::{CompressionConfigStore, CompressionSettings};
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_state::DatabaseStateStore;
+use encrypt::EncryptionMode;
 use history::{HistoryRecord, HistoryStore};
 use routing::{ProfileStore, RouteManager, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH};
 
@@ -68,10 +69,6 @@ struct Cli {
     /// Validate config and check pg_dump availability without dumping or uploading.
     #[arg(long)]
     dry_run: bool,
-
-    /// Disable age encryption for this run, even if AGE_RECIPIENT is set.
-    #[arg(long)]
-    no_encryption: bool,
 }
 
 fn main() -> Result<()> {
@@ -103,6 +100,7 @@ fn main() -> Result<()> {
     )
     .context("loading dashboard compression configuration")?;
     web::set_compression_config(Arc::clone(&compression_store));
+    web::set_encryption_type(shared_cfg.encryption_mode.label());
     let database_states = Arc::new(DatabaseStateStore::load(&data_dir, &names));
     web::set_database_state_store(Arc::clone(&database_states));
     let telegram_users = Arc::new(
@@ -226,6 +224,7 @@ fn main() -> Result<()> {
         history_dir = %shared_cfg.history.directory_display(),
         chunk_mb = shared_cfg.chunk_size_mb,
         max_parallel = shared_cfg.max_parallel_databases,
+        encryption_type = shared_cfg.encryption_mode.label(),
         "configuration resolved",
     );
 
@@ -271,13 +270,7 @@ fn main() -> Result<()> {
                 Arc::clone(&telegram_client),
             );
         }
-        run_scheduled(
-            &shared_cfg,
-            &databases,
-            cli.no_encryption,
-            schedule,
-            &telegram_client,
-        );
+        run_scheduled(&shared_cfg, &databases, schedule, &telegram_client);
         // `run_scheduled` only returns if the loop is ever made to terminate;
         // today it runs until the process is signalled.
         return Ok(());
@@ -289,7 +282,6 @@ fn main() -> Result<()> {
     let (results, failures) = run_cycle(
         &shared_cfg,
         &databases,
-        cli.no_encryption,
         &telegram_client,
         BackupSource::OneShot,
     );
@@ -448,7 +440,6 @@ fn chunk_history_snapshot(
 fn run_scheduled(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
-    no_encryption: bool,
     schedule: &Schedule,
     client: &ClientHandle,
 ) {
@@ -506,13 +497,7 @@ fn run_scheduled(
             );
         }
 
-        let (results, failures) = run_cycle(
-            cfg,
-            databases,
-            no_encryption,
-            client,
-            BackupSource::Scheduled,
-        );
+        let (results, failures) = run_cycle(cfg, databases, client, BackupSource::Scheduled);
         web::set_cycle_running(false);
 
         // A failing database is reported and then forgotten: the next cycle
@@ -587,7 +572,6 @@ fn run_manual_requests(
                     BackupOptions {
                         chat_ids: vec![request.chat_id.clone()],
                         recipient: Some(request.recipient_name.clone()),
-                        no_encryption: request.no_encryption,
                     },
                 )
             })
@@ -715,7 +699,6 @@ fn sleep_slice(now: NaiveDateTime, target: NaiveDateTime) -> Option<std::time::D
 fn run_cycle(
     cfg: &SharedConfig,
     databases: &[DatabaseConfig],
-    no_encryption: bool,
     client: &ClientHandle,
     source: BackupSource,
 ) -> (Vec<BackupResult>, Vec<DatabaseFailure>) {
@@ -738,7 +721,6 @@ fn run_cycle(
                 BackupOptions {
                     chat_ids: cfg.tg_chat_ids.clone(),
                     recipient: None,
-                    no_encryption,
                 },
             )
         })
@@ -814,6 +796,7 @@ struct BackupResult {
     total_bytes: u64,
     /// Whether age encryption was applied to the stream.
     encrypted: bool,
+    encryption_mode: EncryptionMode,
     /// Compression codec name, or `uncompressed` for raw dumps.
     compression: &'static str,
     /// SHA-256 digest of the final byte stream (reassembly verification).
@@ -831,6 +814,7 @@ struct AttemptMetrics {
     chunks_count: usize,
     sha256: Option<[u8; 32]>,
     encrypted: bool,
+    encryption_mode: EncryptionMode,
     upload_duration_secs: f64,
     upload_attempts: u64,
     upload_retries: u64,
@@ -840,7 +824,6 @@ struct AttemptMetrics {
 struct BackupOptions {
     chat_ids: Vec<String>,
     recipient: Option<String>,
-    no_encryption: bool,
 }
 
 type CancellationToken = Arc<std::sync::atomic::AtomicBool>;
@@ -969,7 +952,8 @@ fn run_database(
     let started = SystemTime::now();
     let db_name = db.display_name();
     let mut metrics = AttemptMetrics {
-        encrypted: !options.no_encryption && cfg.age_recipient.is_some(),
+        encrypted: cfg.encryption_mode.encrypted(),
+        encryption_mode: cfg.encryption_mode.clone(),
         ..Default::default()
     };
 
@@ -978,10 +962,7 @@ fn run_database(
     // display names are rejected at config time, so the timestamped prefix
     // remains unique for a database's run.
     let stamp = dump_timestamp(started)?;
-    let extension = backup_extension(
-        cfg.compression_codec,
-        !options.no_encryption && cfg.age_recipient.is_some(),
-    );
+    let extension = backup_extension(cfg.compression_codec, cfg.encryption_mode.encrypted());
     let base_name = format!("{db_name}_{stamp}{extension}");
 
     let result = backup_pipeline(
@@ -1020,6 +1001,7 @@ fn run_database(
                 sha256: Some(hex::encode(success.sha256)),
                 compression_type: compression_label(cfg.compression_codec).into(),
                 compression_level: cfg.compression_level,
+                encryption_type: success.encryption_mode.label().into(),
                 encrypted: success.encrypted,
                 duration_secs,
                 upload_duration_secs: metrics.upload_duration_secs,
@@ -1061,6 +1043,7 @@ fn run_database(
                 sha256: metrics.sha256.map(hex::encode),
                 compression_type: compression_label(cfg.compression_codec).into(),
                 compression_level: cfg.compression_level,
+                encryption_type: metrics.encryption_mode.label().into(),
                 encrypted: metrics.encrypted,
                 duration_secs,
                 upload_duration_secs: metrics.upload_duration_secs,
@@ -1110,12 +1093,8 @@ fn backup_pipeline(
     web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
 
     // ── Resolve encryption mode ────────────────────────────────────────────
-    let age_recipient = if options.no_encryption {
-        None
-    } else {
-        cfg.age_recipient.as_deref()
-    };
-    let encrypted = age_recipient.is_some();
+    let encryption_mode = &cfg.encryption_mode;
+    let encrypted = encryption_mode.encrypted();
 
     // ── Start pg_dump subprocess ───────────────────────────────────────────
     // Keep the DumpPipe alive so we can verify pg_dump's exit status after
@@ -1133,59 +1112,53 @@ fn backup_pipeline(
     //   plain compressed:     pg_dump | compression        | chunked files
     //   encrypted raw:        pg_dump             | age  | chunked files
     //   plain raw:             pg_dump                    | chunked files
-    let mut sink = match age_recipient {
-        Some(recipient) => {
-            tracing::info!(db = db_name, "encryption enabled (age X25519)");
-            let enc = encrypt::encryptor_for(recipient).context("building age encryptor")?;
-            let age_writer = encrypt::wrap(
-                enc,
-                ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
-            )
-            .context("wrapping chunker in age StreamWriter")?;
-            match cfg.compression_codec {
-                Some(codec) => {
-                    let level = cfg
-                        .compression_level
-                        .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
-                    let checksum = compression_checksum(codec, cfg.compression_checksum);
-                    Sink::EncryptedCompressed(
-                        compress::encoder(age_writer, codec, level, checksum)
-                            .context("building compression encoder")?,
-                    )
-                }
-                None => Sink::EncryptedRaw(age_writer),
-            }
-        }
-        None => {
-            if cfg.compression_codec.is_none() {
-                tracing::info!(db = db_name, "compression disabled (raw dump)");
-            } else if options.no_encryption {
-                tracing::warn!(
+    let mut sink =
+        match encrypt::encryptor_for_mode(encryption_mode).context("building age encryptor")? {
+            Some(enc) => {
+                tracing::info!(
                     db = db_name,
-                    "--no-encryption — dump will be compressed but NOT encrypted"
+                    encryption_type = encryption_mode.label(),
+                    "encryption enabled"
                 );
-            } else {
-                tracing::warn!(
-                    db = db_name,
-                    "AGE_RECIPIENT not set — dump will be compressed but NOT encrypted"
-                );
-            }
-            let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
-            match cfg.compression_codec {
-                Some(codec) => {
-                    let level = cfg
-                        .compression_level
-                        .ok_or_else(|| anyhow!("compression level missing for configured codec"))?;
-                    let checksum = compression_checksum(codec, cfg.compression_checksum);
-                    Sink::PlainCompressed(
-                        compress::encoder(chunker, codec, level, checksum)
-                            .context("building compression encoder")?,
-                    )
+                let age_writer = encrypt::wrap(
+                    enc,
+                    ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
+                )
+                .context("wrapping chunker in age StreamWriter")?;
+                match cfg.compression_codec {
+                    Some(codec) => {
+                        let level = cfg.compression_level.ok_or_else(|| {
+                            anyhow!("compression level missing for configured codec")
+                        })?;
+                        let checksum = compression_checksum(codec, cfg.compression_checksum);
+                        Sink::EncryptedCompressed(
+                            compress::encoder(age_writer, codec, level, checksum)
+                                .context("building compression encoder")?,
+                        )
+                    }
+                    None => Sink::EncryptedRaw(age_writer),
                 }
-                None => Sink::PlainRaw(chunker),
             }
-        }
-    };
+            None => {
+                if cfg.compression_codec.is_none() {
+                    tracing::info!(db = db_name, "compression disabled (raw dump)");
+                }
+                let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
+                match cfg.compression_codec {
+                    Some(codec) => {
+                        let level = cfg.compression_level.ok_or_else(|| {
+                            anyhow!("compression level missing for configured codec")
+                        })?;
+                        let checksum = compression_checksum(codec, cfg.compression_checksum);
+                        Sink::PlainCompressed(
+                            compress::encoder(chunker, codec, level, checksum)
+                                .context("building compression encoder")?,
+                        )
+                    }
+                    None => Sink::PlainRaw(chunker),
+                }
+            }
+        };
 
     // ── Stream pg_dump stdout through the pipeline ─────────────────────────
     // The 64 KiB buffer is chosen as a reasonable trade-off: large enough to
@@ -1214,8 +1187,7 @@ fn backup_pipeline(
             pipe.cancel().context("terminating cancelled pg_dump")?;
             return Err(cancelled());
         }
-        sink.write(&buf[..n])
-            .with_context(|| format!("writing through pipeline (db={db_name})"))?;
+        write_sink_chunk(&mut sink, &buf[..n], db_name)?;
         raw_bytes += n as u64;
         if raw_bytes - reported_at >= DUMP_REPORT_EVERY {
             web::set_db_dump_bytes(db_name, raw_bytes);
@@ -1280,6 +1252,7 @@ fn backup_pipeline(
         db = db_name,
         chunks = chunks_count,
         total_bytes,
+        encryption_type = encryption_mode.label(),
         encrypted,
         sha256 = hex::encode(hash),
         elapsed_secs = elapsed.as_secs_f64(),
@@ -1293,7 +1266,7 @@ fn backup_pipeline(
                 base_name,
                 total_bytes,
                 chunks_count,
-                encrypted,
+                encryption_mode.label(),
                 compression_label(cfg.compression_codec),
             )
         } else {
@@ -1302,7 +1275,7 @@ fn backup_pipeline(
                 base_name,
                 total_bytes,
                 chunks_count,
-                encrypted,
+                encryption_mode.label(),
                 compression_label(cfg.compression_codec),
             )
         };
@@ -1446,6 +1419,7 @@ fn backup_pipeline(
         db_name: db_name.to_string(),
         total_bytes,
         encrypted,
+        encryption_mode: cfg.encryption_mode.clone(),
         compression: compression_label(cfg.compression_codec),
         sha256: hash,
         elapsed_secs: elapsed.as_secs_f64(),
@@ -1626,10 +1600,8 @@ fn execute_database_indices(
                         sha256: None,
                         compression_type: compression_label(cfg.compression_codec).into(),
                         compression_level: cfg.compression_level,
-                        encrypted: !options_by_db
-                            .get(&databases[i].display_name())
-                            .is_some_and(|options| options.no_encryption)
-                            && cfg.age_recipient.is_some(),
+                        encryption_type: cfg.encryption_mode.label().into(),
+                        encrypted: cfg.encryption_mode.encrypted(),
                         duration_secs: 0.0,
                         upload_duration_secs: 0.0,
                         upload_attempts: 0,
@@ -1716,12 +1688,13 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
 
     for (i, r) in results.iter().enumerate() {
         println!(
-            "server {}: {} (bytes={}, chunks={}, compression={}, encrypted={}, sha256={}, duration={:.1}s)",
+        "server {}: {} (bytes={}, chunks={}, compression={}, encryption_type={}, encrypted={}, sha256={}, duration={:.1}s)",
             i,
             r.db_name,
             r.total_bytes,
             r.chunks_count,
             r.compression,
+            r.encryption_mode.label(),
             r.encrypted,
             hex::encode(r.sha256),
             r.elapsed_secs,
@@ -1817,6 +1790,11 @@ impl Sink {
                 .map_err(|e| anyhow::anyhow!("chunker finish: {e}")),
         }
     }
+}
+
+fn write_sink_chunk(sink: &mut Sink, buf: &[u8], db_name: &str) -> Result<()> {
+    sink.write_all(buf)
+        .with_context(|| format!("writing through pipeline (db={db_name})"))
 }
 
 /// Convert a Unix epoch timestamp to a readable, filename-safe UTC timestamp
@@ -1979,6 +1957,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pipeline_write_preserves_bytes_at_chunk_boundary() {
+        let root =
+            std::env::temp_dir().join(format!("crab-dump-pipeline-write-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let original: Vec<u8> = (0..5000).map(|n| (n % 251) as u8).collect();
+        let mut sink = Sink::PlainRaw(ChunkWriter::new(&root, "raw.dump", 1024));
+        write_sink_chunk(&mut sink, &original, "test").unwrap();
+        let (parts, _, total) = sink.finish().unwrap();
+
+        assert_eq!(total, original.len() as u64);
+        let reassembled = root.join("reassembled");
+        chunk::reassemble(&parts, &reassembled).unwrap();
+        assert_eq!(std::fs::read(&reassembled).unwrap(), original);
+
+        chunk::cleanup_prefix(&root, "raw.dump");
+        std::fs::remove_file(&reassembled).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// The concurrency limit is the whole point of the parameter: never more
     /// than `workers` pipelines in flight, every database still processed, and
     /// results in input order so the manifest does not depend on timing.
@@ -2136,7 +2136,6 @@ mod tests {
         let options = BackupOptions {
             chat_ids: vec!["primary".into(), "archive".into()],
             recipient: None,
-            no_encryption: false,
         };
         assert_eq!(
             BackupSource::Manual.notification_chat_ids(&options),
