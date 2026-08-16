@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>crab-dump · Databases</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0f19;--card:#111827;--border:#263348;--text:#e2e8f0;--muted:#8a98ad;--accent:#60a5fa;--danger:#f87171;--ok:#4ade80}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+    main{width:min(1120px,100%);margin:auto;padding:28px 20px 48px}.head{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid var(--border);padding-bottom:20px}
+    h1{margin:0}.muted{color:var(--muted)}a{color:var(--accent)}button{cursor:pointer;color:var(--text);background:#172033;border:1px solid var(--border);border-radius:7px;padding:9px 13px}button.primary{background:#2563eb;border-color:#3b82f6}button.danger{color:var(--danger)}
+    .bar{display:flex;gap:10px;align-items:center;margin:20px 0}.notice{padding:12px;border:1px solid var(--border);border-radius:8px;margin:12px 0}.error{color:var(--danger)}.ok{color:var(--ok)}
+    table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border)}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--border)}th{color:var(--muted);font-size:12px;text-transform:uppercase}tr:last-child td{border:0}.badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;background:#263348}.badge.dashboard{color:var(--accent)}.badge.env{color:var(--muted)}.actions{display:flex;gap:7px;white-space:nowrap}
+    dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:20px;width:min(520px,calc(100% - 30px))}dialog::backdrop{background:#020617bb}label{display:grid;gap:5px;margin:12px 0;color:var(--muted)}input{padding:10px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:6px}menu{display:flex;justify-content:flex-end;gap:8px;padding:0;margin:20px 0 0}
+  </style>
+</head>
+<body>
+<main>
+  <header class="head"><div><p class="muted">Administration</p><h1>Databases</h1><p class="muted">Environment databases are visible but read-only. Dashboard entries are stored in the owner-only data directory.</p></div><a href="/">Back to dashboard</a></header>
+  <div id="notice" class="notice" hidden></div>
+  <div class="bar"><button id="add" class="primary">Add database</button><button id="history">Mutation history</button><span id="state" class="muted">Loading…</span></div>
+  <table><caption>Configured databases</caption><thead><tr><th>Source</th><th>Name</th><th>URL</th><th>State</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table>
+</main>
+<dialog id="editor"><form method="dialog" id="form"><h2 id="title">Add database</h2><label>PostgreSQL URL<input id="url" type="url" autocomplete="off"><small class="muted">Required when adding. Leave blank while editing to retain the stored URL.</small></label><label>Display name<input id="name" maxlength="120"></label><label>pg_dump extra args<input id="args" maxlength="500"></label><p id="form-error" class="error"></p><menu><button type="button" id="cancel-editor">Cancel</button><button class="primary" value="default">Save</button></menu></form></dialog>
+<script>
+(() => {
+  const rows=document.querySelector('#rows'), notice=document.querySelector('#notice'), state=document.querySelector('#state');
+  const editor=document.querySelector('#editor'), form=document.querySelector('#form');
+  let csrf=document.cookie.split('; ').find(x=>x.startsWith('crab_csrf='))?.split('=')[1]||'', editing=null, admin=false;
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const show=(text,err=false)=>{notice.textContent=text;notice.className='notice '+(err?'error':'ok');notice.hidden=false};
+  async function call(url,opts={}){opts.headers={...(opts.headers||{}),'x-csrf-token':csrf,'content-type':'application/json'};const r=await fetch(url,opts);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||`Request failed (${r.status})`);return d}
+  async function load(){state.textContent='Loading…';try{const data=await call('/api/databases');rows.innerHTML=data.length?data.map(db=>`<tr><td><span class="badge ${db.source}">${esc(db.source)}</span></td><td>${esc(db.name)}</td><td class="muted">${esc(db.url)}</td><td>${db.enabled?'enabled':'disabled'}${db.running?' · running':''}</td><td>${db.source==='dashboard'&&admin?`<span class="actions"><button data-edit="${esc(db.id)}">Edit</button><button class="danger" data-delete="${esc(db.id)}">Delete</button></span>`:'read-only'}</td></tr>`).join(''):'<tr><td colspan="5" class="muted">No databases configured.</td></tr>';state.textContent=`${data.length} database${data.length===1?'':'s'}`}catch(e){show(e.message,true);state.textContent='Unable to load'}}
+  function open(db){editing=db?.id||null;document.querySelector('#title').textContent=editing?'Edit database':'Add database';document.querySelector('#url').value='';document.querySelector('#url').placeholder=editing?'Leave blank to retain the stored URL':'postgresql://user:password@host/database';document.querySelector('#name').value=db?.name||'';document.querySelector('#args').value='';document.querySelector('#form-error').textContent='';editor.showModal()}
+  document.querySelector('#add').onclick=()=>open();document.querySelector('#history').onclick=async()=>{try{const h=await call('/api/database-history');show(h.length?`${h.length} mutation records loaded.`:'No mutation history yet.');}catch(e){show(e.message,true)}};
+  rows.onclick=async e=>{const edit=e.target.closest('[data-edit]'), del=e.target.closest('[data-delete]');if(edit){const all=await call('/api/databases');open(all.find(x=>x.id===edit.dataset.edit))}if(del&&confirm('Delete this dashboard-managed database?'))try{await call('/api/databases/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});show('Database deleted.');load()}catch(x){show(x.message,true)}};
+  document.querySelector('#cancel-editor').onclick=()=>editor.close();
+  form.onsubmit=async e=>{e.preventDefault();const url=document.querySelector('#url').value.trim();if(!editing&&!url){document.querySelector('#form-error').textContent='PostgreSQL URL is required when adding a database.';return}const body={url:url||undefined,name:document.querySelector('#name').value.trim()||undefined,pg_dump_extra_args:document.querySelector('#args').value.trim()||undefined};try{await call(editing?'/api/databases/'+encodeURIComponent(editing):'/api/databases',{method:editing?'PUT':'POST',body:JSON.stringify(body)});editor.close();show(editing?'Database updated.':'Database added.');load()}catch(x){document.querySelector('#form-error').textContent=x.message}};
+  (async()=>{try{const config=await call('/api/config');admin=config.dashboard_role==='admin';document.querySelector('#add').hidden=!admin;document.querySelector('#history').hidden=!admin;await load()}catch(e){show('Permission denied or session expired.',true);state.textContent='Unable to load'}})();
+})();
+</script>
+</body>
+</html>

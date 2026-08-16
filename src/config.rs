@@ -39,7 +39,7 @@ const MIN_CHUNK_SIZE_MB: u64 = 1;
 
 /// Maximum number of configured databases. Prevents resource exhaustion
 /// when operators accidentally configure hundreds of databases.
-const DEFAULT_MAX_DATABASES: usize = 10;
+pub const DEFAULT_MAX_DATABASES: usize = 10;
 
 /// How many database backups run at the same time by default.
 ///

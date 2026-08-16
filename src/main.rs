@@ -25,6 +25,7 @@ mod compress;
 mod compression_config;
 mod config;
 mod cron;
+mod database_registry;
 mod database_state;
 mod dump;
 mod encrypt;
@@ -38,6 +39,7 @@ mod web;
 use chunk::ChunkWriter;
 use compression_config::{CompressionConfigStore, CompressionSettings};
 use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
+use database_registry::DatabaseRegistry;
 use database_state::DatabaseStateStore;
 use encrypt::EncryptionMode;
 use history::{HistoryRecord, HistoryStore};
@@ -86,11 +88,18 @@ fn main() -> Result<()> {
     // ── Resolve configuration ───────────────────────────────────────────────
     let (shared_cfg, databases) =
         Config::resolve_databases().context("loading configuration from env")?;
+    let data_dir = PathBuf::from(DATA_DIR);
+    let max_databases = std::env::var("CRAB_MAX_DATABASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(config::DEFAULT_MAX_DATABASES);
+    let registry = DatabaseRegistry::load(&data_dir, databases, max_databases)
+        .context("loading dashboard database registry")?;
+    let databases = registry.config_snapshot();
     let names = databases
         .iter()
         .map(DatabaseConfig::display_name)
         .collect::<Vec<_>>();
-    let data_dir = PathBuf::from(DATA_DIR);
     let compression_store = CompressionConfigStore::load(
         data_dir.join("compression-config.json"),
         CompressionSettings {
@@ -104,6 +113,7 @@ fn main() -> Result<()> {
     web::set_encryption_type(shared_cfg.encryption_mode.label());
     let database_states = Arc::new(DatabaseStateStore::load(&data_dir, &names));
     web::set_database_state_store(Arc::clone(&database_states));
+    web::set_database_registry(Arc::clone(&registry));
     let telegram_users = Arc::new(
         telegram_users::TelegramUserStore::load(data_dir.join("telegram_users.toml"))
             .context("loading Telegram users directory")?,
@@ -179,6 +189,7 @@ fn main() -> Result<()> {
     let dashboard_bot_token = shared_cfg.tg_bot_token.clone();
     let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
     let dashboard_work_dir = shared_cfg.work_dir.clone();
+    let dashboard_registry = Arc::clone(&registry);
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -205,6 +216,7 @@ fn main() -> Result<()> {
                 dashboard_bot_token,
                 dashboard_fallback_proxy,
                 dashboard_work_dir,
+                dashboard_registry,
             )
             .await
             {
@@ -271,7 +283,7 @@ fn main() -> Result<()> {
                 Arc::clone(&telegram_client),
             );
         }
-        run_scheduled(&shared_cfg, &databases, schedule, &telegram_client);
+        run_scheduled(&shared_cfg, &registry, schedule, &telegram_client);
         // `run_scheduled` only returns if the loop is ever made to terminate;
         // today it runs until the process is signalled.
         return Ok(());
@@ -440,19 +452,20 @@ fn chunk_history_snapshot(
 /// rather than running them back to back.
 fn run_scheduled(
     cfg: &SharedConfig,
-    databases: &[DatabaseConfig],
+    registry: &Arc<DatabaseRegistry>,
     schedule: &Schedule,
     client: &ClientHandle,
 ) {
+    let initial_databases = registry.config_snapshot();
     match schedule {
         Schedule::Every(interval) => tracing::info!(
             interval_secs = interval.as_secs(),
-            databases = databases.len(),
+            databases = initial_databases.len(),
             "scheduled mode — running the first cycle now, then every interval",
         ),
         Schedule::Cron(expr) => tracing::info!(
             cron = %expr,
-            databases = databases.len(),
+            databases = initial_databases.len(),
             "scheduled mode — waiting for the first matching time (nothing runs now)",
         ),
     }
@@ -461,7 +474,7 @@ fn run_scheduled(
     let controller = web::manual_backup_controller();
     let mut next_interval = None;
     for cycle in 1u64.. {
-        if run_manual_requests(cfg, databases, client, &controller) {
+        if run_manual_requests(cfg, registry, client, &controller) {
             continue;
         }
 
@@ -491,6 +504,7 @@ fn run_scheduled(
 
         // Reset every card to "queued" so the dashboard shows this cycle's
         // progress rather than the previous cycle's outcome.
+        let databases = registry.config_snapshot();
         for db in databases {
             web::register_database(
                 &db.display_name(),
@@ -498,7 +512,8 @@ fn run_scheduled(
             );
         }
 
-        let (results, failures) = run_cycle(cfg, databases, client, BackupSource::Scheduled);
+        let databases = registry.config_snapshot();
+        let (results, failures) = run_cycle(cfg, &databases, client, BackupSource::Scheduled);
         web::set_cycle_running(false);
 
         // A failing database is reported and then forgotten: the next cycle
@@ -547,10 +562,11 @@ fn run_scheduled(
 /// or while a scheduled cycle was running.
 fn run_manual_requests(
     cfg: &SharedConfig,
-    databases: &[DatabaseConfig],
+    registry: &Arc<DatabaseRegistry>,
     client: &ClientHandle,
     controller: &Arc<web::ManualBackupController>,
 ) -> bool {
+    let databases = registry.config_snapshot();
     let requests = controller.take_pending();
     if requests.is_empty() {
         return false;
@@ -582,7 +598,7 @@ fn run_manual_requests(
         web::set_cycle_running(true);
         let _ = execute_database_indices(
             &cycle_cfg,
-            databases,
+            &databases,
             &indices,
             client,
             BackupSource::Manual,

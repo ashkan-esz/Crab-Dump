@@ -29,6 +29,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
+use crate::database_registry::{redact_url, DatabaseMutation, DatabaseRegistry, DatabaseSource};
 use crate::database_state::DatabaseStateStore;
 use crate::history::HistoryStore;
 use crate::resource_usage::ResourceCollector;
@@ -180,6 +181,8 @@ pub struct ChunkProgress {
 static DUMP_STATUSES: LazyLock<RwLock<HashMap<String, DbStatus>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static DATABASE_STATES: LazyLock<RwLock<Option<std::sync::Arc<DatabaseStateStore>>>> =
+    LazyLock::new(|| RwLock::new(None));
+static DATABASE_REGISTRY: LazyLock<RwLock<Option<Arc<DatabaseRegistry>>>> =
     LazyLock::new(|| RwLock::new(None));
 
 /// Process-wide handoff between dashboard requests and the blocking scheduler.
@@ -379,12 +382,34 @@ pub fn database_state_store() -> std::sync::Arc<DatabaseStateStore> {
         .clone()
 }
 
+pub fn set_database_registry(registry: Arc<DatabaseRegistry>) {
+    *DATABASE_REGISTRY
+        .write()
+        .expect("database registry lock poisoned") = Some(registry);
+}
+
+fn database_registry() -> Arc<DatabaseRegistry> {
+    DATABASE_REGISTRY
+        .read()
+        .expect("database registry lock poisoned")
+        .as_ref()
+        .expect("database registry not initialized")
+        .clone()
+}
+
 pub fn register_database(db_name: &str, enabled: bool) {
     if enabled {
         set_db_status(db_name, 0, "queued", "Queued — waiting to start");
     } else {
         set_db_status(db_name, 0, "disabled", "DISABLED — backup skipped");
     }
+}
+
+pub fn unregister_database(db_name: &str) {
+    DUMP_STATUSES
+        .write()
+        .expect("dump status lock poisoned")
+        .remove(db_name);
 }
 
 /// Set the pipeline stage and status for a specific database.
@@ -1263,6 +1288,277 @@ async fn api_history(
     }
 }
 
+#[derive(Serialize)]
+struct ManagedDatabaseResponse {
+    id: Option<String>,
+    name: String,
+    url: String,
+    source: DatabaseSource,
+    enabled: bool,
+    running: bool,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn managed_database_response(
+    db: &crate::database_registry::RuntimeDatabase,
+) -> ManagedDatabaseResponse {
+    let name = db.config.display_name();
+    ManagedDatabaseResponse {
+        id: db.id.clone(),
+        url: redact_url(&db.config.url),
+        source: db.source,
+        enabled: database_state_store().is_enabled(&name),
+        running: manual_backup_controller().can_cancel(&name),
+        name,
+        created_at: db.created_at.clone(),
+        updated_at: db.updated_at.clone(),
+    }
+}
+
+async fn api_managed_databases() -> impl Responder {
+    let mut entries = database_registry()
+        .snapshot()
+        .iter()
+        .map(managed_database_response)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.name.to_ascii_lowercase());
+    HttpResponse::Ok().json(entries)
+}
+
+#[derive(Debug, Deserialize)]
+struct DatabaseMutationPayload {
+    url: Option<String>,
+    name: Option<String>,
+    pg_dump_extra_args: Option<String>,
+}
+
+fn mutation_blocked(target: Option<&str>) -> Option<HttpResponse> {
+    if CYCLE_RUNNING.load(Ordering::SeqCst) {
+        return Some(HttpResponse::Conflict().json(serde_json::json!({
+            "error": "database changes are unavailable while a backup cycle is active"
+        })));
+    }
+    if let Some(name) = target {
+        if manual_backup_controller().can_cancel(name) {
+            return Some(HttpResponse::Conflict().json(serde_json::json!({
+                "error": "database changes are unavailable while this backup is queued or running"
+            })));
+        }
+    }
+    None
+}
+
+fn audit_registry_mutation(
+    registry: &DatabaseRegistry,
+    req: &HttpRequest,
+    action: &str,
+    entry: Option<&crate::database_registry::DashboardDatabase>,
+    result: &str,
+) {
+    let actor = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| user.username.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let mutation = DatabaseMutation {
+        actor,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        action: action.into(),
+        database_id: entry.map(|db| db.id.clone()),
+        database_name: entry
+            .map(|db| {
+                db.name
+                    .clone()
+                    .unwrap_or_else(|| db.url.split('/').next_back().unwrap_or("unknown-db").into())
+            })
+            .unwrap_or_else(|| "unknown".into()),
+        source: DatabaseSource::Dashboard,
+        result: result.into(),
+    };
+    if let Err(error) = registry.append_audit(&mutation) {
+        tracing::warn!(error = %error, "failed to append database mutation audit");
+    }
+}
+
+async fn api_database_history() -> impl Responder {
+    match database_registry().audit_history() {
+        Ok(history) => HttpResponse::Ok().json(history),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read database mutation history");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "database history is unavailable"}))
+        }
+    }
+}
+
+async fn create_managed_database(
+    req: HttpRequest,
+    payload: web::Json<DatabaseMutationPayload>,
+) -> impl Responder {
+    let registry = database_registry();
+    if let Some(response) = mutation_blocked(None) {
+        audit_registry_mutation(&registry, &req, "create", None, "rejected_busy");
+        return response;
+    }
+    let Some(_route_guard) = try_acquire_route_gate() else {
+        audit_registry_mutation(&registry, &req, "create", None, "rejected_busy");
+        return HttpResponse::Conflict()
+            .json(serde_json::json!({"error": "database changes are unavailable while a backup is active"}));
+    };
+    let Some(url) = payload.url.clone().filter(|url| !url.trim().is_empty()) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "url is required"}));
+    };
+    match registry.add(
+        url,
+        payload.name.clone(),
+        payload.pg_dump_extra_args.clone(),
+    ) {
+        Ok(entry) => {
+            let name = entry.name.clone().unwrap_or_else(|| {
+                entry
+                    .url
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("unknown-db")
+                    .into()
+            });
+            register_database(&name, true);
+            audit_registry_mutation(&registry, &req, "create", Some(&entry), "ok");
+            HttpResponse::Created().json(serde_json::json!({
+                "id": entry.id,
+                "name": entry.name,
+                "url": redact_url(&entry.url),
+                "source": "dashboard",
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at
+            }))
+        }
+        Err(error) => {
+            audit_registry_mutation(&registry, &req, "create", None, "rejected_invalid");
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+async fn update_managed_database(
+    req: HttpRequest,
+    path: web::Path<String>,
+    payload: web::Json<DatabaseMutationPayload>,
+) -> impl Responder {
+    let registry = database_registry();
+    let id = path.into_inner();
+    let current = registry
+        .dashboard_entries()
+        .into_iter()
+        .find(|entry| entry.id == id);
+    let Some(current) = current else {
+        return HttpResponse::NotFound().json(serde_json::json!({"error": "database not found"}));
+    };
+    let current_name = current.name.clone().unwrap_or_else(|| {
+        current
+            .url
+            .split('/')
+            .next_back()
+            .unwrap_or("unknown-db")
+            .into()
+    });
+    if let Some(response) = mutation_blocked(Some(&current_name)) {
+        audit_registry_mutation(&registry, &req, "update", Some(&current), "rejected_busy");
+        return response;
+    }
+    let Some(_route_guard) = try_acquire_route_gate() else {
+        audit_registry_mutation(&registry, &req, "update", Some(&current), "rejected_busy");
+        return HttpResponse::Conflict()
+            .json(serde_json::json!({"error": "database changes are unavailable while a backup is active"}));
+    };
+    match registry.update(
+        &id,
+        payload.url.clone(),
+        payload.name.clone(),
+        payload.pg_dump_extra_args.clone(),
+    ) {
+        Ok(Some(entry)) => {
+            let new_name = entry.name.clone().unwrap_or_else(|| {
+                entry
+                    .url
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("unknown-db")
+                    .into()
+            });
+            unregister_database(&current_name);
+            register_database(&new_name, true);
+            audit_registry_mutation(&registry, &req, "update", Some(&entry), "ok");
+            HttpResponse::Ok().json(serde_json::json!({
+                "id": entry.id,
+                "name": entry.name,
+                "url": redact_url(&entry.url),
+                "source": "dashboard",
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at
+            }))
+        }
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "database not found"}))
+        }
+        Err(error) => {
+            audit_registry_mutation(
+                &registry,
+                &req,
+                "update",
+                Some(&current),
+                "rejected_invalid",
+            );
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+async fn delete_managed_database(req: HttpRequest, path: web::Path<String>) -> impl Responder {
+    let registry = database_registry();
+    let id = path.into_inner();
+    let current = registry
+        .dashboard_entries()
+        .into_iter()
+        .find(|entry| entry.id == id);
+    let Some(current) = current else {
+        return HttpResponse::NotFound().json(serde_json::json!({"error": "database not found"}));
+    };
+    let current_name = current.name.clone().unwrap_or_else(|| {
+        current
+            .url
+            .split('/')
+            .next_back()
+            .unwrap_or("unknown-db")
+            .into()
+    });
+    if let Some(response) = mutation_blocked(Some(&current_name)) {
+        audit_registry_mutation(&registry, &req, "delete", Some(&current), "rejected_busy");
+        return response;
+    }
+    let Some(_route_guard) = try_acquire_route_gate() else {
+        audit_registry_mutation(&registry, &req, "delete", Some(&current), "rejected_busy");
+        return HttpResponse::Conflict()
+            .json(serde_json::json!({"error": "database changes are unavailable while a backup is active"}));
+    };
+    match registry.delete(&id) {
+        Ok(Some(entry)) => {
+            unregister_database(&current_name);
+            audit_registry_mutation(&registry, &req, "delete", Some(&entry), "ok");
+            HttpResponse::Ok().json(serde_json::json!({"id": entry.id, "deleted": true}))
+        }
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "database not found"}))
+        }
+        Err(_error) => {
+            audit_registry_mutation(&registry, &req, "delete", Some(&current), "failed");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "database registry unavailable"}))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DashboardRole {
     Viewer,
@@ -1504,7 +1800,7 @@ async fn dashboard_auth(
     // login. All data and mutation endpoints remain protected below.
     if matches!(
         req.path(),
-        "/" | "/index.html" | "/users" | "/routing" | "/healthz" | "/api/auth/login"
+        "/" | "/index.html" | "/users" | "/routing" | "/databases" | "/healthz" | "/api/auth/login"
     ) {
         return next.call(req).await;
     }
@@ -2203,6 +2499,12 @@ async fn serve_routing() -> impl Responder {
         .body(include_str!("../routing.html"))
 }
 
+async fn serve_databases() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../databases.html"))
+}
+
 /// Start the HTTP server and block until it stops.
 ///
 /// Serves:
@@ -2234,6 +2536,7 @@ pub async fn start_server(
     telegram_bot_token: String,
     fallback_proxy: Option<String>,
     work_dir: std::path::PathBuf,
+    database_registry: Arc<DatabaseRegistry>,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -2251,6 +2554,7 @@ pub async fn start_server(
     let bot_token_data = web::Data::new(telegram_bot_token);
     let fallback_proxy_data = web::Data::new(fallback_proxy);
     let resource_data = web::Data::new(ResourceCollector::new(work_dir));
+    let database_registry_data = web::Data::new(database_registry);
 
     HttpServer::new(move || {
         App::new()
@@ -2265,6 +2569,7 @@ pub async fn start_server(
             .app_data(bot_token_data.clone())
             .app_data(fallback_proxy_data.clone())
             .app_data(resource_data.clone())
+            .app_data(database_registry_data.clone())
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
             .route("/api/config", web::get().to(api_config))
@@ -2290,6 +2595,17 @@ pub async fn start_server(
                 web::post().to(api_database_action),
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
+            .route("/api/databases", web::get().to(api_managed_databases))
+            .route("/api/databases", web::post().to(create_managed_database))
+            .route(
+                "/api/databases/{id}",
+                web::put().to(update_managed_database),
+            )
+            .route(
+                "/api/databases/{id}",
+                web::delete().to(delete_managed_database),
+            )
+            .route("/api/database-history", web::get().to(api_database_history))
             .route("/api/telegram-users", web::get().to(api_telegram_users))
             .route("/api/telegram-users", web::post().to(create_telegram_user))
             .route(
@@ -2337,6 +2653,7 @@ pub async fn start_server(
             .route("/index.html", web::get().to(serve_dashboard))
             .route("/users", web::get().to(serve_users))
             .route("/routing", web::get().to(serve_routing))
+            .route("/databases", web::get().to(serve_databases))
             .wrap(from_fn(dashboard_auth))
             .wrap(from_fn(security_headers))
     })
