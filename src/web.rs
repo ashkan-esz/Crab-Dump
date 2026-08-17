@@ -1828,6 +1828,7 @@ async fn dashboard_auth(
             | "/users"
             | "/routing"
             | "/databases"
+            | "/dashboard.css"
             | "/healthz"
             | "/api/auth/login"
             | "/api/auth/logout"
@@ -2535,11 +2536,19 @@ async fn serve_databases() -> impl Responder {
         .body(include_str!("../databases.html"))
 }
 
+/// Serve the shared dashboard surface stylesheet embedded at compile time.
+async fn serve_dashboard_styles() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/css; charset=utf-8")
+        .body(include_str!("../dashboard.css"))
+}
+
 /// Start the HTTP server and block until it stops.
 ///
 /// Serves:
 /// - `/` — the dashboard HTML
 /// - `/index.html` — same dashboard HTML
+/// - `/dashboard.css` — the shared dashboard surface stylesheet
 /// - `/api/config` — server metadata plus schedule state (`schedule`, `phase`,
 ///   `next_run_secs`)
 /// - `/api/status/service` — returns Telegram API connection status
@@ -2685,6 +2694,7 @@ pub async fn start_server(
             .route("/users", web::get().to(serve_users))
             .route("/routing", web::get().to(serve_routing))
             .route("/databases", web::get().to(serve_databases))
+            .route("/dashboard.css", web::get().to(serve_dashboard_styles))
             .wrap(from_fn(dashboard_auth))
             .wrap(from_fn(security_headers))
     })
@@ -2959,6 +2969,7 @@ mod tests {
                 )))
                 .app_data(web::Data::new(8080_u16))
                 .route("/", web::get().to(serve_dashboard))
+                .route("/dashboard.css", web::get().to(serve_dashboard_styles))
                 .route("/api/config", web::get().to(api_config))
                 .route("/api/auth/login", web::post().to(login))
                 .wrap(from_fn(dashboard_auth)),
@@ -2969,6 +2980,22 @@ mod tests {
             aw_test::call_service(&app, aw_test::TestRequest::get().uri("/").to_request()).await;
         assert_eq!(shell.status(), 200);
         assert!(shell.headers().get(header::CONTENT_TYPE).is_some());
+
+        let styles = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri("/dashboard.css")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(styles.status(), 200);
+        assert_eq!(
+            styles
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/css; charset=utf-8"),
+        );
 
         let protected_api = aw_test::call_service(
             &app,

@@ -956,17 +956,6 @@
         .btn:hover { background: var(--bg-hover); }
         .btn.primary { border-color: var(--accent); color: var(--accent); }
         .btn.primary:hover { background: rgba(59,130,246,.10); }
-        .users-nav {
-            margin-top: .9rem;
-            text-decoration: none;
-        }
-        .users-nav::after {
-            content: '↗';
-            font-size: .95rem;
-            line-height: 1;
-            transition: transform .2s;
-        }
-        .users-nav:hover::after { transform: translate(2px, -2px); }
         .spinner {
             display: inline-block;
             width: 14px; height: 14px;
@@ -1154,12 +1143,16 @@
             color: var(--accent);
             font: 700 .62rem var(--mono);
             letter-spacing: .11em;
-            text-transform: uppercase;
+            text-transform: none;
         }
         .header p { margin-top: .25rem; font-size: .75rem; }
         .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
-        .header-actions .users-nav { margin-top: 0; }
-        .header-actions .users-nav::after { content: ''; }
+        .refresh-control-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: .2rem;
+        }
         .refresh-control {
             display: inline-flex;
             align-items: center;
@@ -1185,7 +1178,7 @@
         .refresh-state {
             display: inline-flex;
             align-items: center;
-            min-height: 32px;
+            min-height: 1rem;
             color: var(--text-muted);
             font: .68rem var(--mono);
         }
@@ -1309,6 +1302,7 @@
             .app-nav-links a { width: 34px; justify-content: center; }
         }
     </style>
+    <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
     <a class="skip-link" href="#dashboard-main">Skip to main content</a>
@@ -1342,27 +1336,25 @@
             <p>PostgreSQL to Telegram · live pipeline status</p>
         </div>
         <div class="header-actions">
-            <label class="refresh-control" for="refreshInterval">Refresh
-                <select id="refreshInterval" aria-label="Dashboard refresh interval">
-                    <option value="2000">Every 2 seconds</option>
-                    <option value="5000">Every 5 seconds</option>
-                    <option value="10000">Every 10 seconds</option>
-                    <option value="30000">Every 30 seconds</option>
-                    <option value="60000">Every minute</option>
-                    <option value="0">Off</option>
-                </select>
-            </label>
-            <span id="refreshState" class="refresh-state" role="status" aria-live="polite" aria-atomic="true">Loading dashboard…</span>
-            <a class="btn primary users-nav" href="/databases" aria-label="Manage databases">Databases</a>
-            <a class="btn primary users-nav" href="/routing" aria-label="Manage routing profiles">Routing</a>
-            <a class="btn primary users-nav" href="/users" aria-label="Manage Telegram users">Users</a>
+            <div class="refresh-control-group">
+                <label class="refresh-control" for="refreshInterval">Refresh
+                    <select id="refreshInterval" aria-label="Dashboard refresh interval">
+                        <option value="2000">Every 2 seconds</option>
+                        <option value="5000">Every 5 seconds</option>
+                        <option value="10000">Every 10 seconds</option>
+                        <option value="30000">Every 30 seconds</option>
+                        <option value="60000">Every minute</option>
+                        <option value="0">Off</option>
+                    </select>
+                </label>
+                <span id="refreshState" class="refresh-state" role="status" aria-live="polite" aria-atomic="true">Loading dashboard…</span>
+            </div>
         </div>
     </div>
 
     <!-- Server info bar -->
     <div class="info-bar">
         <span class="info-chip"><span class="icon">&#x1f310;</span> Host: <strong id="infoHost">-</strong></span>
-        <span class="info-chip"><span class="icon">&#x1f3e2;</span> Port: <strong id="infoPort">-</strong></span>
         <span class="info-chip"><span class="icon">&#x23f1;</span> Uptime: <strong id="infoUptime">-</strong></span>
         <span class="info-chip"><span class="icon">&#x26a1;</span> Parallel limit: <strong id="infoParallel">-</strong></span>
         <span class="info-chip"><span class="icon">&#x1f4e8;</span> Telegram destinations: <strong id="infoTelegramChats">-</strong></span>
@@ -1644,7 +1636,6 @@
             document.getElementById('sidebarRole').textContent = config.dashboard_role || 'viewer';
             manualBackupAvailable = config.manual_backup_available === true;
             document.getElementById('infoHost').textContent = config.hostname;
-            document.getElementById('infoPort').textContent = config.port;
             document.getElementById('infoTelegramChats').textContent =
                 telegramDestinationText(config.telegram_chat_count);
             // How many databases may dump at once — 0 means the backend has not
