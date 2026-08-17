@@ -31,7 +31,7 @@
       .app-nav{position:fixed;inset:0 auto 0 0;display:flex;flex-direction:column;width:216px;min-height:100vh;padding:1.35rem 1rem;background:#0c121d;border-right:1px solid var(--border)}
       .app-brand{letter-spacing:-.02em}
       .app-role{display:grid;gap:.25rem;margin:-.9rem .45rem 1rem;padding:.6rem .65rem;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--muted);font:.62rem/1.3 var(--mono)}
-      .app-role span{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase}.app-role strong{color:var(--accent);font-size:.78rem;text-transform:capitalize}
+      .app-role span{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase}.app-role strong{color:var(--accent);font-size:.78rem;text-transform:capitalize}.app-signout{display:block;width:100%;margin-top:.6rem;padding:.45rem .65rem;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:7px;font:inherit;text-align:left;cursor:pointer}.app-signout:hover{color:var(--text);background:#172033}
       main{grid-column:2;width:100%;padding:0 1.5rem 48px}main>.head{padding:1.35rem 0 1.1rem;align-items:center}main>.bar{background:var(--surface)}
       .table-scroll{max-height:min(68vh,720px);overflow:auto}table{min-width:760px;border-radius:8px;overflow:hidden}th{position:sticky;top:0;z-index:2}td{font-variant-numeric:tabular-nums}
       button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
@@ -55,7 +55,7 @@
   </div>
   <span class="app-nav-label">System</span>
   <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
-  <div class="app-nav-footer">Live status</div>
+  <div class="app-nav-footer">Live status<button id="sign-out" class="app-signout" type="button">Sign out</button></div>
 </nav>
 <main id="databases-main">
   <header class="head"><div><p class="eyebrow">Operations / Data sources</p><h1>Databases</h1><p class="lede">Review configured sources and manage dashboard entries. PostgreSQL credentials are never displayed in this workspace.</p></div><a href="/">Overview</a></header>
@@ -65,11 +65,13 @@
     <div class="bar-search"><label for="database-search">Filter databases</label><input id="database-search" type="search" placeholder="Name, source, or state" autocomplete="off"></div>
     <button id="add" class="primary" hidden>Add database</button><button id="history" hidden>Mutation history</button><span id="state" class="muted" role="status" aria-live="polite" aria-atomic="true">Loading…</span>
   </div>
-  <div class="table-scroll"><table><caption class="sr-only">Configured databases</caption><thead><tr><th>Source</th><th>Name</th><th>Connection</th><th>State</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="table-scroll" id="database-table-scroll" aria-busy="false"><table><caption class="sr-only">Configured databases</caption><thead><tr><th scope="col">Source</th><th scope="col">Name</th><th scope="col">Connection</th><th scope="col">State</th><th scope="col">Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
 </main>
 <dialog id="editor" aria-modal="true" aria-labelledby="title"><form method="dialog" id="form"><h2 id="title">Add database</h2><label for="url">PostgreSQL URL<input id="url" type="url" autocomplete="off"><small class="muted">Required when adding. Leave blank while editing to retain the stored URL.</small></label><label for="name">Display name<input id="name" maxlength="120"></label><label for="args">pg_dump extra args<input id="args" maxlength="500"></label><p id="form-error" class="error" role="alert"></p><menu><button type="button" id="cancel-editor">Cancel</button><button id="save-database" class="primary" value="default">Save</button></menu></form></dialog>
 <script>
 (() => {
+  async function signOut(){try{await fetch('/api/auth/logout',{method:'POST',credentials:'same-origin'})}finally{window.location.reload()}}
+  document.querySelector('#sign-out').addEventListener('click', signOut);
   const rows=document.querySelector('#rows'), notice=document.querySelector('#notice'), state=document.querySelector('#state'), search=document.querySelector('#database-search');
   const editor=document.querySelector('#editor'), form=document.querySelector('#form');
   const csrfToken=()=>document.cookie.split('; ').find(x=>x.startsWith('crab_csrf='))?.split('=').slice(1).join('=')||'';
@@ -92,7 +94,7 @@
     rows.innerHTML=visible.map(db=>`<tr><td><span class="badge ${db.source}">${esc(db.source)}</span></td><td>${esc(db.name)}</td><td class="muted">${db.source==='dashboard'?'Configured':'Environment managed'}</td><td><span class="state-badge ${db.running?'running':db.enabled?'enabled':''}">${db.running?'Running':db.enabled?'Enabled':'Disabled'}</span></td><td>${db.source==='dashboard'&&admin?`<span class="actions"><button data-edit="${esc(db.id)}">Edit</button><button class="danger" data-delete="${esc(db.id)}">Delete</button></span>`:'read-only'}</td></tr>`).join('');
     state.textContent=query?`${visible.length} of ${records.length} databases`:`${records.length} database${records.length===1?'':'s'}`;
   }
-  async function load(){state.textContent='Loading…';if(!records.length)renderLoading();try{records=await call('/api/databases');renderRows()}catch(e){if(records.length){show(`Refresh failed: ${e.message}`,true)}else{rows.innerHTML=`<tr><td colspan="5"><div class="error-state"><strong>Databases could not be loaded</strong><span>${esc(e.message)}</span><button type="button" id="retry-database-load">Try again</button></div></td></tr>`}state.textContent='Unable to load'}}
+  async function load(){state.textContent='Loading…';document.querySelector('#database-table-scroll').setAttribute('aria-busy','true');if(!records.length)renderLoading();try{records=await call('/api/databases');renderRows()}catch(e){if(records.length){show(`Refresh failed: ${e.message}`,true)}else{rows.innerHTML=`<tr><td colspan="5"><div class="error-state"><strong>Databases could not be loaded</strong><span>${esc(e.message)}</span><button type="button" id="retry-database-load">Try again</button></div></td></tr>`}state.textContent='Unable to load'}finally{document.querySelector('#database-table-scroll').setAttribute('aria-busy','false')}}
   function open(db){editing=db?.id||null;document.querySelector('#title').textContent=editing?'Edit database':'Add database';document.querySelector('#url').value='';document.querySelector('#url').placeholder=editing?'Leave blank to retain the stored URL':'postgresql://user:password@host/database';document.querySelector('#name').value=db?.name||'';document.querySelector('#args').value='';document.querySelector('#form-error').textContent='';editor.showModal()}
   document.querySelector('#add').onclick=()=>open();document.querySelector('#history').onclick=async()=>{try{const h=await call('/api/database-history');show(h.length?`${h.length} mutation records loaded.`:'No mutation history yet.');}catch(e){show(e.message,true)}};
   search.oninput=renderRows;

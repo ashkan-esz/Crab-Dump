@@ -1116,6 +1116,20 @@
             color: var(--text-muted);
             font: .65rem/1.5 var(--mono);
         }
+        .app-signout {
+            display: block;
+            width: 100%;
+            margin-top: .6rem;
+            padding: .45rem .65rem;
+            color: var(--text-muted);
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        .app-signout:hover { color: var(--text); background: var(--bg-hover); }
         .header, .info-bar, .grid, #dbSection, .controls, .footer {
             grid-column: 2;
             width: min(1180px, calc(100% - 3rem));
@@ -1168,6 +1182,14 @@
             cursor: pointer;
         }
         .refresh-control select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+        .refresh-state {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            color: var(--text-muted);
+            font: .68rem var(--mono);
+        }
+        .refresh-state.error { color: var(--warn); }
         .info-bar {
             display: flex;
             gap: .45rem;
@@ -1307,7 +1329,7 @@
             <a href="#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a>
             <a href="#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a>
         </div>
-        <div class="app-nav-footer">Live status</div>
+        <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
     </nav>
 
     <main id="dashboard-main" class="app-content">
@@ -1330,6 +1352,7 @@
                     <option value="0">Off</option>
                 </select>
             </label>
+            <span id="refreshState" class="refresh-state" role="status" aria-live="polite" aria-atomic="true">Loading dashboard…</span>
             <a class="btn primary users-nav" href="/databases" aria-label="Manage databases">Databases</a>
             <a class="btn primary users-nav" href="/routing" aria-label="Manage routing profiles">Routing</a>
             <a class="btn primary users-nav" href="/users" aria-label="Manage Telegram users">Users</a>
@@ -1504,6 +1527,14 @@
     </main>
 
 <script>
+    async function signOut() {
+        try {
+            await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        } finally {
+            window.location.reload();
+        }
+    }
+
     /**
      * crab-dump Status Dashboard
      *
@@ -2144,7 +2175,8 @@
             </div>
             <div class="history-stats">${stats}</div>
             ${rows ? `<div class="history-table-wrap"><table class="history-table">
-                <thead><tr><th>Started</th><th>Source</th><th>Receiver</th><th>Status</th><th>Duration</th><th>Dump</th><th>Packaged</th><th>Compression</th><th>Encryption</th><th>Chunks</th><th>Retries</th><th>Error</th></tr></thead>
+                <caption class="sr-only">Backup history records</caption>
+                <thead><tr><th scope="col">Started</th><th scope="col">Source</th><th scope="col">Receiver</th><th scope="col">Status</th><th scope="col">Duration</th><th scope="col">Dump</th><th scope="col">Packaged</th><th scope="col">Compression</th><th scope="col">Encryption</th><th scope="col">Chunks</th><th scope="col">Retries</th><th scope="col">Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>` : '<div class="history-muted">No backup history yet.</div>'}
             <div class="history-controls">
@@ -2603,6 +2635,10 @@
     }
 
     async function refreshDashboard(forceHistory = false) {
+        const refreshState = document.getElementById('refreshState');
+        refreshState.textContent = 'Refreshing…';
+        refreshState.className = 'refresh-state';
+        refreshState.setAttribute('aria-busy', 'true');
         try {
             if (forceHistory) {
                 historyCache.clear();
@@ -2640,8 +2676,13 @@
                     renderDatabases(latestDatabases);
                 }),
             ]);
+            refreshState.textContent = `Updated ${new Date().toLocaleTimeString()}`;
         } catch (err) {
             console.error('Refresh error:', err);
+            refreshState.textContent = 'Refresh failed. Showing last known data.';
+            refreshState.className = 'refresh-state error';
+        } finally {
+            refreshState.setAttribute('aria-busy', 'false');
         }
     }
 

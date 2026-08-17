@@ -220,6 +220,7 @@
 .app-role{display:grid;gap:.25rem;margin:-.9rem .45rem 1rem;padding:.6rem .65rem;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--muted);font:.62rem/1.3 var(--mono)}.app-role span{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase}.app-role strong{color:var(--accent);font-size:.78rem;font-weight:700;text-transform:capitalize}
 @media(max-width:700px){.app-nav{overflow-x:auto}.app-nav-links{flex-shrink:0}}
 @media(max-width:900px){.app-role{display:none}}@media(max-width:480px){.app-brand span:last-child,.app-nav-links a span:last-child{display:none}.app-nav-links a{width:34px;justify-content:center}}
+.app-signout{display:block;width:100%;margin-top:.6rem;padding:.45rem .65rem;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:7px;font:inherit;text-align:left;cursor:pointer}.app-signout:hover{color:var(--text);background:var(--surface-hover)}
 </style>
 <style>
 @media(min-width:901px){.page{width:calc(100% - 216px);margin-left:216px;padding-left:1.5rem;padding-right:1.5rem}}
@@ -240,7 +241,7 @@
     </div>
     <span class="app-nav-label">System</span>
     <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
-    <div class="app-nav-footer">Live status</div>
+    <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
   </nav>
   <main id="users-main" class="page">
     <header class="page-header">
@@ -338,6 +339,10 @@
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
+  async function signOut() {
+    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); }
+    finally { window.location.reload(); }
+  }
   let users = [];
   let loading = false;
   let loadError = null;
@@ -555,12 +560,13 @@
     event.preventDefault(); if (!validateForm()) return;
     const body = { name: $('name').value, chat_id: $('chat-id').value, enabled: $('enabled').checked };
     const editingId = editing;
-    const button = $('submit-user'); button.disabled = true;
+    const button = $('submit-user'); const label = editingId ? 'Save changes' : 'Add user';
+    button.disabled = true; button.textContent = 'Saving…'; $('user-form').setAttribute('aria-busy', 'true');
     try {
       await request(editingId ? `/api/telegram-users/${encodeURIComponent(editingId)}` : '/api/telegram-users', { method: editingId ? 'PUT' : 'POST', body: JSON.stringify(body) });
       closeEditor(); showToast(editingId ? 'User updated.' : 'User added.'); await loadUsers();
     } catch (error) { setText('form-summary', error.message); $('form-summary').hidden = false; showToast(error.message, 'error'); }
-    finally { button.disabled = false; }
+    finally { button.disabled = false; button.textContent = label; $('user-form').setAttribute('aria-busy', 'false'); }
   }
   async function toggleUser(user) {
     const body = { name: user.name, chat_id: user.chat_id, enabled: !user.enabled };

@@ -1766,6 +1766,30 @@ async fn login(
         .json(serde_json::json!({"role": format!("{role:?}").to_lowercase(), "csrf_token": csrf_token}))
 }
 
+async fn logout(req: HttpRequest, auth: web::Data<DashboardAuth>) -> impl Responder {
+    if let Some(cookie) = req.cookie("crab_session") {
+        auth.sessions
+            .lock()
+            .expect("dashboard session lock poisoned")
+            .remove(cookie.value());
+    }
+    let mut session_cookie = Cookie::build("crab_session", "")
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .finish();
+    session_cookie.make_removal();
+    let mut csrf_cookie = Cookie::build("crab_csrf", "")
+        .path("/")
+        .same_site(SameSite::Strict)
+        .finish();
+    csrf_cookie.make_removal();
+    HttpResponse::NoContent()
+        .cookie(session_cookie)
+        .cookie(csrf_cookie)
+        .finish()
+}
+
 fn minimum_role(req: &ServiceRequest) -> DashboardRole {
     let path = req.path();
     if path.starts_with("/api/telegram-users") {
@@ -1800,7 +1824,13 @@ async fn dashboard_auth(
     // login. All data and mutation endpoints remain protected below.
     if matches!(
         req.path(),
-        "/" | "/index.html" | "/users" | "/routing" | "/databases" | "/healthz" | "/api/auth/login"
+        "/" | "/index.html"
+            | "/users"
+            | "/routing"
+            | "/databases"
+            | "/healthz"
+            | "/api/auth/login"
+            | "/api/auth/logout"
     ) {
         return next.call(req).await;
     }
@@ -2572,6 +2602,7 @@ pub async fn start_server(
             .app_data(database_registry_data.clone())
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
+            .route("/api/auth/logout", web::post().to(logout))
             .route("/api/config", web::get().to(api_config))
             .route(
                 "/api/compression-config",
@@ -2942,6 +2973,93 @@ mod tests {
         let protected_api = aw_test::call_service(
             &app,
             aw_test::TestRequest::get().uri("/api/config").to_request(),
+        )
+        .await;
+        assert_eq!(protected_api.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn logout_invalidates_session_and_expires_auth_cookies() {
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(DashboardAuth::new(
+                    "admin".into(),
+                    "a-strong-test-password".into(),
+                    None,
+                    None,
+                )))
+                .app_data(web::Data::new(8080_u16))
+                .route("/api/auth/login", web::post().to(login))
+                .route("/api/auth/logout", web::post().to(logout))
+                .route("/api/config", web::get().to(api_config))
+                .wrap(from_fn(dashboard_auth)),
+        )
+        .await;
+
+        let login_response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(serde_json::json!({
+                    "username": "admin",
+                    "password": "a-strong-test-password"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(login_response.status(), 200);
+        let cookies: Vec<Cookie<'static>> = login_response
+            .response()
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| Cookie::parse(value.to_string()).ok())
+            .map(|cookie| cookie.into_owned())
+            .collect();
+        let session = cookies
+            .iter()
+            .find(|cookie| cookie.name() == "crab_session")
+            .cloned()
+            .expect("login should set a session cookie");
+        let csrf = cookies
+            .iter()
+            .find(|cookie| cookie.name() == "crab_csrf")
+            .cloned()
+            .expect("login should set a csrf cookie");
+
+        let logout_response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::post()
+                .uri("/api/auth/logout")
+                .cookie(session.clone())
+                .cookie(csrf)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(logout_response.status(), 204);
+        let expired: Vec<Cookie<'static>> = logout_response
+            .response()
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| Cookie::parse(value.to_string()).ok())
+            .map(|cookie| cookie.into_owned())
+            .collect();
+        assert!(expired.iter().any(|cookie| {
+            cookie.name() == "crab_session"
+                && cookie.max_age() == Some(actix_web::cookie::time::Duration::ZERO)
+        }));
+        assert!(expired.iter().any(|cookie| {
+            cookie.name() == "crab_csrf"
+                && cookie.max_age() == Some(actix_web::cookie::time::Duration::ZERO)
+        }));
+
+        let protected_api = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri("/api/config")
+                .cookie(session)
+                .to_request(),
         )
         .await;
         assert_eq!(protected_api.status(), 401);

@@ -179,9 +179,9 @@ const manualHistory = historyMarkup({
 });
 assert.match(manualHistory, /<td class="manual-source">Manual<\/td>/);
 assert.match(manualHistory, /<td>Alice<\/td>/);
-assert.match(manualHistory, /<th>Receiver<\/th>/);
-assert.match(manualHistory, /<th>Compression<\/th>/);
-assert.match(manualHistory, /<th>Encryption<\/th>/);
+assert.match(manualHistory, /<th scope="col">Receiver<\/th>/);
+assert.match(manualHistory, /<th scope="col">Compression<\/th>/);
+assert.match(manualHistory, /<th scope="col">Encryption<\/th>/);
 assert.match(manualHistory, /<td>zstd 7<\/td>/);
 assert.equal(dbView({ enabled: true, state: 'UP', stage: 'cancelled' }).badge, 'CANCELLED');
 assert.match(actionHistory, /<td class="action">enable<\/td>/);
@@ -255,6 +255,8 @@ assert.match(usersBody, /localeCompare/);
 assert.match(usersBody, /escapeHtml/);
 assert.match(usersBody, /method: editingId \? 'PUT' : 'POST'/);
 assert.match(usersBody, /enabled: \$\('enabled'\)\.checked/);
+assert.match(usersBody, /button\.textContent = 'Saving…'/);
+assert.match(usersBody, /user-form'\)\.setAttribute\('aria-busy', 'true'\)/);
 assert.match(usersBody, /method: 'PUT', body: JSON\.stringify\(body\)/);
 assert.match(usersBody, /Delete \$\{user\.name\} \(\$\{user\.chat_id\}\)\?/);
 assert.match(usersBody, /This removes the directory record and cannot be undone/);
@@ -305,6 +307,12 @@ assert.match(routingHtml, /setMessage\('Saving profile…','busy'\)/);
 assert.match(routingHtml, /dashboardRole==='admin'/);
 assert.match(routingHtml, /routingPermission/);
 assert.match(routingHtml, /canOperate=canAdmin\|\|dashboardRole==='operator'/);
+assert.match(routingHtml, /Operator access can apply or disable routes/);
+assert.match(routingHtml, /id="profiles" aria-label="Saved routing profiles" aria-busy="true"/);
+assert.match(routingHtml, /profiles\.setAttribute\('aria-busy','false'\)/);
+assert.match(routingHtml, /\(async\(\)=>\{await loadRole\(\);await loadRouting\(\)\}\)\(\)/);
+assert.doesNotMatch(routingHtml, /Promise\.all\(\[loadRouting\(\),loadRole\(\)\]\)\.then\(\(\)=>refresh\(\)\)/);
+assert.match(routingHtml, /routingStatus\.append\(routingRetry\).*routingRetry\.hidden=false/);
 console.log('Routing disable workspace contract OK');
 
 // Shared operations shell contract. Every dashboard surface must expose the
@@ -316,6 +324,13 @@ for (const file of pageFiles) {
     assert.match(source, /class="skip-link"/);
     assert.match(source, /Skip to main content/);
     assert.match(source, /prefers-reduced-motion/);
+    assert.match(source, /class="app-signout"/);
+    assert.match(source, /api\/auth\/logout/);
+    if (file === 'databases.html') {
+        assert.match(source, /id="sign-out" class="app-signout" type="button">Sign out/);
+        assert.match(source, /querySelector\('#sign-out'\)\.addEventListener\('click', signOut\)/);
+        assert.doesNotMatch(source, /onclick="signOut\(\)"/);
+    }
     assert.match(source, /id="sidebarRole"/);
     assert.match(source, /Current role/);
     for (const href of ['/', '/databases', '/routing', '/users']) {
@@ -336,9 +351,11 @@ assert.match(html, /role="table" aria-label="Live database backup status"/);
 assert.match(body, /el\.setAttribute\('role', 'row'\)/);
 assert.match(html, /<main id="dashboard-main" class="app-content">/);
 assert.match(html, /id="refreshInterval"/);
+assert.match(html, /id="refreshState" class="refresh-state" role="status"/);
 assert.match(body, /crab-dump\.refresh-interval-ms/);
 assert.match(body, /function scheduleRefresh\(\)/);
 assert.match(body, /function setRefreshInterval\(value\)/);
+assert.match(body, /Refresh failed\. Showing last known data\./);
 assert.match(html, /Operations \/ Overview/);
 assert.match(body, /manualBackupLastFocus/);
 assert.match(body, /event\.key !== 'Tab'/);
@@ -355,6 +372,9 @@ assert.match(databasesHtml, /clear-database-search/);
 assert.match(databasesHtml, /skeleton-line/);
 assert.match(databasesHtml, /Databases could not be loaded/);
 assert.match(databasesHtml, /retry-database-load/);
+assert.match(databasesHtml, /<th scope="col">Connection<\/th>/);
+assert.match(databasesHtml, /id="database-table-scroll" aria-busy="false"/);
+assert.match(databasesHtml, /database-table-scroll'\)\.setAttribute\('aria-busy','true'\)/);
 assert.match(databasesHtml, /PostgreSQL credentials are never displayed/);
 assert.match(databasesHtml, /Environment managed/);
 assert.doesNotMatch(databasesHtml, /<td class="muted">\$\{esc\(db\.url\)\}<\/td>/);
