@@ -225,7 +225,8 @@
 <style>
 @media(min-width:901px){.page{width:calc(100% - 216px);margin-left:216px;padding-left:1.5rem;padding-right:1.5rem}}
 </style>
-<link rel="stylesheet" href="/dashboard.css">
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard-auth.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#users-main">Skip to main content</a>
@@ -340,10 +341,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
-  async function signOut() {
-    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); }
-    finally { window.location.reload(); }
-  }
   let users = [];
   let loading = false;
   let loadError = null;
@@ -422,63 +419,8 @@
     $('refreshing').hidden = !loading || !users.length;
     $('table-scroll').setAttribute('aria-busy', String(loading && !users.length));
   }
-  function csrfToken() {
-    return document.cookie.split('; ').find(value => value.startsWith('crab_csrf='))?.split('=').slice(1).join('=') || '';
-  }
-  let loginPromise = null;
-  let loginFailed = false;
-  let sessionEstablished = false;
-  function requestCredentials() {
-    return new Promise(resolve => {
-      const dialog = document.createElement('dialog');
-      dialog.innerHTML = '<form method="dialog"><h2>Dashboard sign in</h2><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><menu><button type="button" data-cancel>Cancel</button><button type="submit">Sign in</button></menu></form>';
-      const form = dialog.querySelector('form');
-      const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
-      dialog.querySelector('[data-cancel]').onclick = () => finish(null);
-      dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
-      form.onsubmit = event => { event.preventDefault(); finish({ username: form.elements.username.value, password: form.elements.password.value }); };
-      document.body.append(dialog);
-      dialog.showModal();
-      form.elements.username.focus();
-    });
-  }
-  async function ensureSession() {
-    if (sessionEstablished) return true;
-    if (loginFailed) return false;
-    if (loginPromise) return loginPromise;
-    loginPromise = (async () => {
-      const credentials = await requestCredentials();
-      if (!credentials) {
-        loginFailed = true;
-        return false;
-      }
-      const login = await fetch('/api/auth/login', {
-        method: 'POST', credentials: 'same-origin',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(credentials),
-      });
-      loginFailed = !login.ok;
-      sessionEstablished = login.ok;
-      return login.ok;
-    })().catch(() => {
-      loginFailed = true;
-      return false;
-    }).finally(() => {
-      loginPromise = null;
-    });
-    return loginPromise;
-  }
   async function request(url, options = {}) {
-    const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
-    if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
-    let response = await fetch(url, { credentials: 'same-origin', ...options, headers });
-    if (response.status === 401) {
-      sessionEstablished = false;
-      if (await ensureSession()) {
-        if (['POST', 'PUT', 'DELETE'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken();
-        response = await fetch(url, { credentials: 'same-origin', ...options, headers });
-      }
-    }
+    const response = await dashboardAuth.request(url, options);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Request failed (${response.status})`);

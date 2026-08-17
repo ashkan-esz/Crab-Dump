@@ -40,6 +40,7 @@
       @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
     </style>
     <link rel="stylesheet" href="/dashboard.css">
+    <script src="/dashboard-auth.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#databases-main">Skip to main content</a>
@@ -71,17 +72,13 @@
 <dialog id="editor" aria-modal="true" aria-labelledby="title"><form method="dialog" id="form"><h2 id="title">Add database</h2><label for="url">PostgreSQL URL<input id="url" type="url" autocomplete="off"><small class="muted">Required when adding. Leave blank while editing to retain the stored URL.</small></label><label for="name">Display name<input id="name" maxlength="120"></label><label for="args">pg_dump extra args<input id="args" maxlength="500"></label><p id="form-error" class="error" role="alert"></p><menu><button type="button" id="cancel-editor">Cancel</button><button id="save-database" class="primary" value="default">Save</button></menu></form></dialog>
 <script>
 (() => {
-  async function signOut(){try{await fetch('/api/auth/logout',{method:'POST',credentials:'same-origin'})}finally{window.location.reload()}}
-  document.querySelector('#sign-out').addEventListener('click', signOut);
+  document.querySelector('#sign-out').addEventListener('click', dashboardAuth.signOut);
   const rows=document.querySelector('#rows'), notice=document.querySelector('#notice'), state=document.querySelector('#state'), search=document.querySelector('#database-search');
   const editor=document.querySelector('#editor'), form=document.querySelector('#form');
-  const csrfToken=()=>document.cookie.split('; ').find(x=>x.startsWith('crab_csrf='))?.split('=').slice(1).join('=')||'';
-  let loginPromise=null, loginFailed=false, sessionEstablished=false, editing=null, admin=false, records=[];
+  let editing=null, admin=false, records=[];
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const show=(text,err=false)=>{notice.textContent=text;notice.className='notice '+(err?'error':'ok');notice.hidden=false};
-  function requestCredentials(){return new Promise(resolve=>{const dialog=document.createElement('dialog');dialog.innerHTML='<form method="dialog"><h2>Dashboard sign in</h2><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><menu><button type="button" data-cancel>Cancel</button><button type="submit">Sign in</button></menu></form>';const form=dialog.querySelector('form');const finish=value=>{dialog.close();dialog.remove();resolve(value)};dialog.querySelector('[data-cancel]').onclick=()=>finish(null);dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null)});form.onsubmit=event=>{event.preventDefault();finish({username:form.elements.username.value,password:form.elements.password.value})};document.body.append(dialog);dialog.showModal();form.elements.username.focus()})}
-  async function ensureSession(){if(sessionEstablished)return true;if(loginFailed)return false;if(loginPromise)return loginPromise;loginPromise=(async()=>{const credentials=await requestCredentials();if(!credentials){loginFailed=true;return false}const login=await fetch('/api/auth/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});loginFailed=!login.ok;sessionEstablished=login.ok;return login.ok})().catch(()=>{loginFailed=true;return false}).finally(()=>{loginPromise=null});return loginPromise}
-  async function call(url,opts={}){const method=opts.method?.toUpperCase();const headers={...(opts.headers||{}),'content-type':'application/json'};if(['POST','PUT','DELETE'].includes(method))headers['x-csrf-token']=csrfToken();let r=await fetch(url,{credentials:'same-origin',...opts,headers});if(r.status===401){sessionEstablished=false;if(await ensureSession()){if(['POST','PUT','DELETE'].includes(method))headers['x-csrf-token']=csrfToken();r=await fetch(url,{credentials:'same-origin',...opts,headers})}}const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||`Request failed (${r.status})`);return d}
+  async function call(url,opts={}){const r=await dashboardAuth.request(url,opts);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||`Request failed (${r.status})`);return d}
   function renderLoading(){rows.innerHTML=Array.from({length:5},()=>'<tr><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line short"></span></td></tr>').join('')}
   function renderRows(){
     const query=search.value.trim().toLocaleLowerCase();

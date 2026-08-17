@@ -1829,6 +1829,7 @@ async fn dashboard_auth(
             | "/routing"
             | "/databases"
             | "/dashboard.css"
+            | "/dashboard-auth.js"
             | "/healthz"
             | "/api/auth/login"
             | "/api/auth/logout"
@@ -2543,12 +2544,20 @@ async fn serve_dashboard_styles() -> impl Responder {
         .body(include_str!("../dashboard.css"))
 }
 
+/// Serve the shared dashboard authentication client embedded at compile time.
+async fn serve_dashboard_auth() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("application/javascript; charset=utf-8")
+        .body(include_str!("../dashboard-auth.js"))
+}
+
 /// Start the HTTP server and block until it stops.
 ///
 /// Serves:
 /// - `/` — the dashboard HTML
 /// - `/index.html` — same dashboard HTML
 /// - `/dashboard.css` — the shared dashboard surface stylesheet
+/// - `/dashboard-auth.js` — the shared dashboard authentication client
 /// - `/api/config` — server metadata plus schedule state (`schedule`, `phase`,
 ///   `next_run_secs`)
 /// - `/api/status/service` — returns Telegram API connection status
@@ -2695,6 +2704,7 @@ pub async fn start_server(
             .route("/routing", web::get().to(serve_routing))
             .route("/databases", web::get().to(serve_databases))
             .route("/dashboard.css", web::get().to(serve_dashboard_styles))
+            .route("/dashboard-auth.js", web::get().to(serve_dashboard_auth))
             .wrap(from_fn(dashboard_auth))
             .wrap(from_fn(security_headers))
     })
@@ -2970,6 +2980,7 @@ mod tests {
                 .app_data(web::Data::new(8080_u16))
                 .route("/", web::get().to(serve_dashboard))
                 .route("/dashboard.css", web::get().to(serve_dashboard_styles))
+                .route("/dashboard-auth.js", web::get().to(serve_dashboard_auth))
                 .route("/api/config", web::get().to(api_config))
                 .route("/api/auth/login", web::post().to(login))
                 .wrap(from_fn(dashboard_auth)),
@@ -2995,6 +3006,22 @@ mod tests {
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             Some("text/css; charset=utf-8"),
+        );
+
+        let auth_script = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri("/dashboard-auth.js")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(auth_script.status(), 200);
+        assert_eq!(
+            auth_script
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/javascript; charset=utf-8"),
         );
 
         let protected_api = aw_test::call_service(
