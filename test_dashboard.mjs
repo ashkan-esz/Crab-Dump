@@ -49,6 +49,14 @@ assert.match(body, /body: JSON\.stringify\(\{ chat_id: chatId, no_encryption: no
 assert.match(body, /openManualBackupModal/);
 assert.match(body, /setupManualBackupModal/);
 assert.match(html, /id="tgTestBtn"/);
+assert.match(html, /<details class="card service-card up" id="tgCard">/);
+assert.match(html, /<details class="card service-card up" id="dumpCard">/);
+assert.match(html, /<summary class="service-summary">/);
+assert.match(html, /service-details-label">View details<\/span>/);
+for (const id of ['tgCard', 'dumpCard', 'tgMsg', 'dumpMsg', 'tgTime', 'dumpTime', 'tgTestMsg']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} must remain available to polling`);
+}
+assert.match(html, /id="tgTestMsg" aria-live="polite"/);
 assert.match(body, /api\/status\/service\/test/);
 assert.match(body, /testTelegramApi/);
 assert.match(body, /Testing\.\.\./);

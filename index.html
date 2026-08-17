@@ -149,6 +149,98 @@
         .card:hover::before { opacity: 1; }
         .card:hover { transform: translateY(-2px); }
 
+        /* Compact operational status panels */
+        .service-card {
+            min-width: 0;
+            padding: 0;
+            gap: 0;
+            transition: border-color .2s, box-shadow .2s;
+        }
+        .service-card:hover { transform: none; }
+        .service-card::before { display: none; }
+        .service-card > summary {
+            list-style: none;
+        }
+        .service-card > summary::-webkit-details-marker { display: none; }
+        .service-summary {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 1rem;
+            padding: .85rem 1rem;
+            cursor: pointer;
+        }
+        .service-summary:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+            border-radius: 5px;
+        }
+        .service-main {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: .3rem;
+            min-width: 0;
+        }
+        .service-main .card-header {
+            gap: .6rem;
+        }
+        .service-main .card-body {
+            min-width: 0;
+            padding-left: 1.35rem;
+        }
+        .service-main .status-msg {
+            overflow-wrap: anywhere;
+        }
+        .service-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: .6rem;
+            flex: 0 0 auto;
+        }
+        .service-details-label {
+            display: inline-flex;
+            align-items: center;
+            min-height: 1.9rem;
+            padding: .3rem .55rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: rgba(226,232,240,.025);
+            color: var(--text-muted);
+            font-size: .68rem;
+            white-space: nowrap;
+        }
+        .service-summary:hover .service-details-label {
+            border-color: rgba(59,130,246,.45);
+            color: var(--text);
+        }
+        .service-details-label::after {
+            content: '▾';
+            margin-left: .35rem;
+            font-size: .7rem;
+            transition: transform .15s;
+        }
+        .service-card[open] .service-details-label::after {
+            transform: rotate(180deg);
+        }
+        .service-details-content {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: .35rem .9rem;
+            margin-top: 0;
+            padding: .6rem 1rem .7rem 2.35rem;
+            background: rgba(2,6,23,.18);
+            border-top: 1px solid var(--border);
+        }
+        .service-details-content .status-time {
+            margin-top: 0;
+        }
+        .service-details-content .status-time:empty {
+            display: none;
+        }
+
         .resource-card { grid-column: 1 / -1; }
         .resource-header {
             display: flex;
@@ -317,6 +409,18 @@
         }
         @media (max-width: 640px) {
             .resource-grid { grid-template-columns: 1fr; }
+            .service-summary {
+                grid-template-columns: minmax(0, 1fr);
+                gap: .55rem;
+            }
+            .service-actions {
+                width: 100%;
+                justify-content: flex-end;
+            }
+            .service-details-label {
+                min-height: 1.75rem;
+            }
+            .service-details-content { padding-left: 1rem; }
         }
 
         /* state variants */
@@ -1209,6 +1313,13 @@
         }
         .card:hover { transform: none; }
         .card::before, .db-card::before { display: none; }
+        .service-card {
+            padding: 0;
+        }
+        .service-summary { gap: .65rem; padding: .7rem .85rem; }
+        .service-main { gap: .25rem; }
+        .service-actions { gap: .45rem; }
+        .service-details-content { padding: .5rem .85rem .6rem 2rem; }
         .card-header { gap: .55rem; }
         .card-title { font-size: .82rem; }
         .status-dot { width: 8px; height: 8px; animation: none; }
@@ -1367,35 +1478,53 @@
     <!-- Main status grid (Telegram + aggregated dump) -->
     <div class="grid" aria-label="Service health and system settings">
 
-        <!-- Telegram card -->
-        <div class="card up" id="tgCard">
-            <div class="card-header">
-                <span class="status-dot" id="tgDot"></span>
-                <span class="card-title">Telegram API</span>
-                <button class="btn primary" id="tgTestBtn" type="button" onclick="testTelegramApi()">Test</button>
-            </div>
-            <div class="card-body">
-                <div class="status-msg" id="tgMsg">
-                    <div class="skeleton" style="width:80%"></div>
+        <!-- Telegram status panel -->
+        <details class="card service-card up" id="tgCard">
+            <summary class="service-summary">
+                <div class="service-main">
+                    <div class="card-header">
+                        <span class="status-dot" id="tgDot"></span>
+                        <span class="card-title">Telegram API</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="status-msg" id="tgMsg">
+                            <div class="skeleton" style="width:80%"></div>
+                        </div>
+                    </div>
                 </div>
+                <div class="service-actions">
+                    <button class="btn primary" id="tgTestBtn" type="button" onclick="event.preventDefault(); event.stopPropagation(); testTelegramApi()">Test</button>
+                    <span class="service-details-label">View details</span>
+                </div>
+            </summary>
+            <div class="service-details-content">
                 <div class="status-time" id="tgTestMsg" aria-live="polite"></div>
                 <div class="status-time" id="tgTime"></div>
             </div>
-        </div>
+        </details>
 
-        <!-- Dump card (aggregated across all databases) -->
-        <div class="card up" id="dumpCard">
-            <div class="card-header">
-                <span class="status-dot" id="dumpDot"></span>
-                <span class="card-title">PostgreSQL Dump</span>
-            </div>
-            <div class="card-body">
-                <div class="status-msg" id="dumpMsg">
-                    <div class="skeleton" style="width:80%"></div>
+        <!-- Dump status panel (aggregated across all databases) -->
+        <details class="card service-card up" id="dumpCard">
+            <summary class="service-summary">
+                <div class="service-main">
+                    <div class="card-header">
+                        <span class="status-dot" id="dumpDot"></span>
+                        <span class="card-title">PostgreSQL Dump</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="status-msg" id="dumpMsg">
+                            <div class="skeleton" style="width:80%"></div>
+                        </div>
+                    </div>
                 </div>
+                <div class="service-actions">
+                    <span class="service-details-label">View details</span>
+                </div>
+            </summary>
+            <div class="service-details-content">
                 <div class="status-time" id="dumpTime"></div>
             </div>
-        </div>
+        </details>
 
         <!-- Runtime resource usage -->
         <div class="card resource-card" id="resourceCard">
