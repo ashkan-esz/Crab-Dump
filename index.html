@@ -326,11 +326,22 @@
         }
         .compression-check {
             display: flex;
-            align-items: center;
+            flex-direction: row;
+            align-items: baseline;
             gap: .55rem;
-            min-height: 2.35rem;
+            min-height: 2.9rem;
+            grid-row: 1;
+            grid-column: 3;
+            justify-self: start;
             color: var(--text);
             font-size: .82rem;
+        }
+        .compression-check input {
+            flex: 0 0 auto;
+            margin: 0;
+        }
+        .compression-check span {
+            white-space: nowrap;
         }
         .compression-help,
         .compression-status {
@@ -345,10 +356,12 @@
             align-items: center;
             justify-content: space-between;
             gap: 1rem;
+            grid-column: 1 / -1;
             margin-top: .25rem;
         }
         @media (max-width: 640px) {
             .compression-form { grid-template-columns: 1fr; }
+            .compression-check { grid-row: auto; grid-column: auto; }
             .compression-actions { align-items: flex-start; flex-direction: column; }
             .compression-header { align-items: flex-start; }
             .compression-source { max-width: 42%; white-space: normal; }
@@ -1390,7 +1403,7 @@
     <div class="header">
         <div>
             <p class="eyebrow">Operations / Overview</p>
-            <h1><span class="dot"></span>Backup operations</h1>
+            <h1><span class="dot"></span>Backup Operations</h1>
             <p>PostgreSQL to Telegram · live pipeline status</p>
         </div>
         <div class="header-actions">
@@ -1534,7 +1547,7 @@
                 </div>
                 <label class="compression-check">
                     <input id="compressionChecksum" type="checkbox">
-                    Include zstd frame checksum
+                    <span>Include zstd frame checksum</span>
                 </label>
                 <div class="compression-actions">
                     <span class="compression-status" id="compressionStatus" role="status"></span>
