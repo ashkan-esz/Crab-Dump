@@ -490,6 +490,17 @@ th,
   border-color: var(--dash-accent);
 }
 
+#dashboard-main .db-backup.cancel-action,
+#dashboard-main .db-backup.cancel-action:hover {
+  color: var(--dash-danger);
+  background: transparent;
+  border-color: var(--dash-danger);
+}
+
+#dashboard-main .db-backup.cancel-action:hover {
+  background: var(--dash-danger-soft);
+}
+
 .btn.primary,
 .button.primary,
 button.primary,
