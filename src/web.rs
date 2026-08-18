@@ -23,6 +23,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
@@ -1358,6 +1359,169 @@ async fn api_managed_databases() -> impl Responder {
     HttpResponse::Ok().json(entries)
 }
 
+const DATABASE_CONNECTION_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Deserialize)]
+struct DatabaseConnectionCheckPayload {
+    databases: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DatabaseConnectionCheckResult {
+    name: String,
+    status: &'static str,
+    message: &'static str,
+    duration_ms: u128,
+}
+
+fn check_database_connection(name: String, url: String) -> DatabaseConnectionCheckResult {
+    let started = std::time::Instant::now();
+    let mut child = match Command::new("pg_dump")
+        .args([
+            "--schema-only",
+            "--no-owner",
+            "--no-privileges",
+            "--dbname",
+            &url,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return DatabaseConnectionCheckResult {
+                name,
+                status: "failed",
+                message: "pg_dump is unavailable",
+                duration_ms: started.elapsed().as_millis(),
+            };
+        }
+    };
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                return DatabaseConnectionCheckResult {
+                    name,
+                    status: "connected",
+                    message: "Connection verified",
+                    duration_ms: started.elapsed().as_millis(),
+                };
+            }
+            Ok(Some(_)) => {
+                return DatabaseConnectionCheckResult {
+                    name,
+                    status: "failed",
+                    message: "Connection check failed",
+                    duration_ms: started.elapsed().as_millis(),
+                };
+            }
+            Ok(None) if started.elapsed() >= DATABASE_CONNECTION_CHECK_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return DatabaseConnectionCheckResult {
+                    name,
+                    status: "timeout",
+                    message: "Connection check timed out",
+                    duration_ms: started.elapsed().as_millis(),
+                };
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return DatabaseConnectionCheckResult {
+                    name,
+                    status: "failed",
+                    message: "Connection check failed",
+                    duration_ms: started.elapsed().as_millis(),
+                };
+            }
+        }
+    }
+}
+
+async fn api_check_database_connections(
+    req: HttpRequest,
+    payload: web::Json<DatabaseConnectionCheckPayload>,
+) -> impl Responder {
+    let requested = payload
+        .databases
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "at least one database is required"}));
+    }
+
+    let configured = database_registry()
+        .snapshot()
+        .into_iter()
+        .map(|db| (db.config.display_name(), db.config.url))
+        .collect::<HashMap<_, _>>();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(
+        MAX_PARALLEL_DATABASES.load(Ordering::SeqCst).clamp(1, 4) as usize,
+    ));
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut results = Vec::with_capacity(requested.len());
+
+    for name in requested {
+        let Some(url) = configured.get(&name).cloned() else {
+            results.push(DatabaseConnectionCheckResult {
+                name,
+                status: "failed",
+                message: "Database not found",
+                duration_ms: 0,
+            });
+            continue;
+        };
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                results.push(DatabaseConnectionCheckResult {
+                    name,
+                    status: "failed",
+                    message: "Connection checks unavailable",
+                    duration_ms: 0,
+                });
+                continue;
+            }
+        };
+        tasks.spawn_blocking(move || {
+            let _permit = permit;
+            check_database_connection(name, url)
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(result) => results.push(result),
+            Err(_) => results.push(DatabaseConnectionCheckResult {
+                name: "unknown".into(),
+                status: "failed",
+                message: "Connection check failed",
+                duration_ms: 0,
+            }),
+        }
+    }
+    results.sort_by_key(|result| result.name.to_ascii_lowercase());
+    audit_action(
+        &req,
+        "check_connection",
+        &format!("{} databases", results.len()),
+        "completed",
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "checked_at": chrono::Utc::now().to_rfc3339(),
+        "results": results,
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct DatabaseMutationPayload {
     url: Option<String>,
@@ -2677,6 +2841,10 @@ pub async fn start_server(
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
             .route("/api/databases", web::get().to(api_managed_databases))
+            .route(
+                "/api/database-connections/check",
+                web::post().to(api_check_database_connections),
+            )
             .route("/api/databases", web::post().to(create_managed_database))
             .route(
                 "/api/databases/{id}",

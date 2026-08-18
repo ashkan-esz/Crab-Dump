@@ -60,46 +60,121 @@
   <div class="app-nav-footer">Live status<button id="sign-out" class="app-signout" type="button">Sign out</button></div>
 </nav>
 <main id="databases-main">
-  <header class="head"><div><p class="eyebrow">Operations / Data sources</p><h1>Databases</h1><p class="lede">Review configured sources and manage dashboard entries. PostgreSQL credentials are never displayed in this workspace.</p></div><a href="/">Overview</a></header>
+  <header class="head"><div><p class="eyebrow">Operations / Data sources</p><h1>Databases</h1><p class="lede">Review configured sources and manage dashboard entries. PostgreSQL credentials are never displayed in this workspace.</p></div></header>
   <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
   <div id="permission-notice" class="notice muted" role="status" aria-live="polite" hidden>Viewer access is read-only. Only administrators can add, edit, delete, or inspect mutation history.</div>
-  <div class="bar">
+  <div class="bar database-toolbar">
     <div class="bar-search"><label for="database-search">Filter databases</label><input id="database-search" type="search" placeholder="Name, source, or state" autocomplete="off"></div>
-    <button id="add" class="primary" hidden>Add database</button><button id="history" hidden>Mutation history</button><span id="state" class="muted" role="status" aria-live="polite" aria-atomic="true">Loading…</span>
+    <div class="database-actions">
+      <button id="check-all" type="button">Check all</button>
+      <button id="check-connections" type="button" class="primary" disabled>Check connection</button>
+      <button id="add" class="primary" hidden>Add database</button>
+      <button id="history" type="button" hidden>Mutation history</button>
+    </div>
+    <span id="selected-state" class="muted" role="status" aria-live="polite" aria-atomic="true">0 selected</span>
+    <span id="state" class="muted" role="status" aria-live="polite" aria-atomic="true">Loading…</span>
   </div>
-  <div class="table-scroll" id="database-table-scroll" aria-busy="false"><table><caption class="sr-only">Configured databases</caption><thead><tr><th scope="col">Source</th><th scope="col">Name</th><th scope="col">Connection</th><th scope="col">State</th><th scope="col">Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="table-scroll" id="database-table-scroll" aria-busy="false"><table><caption class="sr-only">Configured databases</caption><thead><tr><th scope="col" class="select-column"><label class="sr-only" for="select-all">Select all databases</label><input id="select-all" type="checkbox"></th><th scope="col">Source</th><th scope="col">Name</th><th scope="col">Connection</th><th scope="col">State</th><th scope="col">Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <section id="mutation-history" class="mutation-history" aria-labelledby="mutation-history-title" hidden></section>
 </main>
 <dialog id="editor" aria-modal="true" aria-labelledby="title"><form method="dialog" id="form"><h2 id="title">Add database</h2><label for="url">PostgreSQL URL<input id="url" type="url" autocomplete="off"><small class="muted">Required when adding. Leave blank while editing to retain the stored URL.</small></label><label for="name">Display name<input id="name" maxlength="120"></label><label for="args">pg_dump extra args<input id="args" maxlength="500"></label><p id="form-error" class="error" role="alert"></p><menu><button type="button" id="cancel-editor">Cancel</button><button id="save-database" class="primary" value="default">Save</button></menu></form></dialog>
 <script>
 (() => {
   document.querySelector('#sign-out').addEventListener('click', dashboardAuth.signOut);
   const rows=document.querySelector('#rows'), notice=document.querySelector('#notice'), state=document.querySelector('#state'), search=document.querySelector('#database-search');
+  const selectedState=document.querySelector('#selected-state'), selectAll=document.querySelector('#select-all');
+  const checkAll=document.querySelector('#check-all'), checkConnections=document.querySelector('#check-connections');
+  const historyButton=document.querySelector('#history'), historyPanel=document.querySelector('#mutation-history');
   const editor=document.querySelector('#editor'), form=document.querySelector('#form');
-  let editing=null, admin=false, records=[];
+  let editing=null, admin=false, records=[], checking=false, historyRecords=[];
+  const selected=new Set(), connectionResults=new Map();
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const show=(text,err=false)=>{notice.textContent=text;notice.className='notice '+(err?'error':'ok');notice.hidden=false};
   async function call(url,opts={}){const r=await dashboardAuth.request(url,opts);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||`Request failed (${r.status})`);return d}
-  function renderLoading(){rows.innerHTML=Array.from({length:5},()=>'<tr><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line short"></span></td></tr>').join('')}
+  function renderLoading(){rows.innerHTML=Array.from({length:5},()=>'<tr><td></td><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line"></span></td><td><span class="skeleton-line short"></span></td><td><span class="skeleton-line short"></span></td></tr>').join('')}
+  function connectionMarkup(db){
+    const result=connectionResults.get(db.name);
+    if(!result)return '<span class="muted">Not checked</span>';
+    return `<span class="connection-status ${esc(result.status)}">${esc(result.message)}${result.duration_ms?` <small>${esc(result.duration_ms)} ms</small>`:''}</span>`;
+  }
+  function syncSelection(visible){
+    const visibleNames=visible.map(db=>db.name);
+    const visibleSelected=visibleNames.filter(name=>selected.has(name));
+    selectAll.checked=visibleNames.length>0&&visibleSelected.length===visibleNames.length;
+    selectAll.indeterminate=visibleSelected.length>0&&visibleSelected.length<visibleNames.length;
+    selectedState.textContent=`${selected.size} selected`;
+    checkConnections.disabled=checking||selected.size===0;
+    checkAll.textContent=visibleNames.length>0&&visibleSelected.length===visibleNames.length?'Clear selection':'Check all';
+  }
   function renderRows(){
     const query=search.value.trim().toLocaleLowerCase();
     const visible=records.filter(db=>!query||`${db.name} ${db.source} ${db.enabled?'enabled':'disabled'} ${db.running?'running':''}`.toLocaleLowerCase().includes(query));
     if(!visible.length){
       const filtered=records.length>0&&query;
-      rows.innerHTML=`<tr><td colspan="5"><div class="empty-state"><strong>${filtered?'No matching databases':'No databases configured'}</strong><span>${filtered?'Clear the filter to see all configured databases.':'Add a dashboard-managed database or configure one through the environment.'}</span>${filtered?'<button type="button" id="clear-database-search">Clear filter</button>':''}</div></td></tr>`;
+      rows.innerHTML=`<tr><td colspan="6"><div class="empty-state"><strong>${filtered?'No matching databases':'No databases configured'}</strong><span>${filtered?'Clear the filter to see all configured databases.':'Add a dashboard-managed database or configure one through the environment.'}</span>${filtered?'<button type="button" id="clear-database-search">Clear filter</button>':''}</div></td></tr>`;
       state.textContent=filtered?`0 of ${records.length} databases`:'0 databases';
+      syncSelection(visible);
       return;
     }
-    rows.innerHTML=visible.map(db=>`<tr><td><span class="badge ${db.source}">${esc(db.source)}</span></td><td>${esc(db.name)}</td><td class="muted">${db.source==='dashboard'?'Configured':'Environment managed'}</td><td><span class="state-badge ${db.running?'running':db.enabled?'enabled':''}">${db.running?'Running':db.enabled?'Enabled':'Disabled'}</span></td><td>${db.source==='dashboard'&&admin?`<span class="actions"><button data-edit="${esc(db.id)}">Edit</button><button class="danger" data-delete="${esc(db.id)}">Delete</button></span>`:'read-only'}</td></tr>`).join('');
+    rows.innerHTML=visible.map(db=>`<tr>
+      <td class="select-column"><input type="checkbox" data-select="${esc(db.name)}" aria-label="Select ${esc(db.name)}" ${selected.has(db.name)?'checked':''} ${checking?'disabled':''}></td>
+      <td><span class="badge ${db.source}">${esc(db.source)}</span></td>
+      <td>${esc(db.name)}</td>
+      <td><div>${connectionMarkup(db)}</div><small class="muted">${db.source==='dashboard'?'Configured':'Environment managed'}</small></td>
+      <td><span class="state-badge ${db.running?'running':db.enabled?'enabled':''}">${db.running?'Running':db.enabled?'Enabled':'Disabled'}</span></td>
+      <td>${db.source==='dashboard'&&admin?`<span class="actions"><button data-edit="${esc(db.id)}" ${checking?'disabled':''}>Edit</button><button class="danger" data-delete="${esc(db.id)}" ${checking?'disabled':''}>Delete</button></span>`:'read-only'}</td>
+    </tr>`).join('');
     state.textContent=query?`${visible.length} of ${records.length} databases`:`${records.length} database${records.length===1?'':'s'}`;
+    syncSelection(visible);
   }
-  async function load(){state.textContent='Loading…';document.querySelector('#database-table-scroll').setAttribute('aria-busy','true');if(!records.length)renderLoading();try{records=await call('/api/databases');renderRows()}catch(e){if(records.length){show(`Refresh failed: ${e.message}`,true)}else{rows.innerHTML=`<tr><td colspan="5"><div class="error-state"><strong>Databases could not be loaded</strong><span>${esc(e.message)}</span><button type="button" id="retry-database-load">Try again</button></div></td></tr>`}state.textContent='Unable to load'}finally{document.querySelector('#database-table-scroll').setAttribute('aria-busy','false')}}
+  async function load(){state.textContent='Loading…';document.querySelector('#database-table-scroll').setAttribute('aria-busy','true');if(!records.length)renderLoading();try{records=await call('/api/databases');const names=new Set(records.map(db=>db.name));for(const name of selected)if(!names.has(name))selected.delete(name);renderRows()}catch(e){if(records.length){show(`Refresh failed: ${e.message}`,true)}else{rows.innerHTML=`<tr><td colspan="6"><div class="error-state"><strong>Databases could not be loaded</strong><span>${esc(e.message)}</span><button type="button" id="retry-database-load">Try again</button></div></td></tr>`}state.textContent='Unable to load'}finally{document.querySelector('#database-table-scroll').setAttribute('aria-busy','false')}}
   function open(db){editing=db?.id||null;document.querySelector('#title').textContent=editing?'Edit database':'Add database';document.querySelector('#url').value='';document.querySelector('#url').placeholder=editing?'Leave blank to retain the stored URL':'postgresql://user:password@host/database';document.querySelector('#name').value=db?.name||'';document.querySelector('#args').value='';document.querySelector('#form-error').textContent='';editor.showModal()}
-  document.querySelector('#add').onclick=()=>open();document.querySelector('#history').onclick=async()=>{try{const h=await call('/api/database-history');show(h.length?`${h.length} mutation records loaded.`:'No mutation history yet.');}catch(e){show(e.message,true)}};
+  async function checkSelectedConnections(){
+    if(!selected.size||checking)return;
+    checking=true;checkConnections.disabled=true;checkAll.disabled=true;state.textContent='Checking connections…';renderRows();
+    try{
+      const data=await call('/api/database-connections/check',{method:'POST',body:JSON.stringify({databases:[...selected]})});
+      for(const result of data.results||[])connectionResults.set(result.name,result);
+      const connected=(data.results||[]).filter(result=>result.status==='connected').length;
+      show(`${connected} of ${(data.results||[]).length} database connections verified.`,connected===(data.results||[]).length);
+    }catch(e){show(`Connection checks failed: ${e.message}`,true)}
+    finally{checking=false;checkAll.disabled=false;renderRows()}
+  }
+  function historyStats(records){
+    const success=records.filter(record=>record.result==='ok').length;
+    const latest=records[0]?.timestamp;
+    return [['Mutations',records.length],['Successful',success],['Failed',records.length-success],['Latest',latest?new Date(latest).toLocaleString():'-']]
+      .map(([label,value])=>`<div class="history-stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+  }
+  function renderHistory(){
+    const pageSize=10,page=Math.max(1,Number(historyPanel.dataset.page||1));
+    const sorted=[...historyRecords].sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
+    const totalPages=Math.max(1,Math.ceil(sorted.length/pageSize)), current=Math.min(page,totalPages);
+    historyPanel.dataset.page=current;
+    const pageRecords=sorted.slice((current-1)*pageSize,current*pageSize);
+    const table=pageRecords.length?`<div class="history-table-wrap"><table class="history-table"><caption class="sr-only">Database mutation history</caption><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Database</th><th>Source</th><th>Result</th></tr></thead><tbody>${pageRecords.map(record=>`<tr><td>${esc(new Date(record.timestamp).toLocaleString())}</td><td>${esc(record.actor)}</td><td class="action">${esc(record.action)}</td><td>${esc(record.database_name)}</td><td>${esc(record.source)}</td><td class="${record.result==='ok'?'success':'failure'}">${esc(record.result)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="history-muted">No mutation history yet.</div>';
+    historyPanel.innerHTML=`<div class="history-heading"><div><h2 id="mutation-history-title">Mutation history</h2><p class="muted">Changes made to dashboard-managed database entries.</p></div><button type="button" id="reload-history">Reload history</button></div><div class="history-stats">${historyStats(sorted)}</div>${table}<div class="history-controls"><span>${sorted.length?`${(current-1)*pageSize+1}-${Math.min(current*pageSize,sorted.length)} of ${sorted.length}`:'0 records'} · Page ${current} of ${totalPages}</span><span><button type="button" id="history-prev" ${current<=1?'disabled':''}>Previous</button><button type="button" id="history-next" ${current>=totalPages?'disabled':''}>Next</button></span></div>`;
+    document.querySelector('#reload-history').onclick=()=>loadHistory(true);
+    document.querySelector('#history-prev').onclick=()=>{historyPanel.dataset.page=current-1;renderHistory()};
+    document.querySelector('#history-next').onclick=()=>{historyPanel.dataset.page=current+1;renderHistory()};
+  }
+  async function loadHistory(force=false){
+    if(!force&&historyRecords.length) {historyPanel.hidden=false;renderHistory();return}
+    historyPanel.hidden=false;historyPanel.innerHTML='<div class="history-skeleton"><span class="skeleton-line"></span><span class="skeleton-line"></span><span class="skeleton-line short"></span></div>';
+    try{historyRecords=await call('/api/database-history');historyPanel.dataset.page='1';renderHistory()}
+    catch(e){historyPanel.innerHTML=`<div class="history-error-state"><span>Could not load mutation history.</span><button type="button" id="retry-history">Try again</button></div>`;document.querySelector('#retry-history').onclick=()=>loadHistory(true)}
+  }
+  document.querySelector('#add').onclick=()=>open();
+  historyButton.onclick=()=>{if(historyPanel.hidden){historyButton.textContent='Hide mutation history';loadHistory()}else{historyPanel.hidden=true;historyButton.textContent='Mutation history'}};
+  checkAll.onclick=()=>{const query=search.value.trim().toLocaleLowerCase();const visible=records.filter(db=>!query||`${db.name} ${db.source} ${db.enabled?'enabled':'disabled'} ${db.running?'running':''}`.toLocaleLowerCase().includes(query));const allSelected=visible.length>0&&visible.every(db=>selected.has(db.name));for(const db of visible)allSelected?selected.delete(db.name):selected.add(db.name);renderRows()};
+  checkConnections.onclick=checkSelectedConnections;
+  selectAll.onchange=()=>{const query=search.value.trim().toLocaleLowerCase();const visible=records.filter(db=>!query||`${db.name} ${db.source} ${db.enabled?'enabled':'disabled'} ${db.running?'running':''}`.toLocaleLowerCase().includes(query));for(const db of visible)selectAll.checked?selected.add(db.name):selected.delete(db.name);renderRows()};
   search.oninput=renderRows;
-  rows.onclick=async e=>{if(e.target.id==='retry-database-load'){load();return}if(e.target.id==='clear-database-search'){search.value='';renderRows();return}const edit=e.target.closest('[data-edit]'), del=e.target.closest('[data-delete]');if(edit){open(records.find(x=>x.id===edit.dataset.edit))}if(del&&confirm('Delete this dashboard-managed database?'))try{await call('/api/databases/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});show('Database deleted.');load()}catch(x){show(x.message,true)}};
+  rows.onchange=e=>{const checkbox=e.target.closest('[data-select]');if(checkbox){if(checkbox.checked)selected.add(checkbox.dataset.select);else selected.delete(checkbox.dataset.select);renderRows()}};
+  rows.onclick=async e=>{if(e.target.id==='retry-database-load'){load();return}if(e.target.id==='clear-database-search'){search.value='';renderRows();return}const edit=e.target.closest('[data-edit]'), del=e.target.closest('[data-delete]');if(edit){open(records.find(x=>x.id===edit.dataset.edit))}if(del&&confirm('Delete this dashboard-managed database?'))try{await call('/api/databases/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});selected.delete(records.find(x=>x.id===del.dataset.delete)?.name);show('Database deleted.');load()}catch(x){show(x.message,true)}};
   document.querySelector('#cancel-editor').onclick=()=>editor.close();
   form.onsubmit=async e=>{e.preventDefault();const url=document.querySelector('#url').value.trim();if(!editing&&!url){document.querySelector('#form-error').textContent='PostgreSQL URL is required when adding a database.';return}const save=document.querySelector('#save-database');const label=editing?'Save changes':'Save';const body={url:url||undefined,name:document.querySelector('#name').value.trim()||undefined,pg_dump_extra_args:document.querySelector('#args').value.trim()||undefined};save.disabled=true;save.textContent='Saving…';form.setAttribute('aria-busy','true');try{await call(editing?'/api/databases/'+encodeURIComponent(editing):'/api/databases',{method:editing?'PUT':'POST',body:JSON.stringify(body)});editor.close();show(editing?'Database updated.':'Database added.');load()}catch(x){document.querySelector('#form-error').textContent=x.message}finally{save.disabled=false;save.textContent=label;form.setAttribute('aria-busy','false')}};
-  (async()=>{try{const config=await call('/api/config');admin=config.dashboard_role==='admin';document.querySelector('#sidebarRole').textContent=config.dashboard_role||'viewer';document.querySelector('#add').hidden=!admin;document.querySelector('#history').hidden=!admin;document.querySelector('#permission-notice').hidden=admin;await load()}catch(e){document.querySelector('#sidebarRole').textContent='unknown';show('Permission denied or session expired.',true);state.textContent='Unable to load'}})();
+  (async()=>{try{const config=await call('/api/config');admin=config.dashboard_role==='admin';document.querySelector('#sidebarRole').textContent=config.dashboard_role||'viewer';document.querySelector('#add').hidden=!admin;historyButton.hidden=!admin;document.querySelector('#permission-notice').hidden=admin;await load()}catch(e){document.querySelector('#sidebarRole').textContent='unknown';show('Permission denied or session expired.',true);state.textContent='Unable to load'}})();
 })();
 </script>
 </body>
