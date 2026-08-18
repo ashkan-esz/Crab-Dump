@@ -54,6 +54,8 @@ assert.doesNotMatch(routingStyles, /\.routing-main\s*\{[^}]*\b(?:width|margin-le
 assert.match(pageHtml['routing.html'], /<main id="routing-main" class="routing-main">/);
 assert.match(pageHtml['routing.html'], /id="profileForm"/);
 assert.match(pageHtml['routing.html'], /id="profiles" aria-label="Saved routing profiles"/);
+assert.match(pageHtml['routing.html'], /id="profileForm" class="routing-form" autocomplete="off"/);
+assert.match(pageHtml['routing.html'], /id="profileUrl" name="routing-share-url" readonly type="password"[^>]*autocomplete="new-password"/);
 
 assert.doesNotMatch(body, /<button class="db-summary"/);
 assert.match(body, /class="db-summary-main"/);
@@ -396,7 +398,7 @@ assert.match(routingHtml, /disableRouting/);
 assert.match(routingHtml, /api\/routing\/disable/);
 assert.match(routingHtml, /ss:\/\/|trojan:\/\//);
 assert.match(routingHtml, /Saved profiles will remain available/);
-assert.match(routingHtml, /Check all configurations/);
+assert.match(routingHtml, /Check all/);
 assert.match(routingHtml, /api\/routing\/profiles\/check-all/);
 assert.match(routingHtml, /checkSummary/);
 assert.match(routingHtml, /CHECK FAILED/);
@@ -412,7 +414,12 @@ assert.match(routingHtml, /dashboardAuth\.request/);
 assert.match(routingHtml, /previous working route/);
 assert.match(routingHtml, /profile-status/);
 assert.match(routingHtml, /routingRetry/);
-assert.match(routingHtml, /Saved profiles are unavailable until routing state loads/);
+assert.match(routingHtml, /Saved profiles are unavailable until the profiles request succeeds/);
+assert.match(routingHtml, /Promise\.allSettled\(\[api\('\/api\/routing\/profiles'\),api\('\/api\/routing\/status'\)\]\)/);
+assert.match(routingHtml, /Routing status unavailable:/);
+assert.match(routingHtml, /Routing profiles could not be loaded: \$\{e\.message\}/);
+assert.match(routingHtml, /const routingRetry=document\.getElementById\('routingRetry'\)/);
+assert.match(routingHtml, /const routingStatus=document\.getElementById\('routingStatus'\)/);
 assert.match(routingHtml, /profileSubmit/);
 assert.match(routingHtml, /setMessage\('Saving profile…','busy'\)/);
 assert.match(routingHtml, /dashboardRole==='admin'/);
@@ -434,7 +441,7 @@ for (const file of pageFiles) {
     assert.match(source, /<nav class="app-nav" aria-label="Primary navigation">/);
     assert.match(source, /class="skip-link"/);
     assert.match(source, /Skip to main content/);
-    assert.match(source, /prefers-reduced-motion/);
+    assert.match(source, /<link rel="stylesheet" href="\/dashboard\.css">/);
     assert.match(source, /class="app-signout"/);
     assert.match(source, /<script src="\/dashboard-auth\.js"><\/script>/);
     if (file === 'databases.html') {
@@ -447,8 +454,6 @@ for (const file of pageFiles) {
     for (const href of ['/', '/databases', '/routing', '/users']) {
         assert.match(source, new RegExp(`href="${href.replace('/', '\\/')}"`));
     }
-    assert.match(source, /overflow-x:\s*hidden/);
-    assert.match(source, /:focus-visible/);
     const visible = source
         .replace(/<script[\s\S]*?<\/script>/gi, '')
         .replace(/<style[\s\S]*?<\/style>/gi, '');
@@ -477,12 +482,26 @@ assert.match(authJs, /disabled = true/);
 assert.match(authJs, /Sign in/);
 assert.match(authJs, /try again/);
 const dashboardCss = readFileSync(new URL('./dashboard.css', import.meta.url), 'utf8');
+assert.match(dashboardCss, /\.routing-status \{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word/);
+assert.match(dashboardCss, /body \{[\s\S]*overflow-x: hidden/);
+assert.match(dashboardCss, /button:focus-visible,[\s\S]*a:focus-visible/);
+assert.match(dashboardCss, /@media \(prefers-reduced-motion: reduce\)/);
 assert.match(dashboardCss, /dashboard-auth-dialog/);
 assert.match(dashboardCss, /var\(--dash-surface\)/);
 assert.match(dashboardCss, /var\(--dash-border\)/);
 assert.match(dashboardCss, /var\(--dash-radius-lg\)/);
 assert.match(dashboardCss, /var\(--dash-z-dialog\)/);
 assert.match(dashboardCss, /var\(--dash-shadow-dialog\)/);
+assert.match(routingHtml, /<header class="page-header">[\s\S]*class="eyebrow"[\s\S]*<h1>Routing profiles<\/h1>[\s\S]*class="lede"/);
+assert.doesNotMatch(routingHtml.slice(0, routingHtml.indexOf('<link rel="stylesheet" href="/dashboard.css">')), /<style/);
+assert.match(dashboardCss, /\.routing-main > form \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1\.4fr\) auto/);
+assert.match(dashboardCss, /margin-left: calc\(var\(--dash-nav-width\) \+ var\(--dash-space-6\)\)/);
+assert.match(dashboardCss, /\.routing-main > \.page-header,[\s\S]*max-width: 980px/);
+assert.match(dashboardCss, /\.routing-main > form label \{[\s\S]*background: transparent[\s\S]*border: 0/);
+assert.match(dashboardCss, /\.profile-details \{[\s\S]*min-width: 0/);
+assert.match(dashboardCss, /\.profile-actions,[\s\S]*flex-wrap: wrap/);
+assert.match(dashboardCss, /\.routing-main > form \{[\s\S]*grid-template-columns: 1fr;[\s\S]*\.routing-main > form button \{[\s\S]*width: 100%/);
+assert.match(dashboardCss, /@media \(max-width: 480px\) \{[\s\S]*\.page,[\s\S]*#dashboard-main,[\s\S]*#databases-main/);
 assert.match(dashboardCss, /#dashboard-main \.db-backup\.cancel-action,[\s\S]*color: var\(--dash-danger\)/);
 assert.match(dashboardCss, /#dashboard-main \.db-backup\.cancel-action,[\s\S]*background: transparent/);
 assert.match(dashboardCss, /#dashboard-main \.db-backup\.cancel-action:hover[\s\S]*background: var\(--dash-danger-soft\)/);

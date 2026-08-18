@@ -380,7 +380,7 @@ th,
 #dashboard-main,
 #databases-main {
   width: min(var(--dash-content-max), calc(100% - var(--dash-nav-width) - 48px));
-  margin-left: calc(var(--dash-nav-width) + (100% - var(--dash-nav-width) - min(var(--dash-content-max), calc(100% - var(--dash-nav-width) - 48px))) / 2);
+  margin-left: calc(var(--dash-nav-width) + var(--dash-space-6));
   padding: 28px 0 56px;
 }
 
@@ -403,6 +403,15 @@ th,
   margin-bottom: var(--dash-space-6);
   padding: 0 0 var(--dash-space-5);
   border-bottom: 1px solid var(--dash-border);
+}
+
+.routing-main > .page-header,
+.routing-main > section,
+.routing-main > label,
+.routing-main > form,
+.routing-main > p,
+.routing-main > ul {
+  max-width: 980px;
 }
 
 .page-header h1,
@@ -968,8 +977,10 @@ td:nth-last-child(-n + 2) {
 /* Routing: make the loose profile list read like a status table/list. */
 .routing-main > form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  align-items: end;
   gap: var(--dash-space-4);
-  max-width: 720px;
+  margin: 0 0 var(--dash-space-4);
   padding: var(--dash-space-5);
 }
 
@@ -977,17 +988,59 @@ td:nth-last-child(-n + 2) {
 .routing-main > label {
   display: grid;
   gap: var(--dash-space-2);
+  min-width: 0;
+  margin: 0 0 var(--dash-space-4);
+  padding: var(--dash-space-4);
   color: var(--dash-muted);
   font-size: .75rem;
+}
+
+.routing-main > form label {
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+}
+
+.routing-main input,
+.routing-main select {
+  width: 100%;
+  min-height: 42px;
+  margin: 0;
+  padding: 9px 11px;
+  font: inherit;
+}
+
+.routing-main > section.status,
+.routing-main > p.status {
+  min-height: 42px;
+  margin: 0 0 var(--dash-space-4);
+  padding: var(--dash-space-3) var(--dash-space-4);
+}
+
+.routing-main > #routingPermission {
+  margin: 0 0 var(--dash-space-4);
+}
+
+.routing-main > .routing-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--dash-space-3);
+  margin: 0 0 var(--dash-space-4);
 }
 
 .routing-main > ul {
   display: grid;
   gap: 0;
-  margin: var(--dash-space-5) 0;
+  margin: 0;
   padding: 0;
   overflow: hidden;
   list-style: none;
+}
+
+.routing-main > ul > li.routing-empty {
+  border-bottom: 0;
 }
 
 .routing-main > ul > li.profile {
@@ -1009,9 +1062,21 @@ td:nth-last-child(-n + 2) {
   overflow-wrap: anywhere;
 }
 
+.profile-details {
+  display: block;
+  flex: 1 1 24rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-kind {
+  color: var(--dash-muted);
+}
+
+.profile-actions,
 .profile > span:last-child {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--dash-space-2);
@@ -1019,6 +1084,37 @@ td:nth-last-child(-n + 2) {
 
 .active {
   color: var(--dash-success);
+}
+
+.profile-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: .68rem;
+  line-height: 1.2;
+}
+
+.profile-status.active {
+  color: var(--dash-success);
+  background: var(--dash-success-soft);
+  border-color: rgba(88, 214, 141, .34);
+}
+
+.profile-status.failed {
+  color: var(--dash-danger);
+  background: var(--dash-danger-soft);
+  border-color: rgba(255, 125, 134, .34);
+}
+
+.routing-retry {
+  margin-left: var(--dash-space-2);
+}
+
+.routing-empty {
+  padding: var(--dash-space-5) var(--dash-space-4);
 }
 
 /* Drawers/dialogs use the same layering and focus-safe visual treatment. */
@@ -1099,6 +1195,14 @@ td:nth-last-child(-n + 2) {
     width: 100%;
     margin-left: 0;
     padding-inline: 24px;
+  }
+
+  .routing-main > form {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  }
+
+  .routing-main > form button {
+    grid-column: 1 / -1;
   }
 }
 
@@ -1191,8 +1295,17 @@ td:nth-last-child(-n + 2) {
     gap: 12px;
   }
 
+  .profile-actions,
   .profile > span:last-child {
     justify-content: flex-start;
+  }
+
+  .routing-main > form {
+    grid-template-columns: 1fr;
+  }
+
+  .routing-main > form button {
+    width: 100%;
   }
 }
 
@@ -1208,7 +1321,6 @@ td:nth-last-child(-n + 2) {
   }
 
   .page,
-  .routing-main,
   #dashboard-main,
   #databases-main {
     width: calc(100% - 20px);
@@ -1250,6 +1362,460 @@ td:nth-last-child(-n + 2) {
   max-width: none;
   margin-left: 0;
   padding: 28px 24px 56px 56px;
+}
+
+/* Routing control surface */
+.routing-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.85fr);
+  gap: var(--dash-space-4);
+  max-width: 980px;
+}
+
+.routing-overview,
+.routing-profiles-panel,
+.routing-form-panel {
+  min-width: 0;
+  padding: var(--dash-space-5);
+  background: rgba(15, 23, 36, .82);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .1);
+}
+
+.routing-overview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dash-space-5);
+}
+
+.routing-profiles-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.routing-form-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.routing-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--dash-space-4);
+}
+
+.routing-panel-heading h2 {
+  margin: 0;
+  color: var(--dash-text);
+  font-size: 1rem;
+  letter-spacing: -.015em;
+}
+
+.panel-kicker {
+  margin: 0 0 5px;
+  color: var(--dash-accent);
+  font-size: .61rem;
+  font-weight: 750;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.routing-live-mark {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  background: var(--dash-success);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px var(--dash-success-soft);
+}
+
+.routing-status {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 12px 14px !important;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.55;
+}
+
+.routing-status button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.routing-status[data-state="active"] {
+  color: var(--dash-success);
+  background: var(--dash-success-soft);
+  border-color: rgba(88, 214, 141, .34);
+}
+
+.routing-status[data-state="error"] {
+  color: var(--dash-danger);
+}
+
+.routing-core-control {
+  display: grid;
+  gap: 8px;
+}
+
+.routing-core-control label {
+  color: var(--dash-text);
+  font-size: .76rem;
+  font-weight: 700;
+}
+
+.routing-core-control select {
+  margin: 0;
+}
+
+.routing-core-control p,
+.routing-form-intro {
+  margin: 0;
+  color: var(--dash-muted);
+  font-size: .76rem;
+  line-height: 1.55;
+}
+
+.routing-safety-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: var(--dash-space-4);
+  border-top: 1px solid var(--dash-border);
+}
+
+.routing-safety-note p {
+  margin: 0;
+  color: var(--dash-muted);
+  font-size: .74rem;
+  line-height: 1.5;
+}
+
+.routing-safety-note strong {
+  color: var(--dash-text);
+}
+
+.routing-note-icon {
+  display: grid;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: var(--dash-success);
+  background: var(--dash-success-soft);
+  border: 1px solid rgba(88, 214, 141, .34);
+  border-radius: 50%;
+  font-size: .7rem;
+  font-weight: 800;
+}
+
+.routing-profiles-heading {
+  align-items: center;
+  padding: var(--dash-space-5);
+  border-bottom: 1px solid var(--dash-border);
+}
+
+.routing-check-actions,
+.routing-profile-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--dash-space-2);
+}
+
+.routing-check-actions .muted {
+  font-size: .72rem;
+}
+
+.routing-permission {
+  margin: 0;
+  padding: 12px var(--dash-space-5);
+  border-bottom: 1px solid var(--dash-border);
+  font-size: .76rem;
+  line-height: 1.5;
+}
+
+.routing-list-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--dash-space-4);
+  padding: 10px var(--dash-space-5);
+  color: var(--dash-muted);
+  background: rgba(8, 12, 20, .32);
+  border-bottom: 1px solid var(--dash-border);
+  font-size: .61rem;
+  font-weight: 750;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.routing-profiles-panel > ul {
+  display: grid;
+  gap: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.routing-profiles-panel > ul > li.profile {
+  display: flex;
+  align-items: center;
+  gap: var(--dash-space-4);
+  min-width: 0;
+  margin: 0;
+  padding: 15px var(--dash-space-5);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(41, 56, 79, .7);
+  border-radius: 0;
+}
+
+.routing-profiles-panel > ul > li.profile:last-child {
+  border-bottom: 0;
+}
+
+.profile-details {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 7px;
+  min-width: 0;
+}
+
+.profile-title-row,
+.profile-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.profile-title-row b {
+  min-width: 0;
+  color: var(--dash-text);
+  overflow-wrap: anywhere;
+}
+
+.profile-kind,
+.profile-meta {
+  color: var(--dash-muted);
+  font-size: .7rem;
+}
+
+.profile-incompatible {
+  color: var(--dash-warning);
+}
+
+.profile-actions {
+  flex: 0 0 auto;
+}
+
+.routing-empty {
+  display: grid !important;
+  gap: 5px;
+  padding: 30px var(--dash-space-5) !important;
+  color: var(--dash-muted);
+  text-align: center;
+}
+
+.routing-empty strong {
+  color: var(--dash-text);
+  font-size: .82rem;
+}
+
+.routing-empty span {
+  font-size: .75rem;
+}
+
+.routing-form-panel .routing-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  align-items: start;
+  gap: 16px;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.routing-form-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.routing-form-icon {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: var(--dash-accent);
+  background: rgba(96, 165, 250, .12);
+  border: 1px solid rgba(96, 165, 250, .3);
+  border-radius: 9px;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.routing-form-intro {
+  max-width: 660px;
+  margin-top: 12px;
+}
+
+.routing-form-security {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 18px 0 0;
+  color: var(--dash-muted);
+  font-size: .68rem;
+  line-height: 1.4;
+}
+
+.routing-form-security span {
+  color: var(--dash-success);
+  font-size: .78rem;
+}
+
+.routing-protocols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.routing-protocols span {
+  padding: 4px 8px;
+  color: var(--dash-muted);
+  background: rgba(145, 160, 181, .07);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  font-size: .62rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.routing-form-panel .routing-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  color: var(--dash-muted);
+  font-size: .74rem;
+}
+
+.routing-field-label {
+  color: var(--dash-text);
+  font-size: .74rem;
+  font-weight: 700;
+}
+
+.routing-field-hint {
+  min-height: 1.15em;
+  color: var(--dash-muted);
+  font-size: .67rem;
+  line-height: 1.35;
+}
+
+.routing-form-panel .routing-form input {
+  min-width: 0;
+  margin-top: 3px;
+}
+
+.routing-form-panel .routing-form button {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 2px;
+  padding-inline: 14px;
+  font-size: .74rem;
+}
+
+.routing-form-panel .routing-form button span:last-child {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.routing-message {
+  grid-column: 1 / -1;
+  min-height: 20px;
+  margin: -2px 0 0;
+  font-size: .76rem;
+}
+
+.routing-form-panel[hidden] {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .routing-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .routing-form-panel {
+    grid-column: auto;
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+}
+
+@media (max-width: 700px) {
+  .routing-overview,
+  .routing-form-panel {
+    padding: var(--dash-space-4);
+  }
+
+  .routing-profiles-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: var(--dash-space-4);
+  }
+
+  .routing-list-head {
+    display: none;
+  }
+
+  .routing-profiles-panel > ul > li.profile {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+    padding: var(--dash-space-4);
+  }
+
+  .profile-actions,
+  .routing-check-actions {
+    justify-content: flex-start;
+  }
+
+  .routing-form-panel .routing-form {
+    grid-template-columns: 1fr;
+  }
+
+  .routing-form-panel .routing-form button {
+    grid-column: auto;
+    width: 100%;
+  }
 }
 
 .database-toolbar {

@@ -3,36 +3,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Routing profiles · crab-dump</title>
-<style>
-body{overflow-x:hidden}
-form,li{border:1px solid #334155;border-radius:8px;padding:1rem;margin:1rem 0;background:#111827}
-input{display:block;width:100%;box-sizing:border-box;margin:.35rem 0 .75rem;padding:.6rem;background:#0f172a;color:inherit;border:1px solid #475569;border-radius:5px}
-button{margin:.2rem;padding:.45rem .7rem;color:inherit;background:#1e293b;border:1px solid #475569;border-radius:5px}
-button:disabled{cursor:wait;opacity:.6}.status{min-height:1.4rem;padding:.55rem .7rem;border-radius:5px}.status.error{color:#fecaca;background:#450a0a;border:1px solid #7f1d1d}.status.success{color:#bbf7d0;background:#052e16;border:1px solid #166534}.status[aria-busy="true"]{color:#bfdbfe;background:#172554;border:1px solid #1d4ed8}
-ul{padding:0;list-style:none}.profile{display:flex;justify-content:space-between;gap:1rem;align-items:center}.muted{color:#94a3b8}.active{color:#86efac}
-.routing-main>h1{margin:.5rem 0 0}.routing-main>form,.routing-main>ul,.routing-main>section,.routing-main>label,.routing-main>p{max-width:980px}button,input,select{font:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}.profile{align-items:center}@media(max-width:640px){.profile{align-items:flex-start;flex-direction:column}}
-</style>
-<style>
-:root{--surface:#0d141f;--surface-raised:#172033;--radius:10px;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
-.skip-link{position:fixed;top:.75rem;left:.75rem;z-index:1000;padding:.55rem .75rem;color:#dbeafe;background:#0d141f;border:1px solid #60a5fa;border-radius:7px;transform:translateY(-160%);transition:transform .15s ease}.skip-link:focus{transform:translateY(0)}
-.routing-main>p:first-child{margin:0;padding-top:1.35rem;color:#94a3b8;font:700 11px var(--mono);letter-spacing:.08em;text-transform:uppercase}
-.routing-main>p:first-child a{text-decoration:none}
-.routing-main>h1{padding:1.35rem 0 .25rem;margin:0;border-top:1px solid #334155;font-size:clamp(1.45rem,2vw,1.85rem);letter-spacing:-.025em}
-.routing-main>h1+p{max-width:700px;margin:0;color:#94a3b8}
-.routing-main>label{display:grid;gap:.45rem;margin:1.4rem 0 0;padding:1rem;background:var(--surface);border:1px solid #334155;border-radius:var(--radius);color:#94a3b8;font-size:.8rem;font-weight:650}
-.routing-main>label select{margin:0}
-.routing-main>form{display:grid;grid-template-columns:1fr 1.4fr auto;align-items:end;gap:.85rem;margin:1rem 0;padding:1rem;background:var(--surface);border:1px solid #334155;border-radius:var(--radius)}
-.routing-main>form label{margin:0}.routing-main>form button{min-height:42px}
-#profiles{display:grid;gap:.55rem;margin-top:1rem}
-#profiles>li{margin:0;padding:1rem 1.1rem;border-color:#334155;background:#111827;border-radius:var(--radius)}
-.profile{align-items:center}.profile>span:first-child{min-width:0;overflow-wrap:anywhere}.profile>span:last-child{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.35rem}
-.profile b{font-size:1rem}.profile .active,.profile .profile-status.active{display:inline-flex;padding:.2rem .5rem;border:1px solid rgba(74,222,128,.3);border-radius:999px;background:rgba(34,197,94,.12);font-size:.72rem}
-.profile .profile-status.failed{display:inline-flex;padding:.2rem .5rem;border:1px solid rgba(248,113,113,.3);border-radius:999px;background:rgba(239,68,68,.12);color:#f87171;font-size:.72rem}
-.routing-retry{margin-left:.6rem;padding:.35rem .6rem;font-size:.78rem}
-button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}
-@media(max-width:640px){.routing-main>form{grid-template-columns:1fr}.routing-main>form button{width:100%}.profile{align-items:flex-start;flex-direction:column}.profile>span:last-child{justify-content:flex-start}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
-</style>
 <link rel="stylesheet" href="/dashboard.css">
 <script src="/dashboard-auth.js"></script>
 <body>
@@ -52,42 +22,100 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
   <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
 </nav>
 <main id="routing-main" class="routing-main">
-<p><a href="/">Overview</a> / Operations</p>
-<h1>Routing profiles</h1>
-<p class="muted">Switch the managed local route without exposing profile URLs or credentials. A failed replacement keeps the previous working route.</p>
-<section id="routingStatus" class="status muted" aria-live="polite" aria-busy="true">Loading routing state…<button id="routingRetry" class="routing-retry" type="button" hidden>Try again</button></section>
-<p id="routingPermission" class="muted" hidden>Viewer access is read-only. Ask an administrator to manage routing profiles.</p>
-<label>Selected routing core
-<select id="coreSelect" onchange="selectCore(this.value)">
-<option value="sing-box">sing-box</option>
-<option value="shoes">shoes</option>
-</select>
-</label>
-<form id="profileForm">
-<label>Name<input id="profileName" required maxlength="100"></label>
-<label>Share URL<input id="profileUrl" type="password" required autocomplete="off" placeholder="vmess://, vless://, ss://, or trojan://…"></label>
-<button id="profileSubmit" type="submit">Create profile</button>
-</form>
-<p id="message" class="status muted" role="status" aria-live="polite"></p>
-<p><button id="checkAll" onclick="checkAllProfiles()">Check all configurations</button>
-<span id="checkSummary" class="muted"></span></p>
-<ul id="profiles" aria-label="Saved routing profiles" aria-busy="true"></ul>
+<header class="page-header">
+  <div>
+    <p class="eyebrow"><a href="/">Overview</a> / Operations</p>
+    <h1>Routing profiles</h1>
+    <p class="lede">Switch the managed local route without exposing profile URLs or credentials. A failed replacement keeps the previous working route.</p>
+  </div>
+</header>
+<div class="routing-layout">
+  <section class="routing-overview" aria-labelledby="routing-overview-title">
+    <div class="routing-panel-heading">
+      <div><p class="panel-kicker">Managed route</p><h2 id="routing-overview-title">Current connection</h2></div>
+      <span class="routing-live-mark" aria-hidden="true"></span>
+    </div>
+    <section id="routingStatus" class="routing-status status muted" aria-live="polite" aria-busy="true">
+      <span class="routing-status-label">Loading routing state…</span>
+      <button id="routingRetry" class="routing-retry" type="button" hidden>Try again</button>
+    </section>
+    <div class="routing-core-control">
+      <label for="coreSelect">Routing core</label>
+      <select id="coreSelect" onchange="selectCore(this.value)">
+        <option value="sing-box">sing-box</option>
+        <option value="shoes">shoes</option>
+      </select>
+      <p>Choose which managed local engine should receive the active profile.</p>
+    </div>
+    <div class="routing-safety-note"><span class="routing-note-icon" aria-hidden="true">✓</span><p><strong>Safe route switching</strong><br>Failed replacements keep the previous working route.</p></div>
+  </section>
+
+  <section class="routing-profiles-panel" aria-labelledby="profiles-title">
+    <div class="routing-panel-heading routing-profiles-heading">
+      <div><p class="panel-kicker">Configuration library</p><h2 id="profiles-title">Saved profiles</h2></div>
+      <div class="routing-check-actions"><span id="checkSummary" class="muted" aria-live="polite"></span><button id="checkAll" type="button" onclick="checkAllProfiles()">Check all</button></div>
+    </div>
+    <p id="routingPermission" class="routing-permission muted" hidden>Viewer access is read-only. Ask an administrator to manage routing profiles.</p>
+    <div class="routing-list-head" aria-hidden="true"><span>Profile</span><span>Actions</span></div>
+    <ul id="profiles" aria-label="Saved routing profiles" aria-busy="true"></ul>
+  </section>
+
+  <aside class="routing-form-panel" aria-labelledby="add-profile-title">
+    <div class="routing-form-copy">
+      <div class="routing-form-heading">
+        <span class="routing-form-icon" aria-hidden="true">＋</span>
+        <div><p class="panel-kicker">Administrator action</p><h2 id="add-profile-title">Add a profile</h2></div>
+      </div>
+      <p class="routing-form-intro">Give the route a recognizable name, then paste its share URL. The URL is parsed server-side and never returned to the dashboard.</p>
+      <div class="routing-protocols" aria-label="Supported profile protocols">
+        <span>VMess</span><span>VLESS</span><span>Shadowsocks</span><span>Trojan</span>
+      </div>
+      <p class="routing-form-security"><span aria-hidden="true">🔒</span> Credentials stay in the protected profile store.</p>
+    </div>
+    <form id="profileForm" class="routing-form" autocomplete="off" data-lpignore="true" data-1p-ignore="true">
+      <label class="routing-field" for="profileName">
+        <span class="routing-field-label">Profile name</span>
+        <span class="routing-field-hint">Shown only in this dashboard.</span>
+        <input id="profileName" name="routing-profile-name" readonly required maxlength="100" autocomplete="off" placeholder="e.g. Primary relay">
+      </label>
+      <label class="routing-field" for="profileUrl">
+        <span class="routing-field-label">Share URL</span>
+        <span class="routing-field-hint">Paste a vmess://, vless://, ss://, or trojan:// link.</span>
+        <input id="profileUrl" name="routing-share-url" readonly type="password" required autocomplete="new-password" inputmode="url" data-lpignore="true" data-1p-ignore="true" placeholder="vmess://, vless://, ss://, or trojan://…">
+      </label>
+      <button id="profileSubmit" class="primary" type="submit"><span>Create profile</span><span aria-hidden="true">→</span></button>
+      <p id="message" class="routing-message status muted" role="status" aria-live="polite"></p>
+    </form>
+  </aside>
+</div>
 <script>
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path,opt={}){const r=await dashboardAuth.request(path,opt);if(!r.ok)throw Error((await r.json().catch(()=>({}))).error||`HTTP ${r.status}`);return r.status===204?null:r.json()}
+const routingStatus=document.getElementById('routingStatus');
+const routingRetry=document.getElementById('routingRetry');
+const profiles=document.getElementById('profiles');
+const coreSelect=document.getElementById('coreSelect');
+const profileForm=document.getElementById('profileForm');
+const profileName=document.getElementById('profileName');
+const profileUrl=document.getElementById('profileUrl');
+const message=document.getElementById('message');
+const checkSummary=document.getElementById('checkSummary');
+const sidebarRole=document.getElementById('sidebarRole');
+[profileName,profileUrl].forEach(field=>field.addEventListener('focus',()=>field.removeAttribute('readonly'),{once:true}));
+async function api(path,opt={}){const r=await dashboardAuth.request(path,opt);const payload=await r.json().catch(()=>({}));if(!r.ok)throw Error(payload.error||`Request failed (${r.status})`);return r.status===204?null:payload}
 function setMessage(text,tone=''){message.textContent=text;message.className=`status ${tone}`.trim();message.setAttribute('aria-busy',tone==='busy'?'true':'false')}
 function setProfilesBusy(busy){document.querySelectorAll('#profiles button').forEach(button=>{button.disabled=busy})}
 let checkResults={};let routingState=null;let dashboardRole='viewer';
-async function refresh(){routingStatus.setAttribute('aria-busy','true');profiles.setAttribute('aria-busy','true');routingRetry.hidden=true;const [ps,s]=await Promise.all([api('/api/routing/profiles'),api('/api/routing/status')]);routingState=s;coreSelect.value=s.selected_core;const routeActive=Boolean(s.active_profile||s.running_core);const canAdmin=dashboardRole==='admin';const canOperate=canAdmin||dashboardRole==='operator';coreSelect.disabled=routeActive||!canAdmin;document.getElementById('profileForm').hidden=!canAdmin;document.getElementById('checkAll').hidden=!canAdmin;const permission=document.getElementById('routingPermission');permission.hidden=canAdmin;permission.textContent=dashboardRole==='operator'?'Operator access can apply or disable routes, but profile management requires an administrator.':'Viewer access is read-only. Ask an administrator to manage routing profiles.';routingStatus.textContent=`Selected core: ${s.selected_core} · Running core: ${s.running_core||'none'} · Active profile: ${s.active_profile||'none'}${routeActive?' · Disable routing to change core.':''}`;routingStatus.append(routingRetry);routingRetry.hidden=true;routingStatus.setAttribute('aria-busy','false');profiles.innerHTML=ps.map(p=>{const r=checkResults[p.id];const compatible=p.compatible_cores||[];const canApply=compatible.includes(s.selected_core)&&canOperate;const status=r?`<span class="profile-status ${r.ok?'active':'failed'}">${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';return `<li class="profile"><span><b>${esc(p.name)}</b> · ${p.kind} <span class="muted">[${compatible.join(', ')}]</span> ${p.active?'<span class="active">ACTIVE</span>':''} ${status}${compatible.includes(s.selected_core)?'':`<span class="muted"> · incompatible with ${esc(s.selected_core)}</span>`}</span><span>${canAdmin?`<button onclick="testP('${p.id}')">Test</button>`:''}<button onclick="applyP('${p.id}')" ${canApply?'':'disabled'}>Apply</button>${p.active&&canOperate?'<button onclick="disableRouting()">Disable</button>':''}${canAdmin?`<button class="danger" onclick="deleteP('${p.id}')">Delete</button>`:''}</span></li>`}).join('')||'<li class="muted">No profiles saved. Add a profile to make a managed route available.</li>';profiles.setAttribute('aria-busy','false')}
+function renderProfiles(items,status){const selectedCore=status?.selected_core||'';const canAdmin=dashboardRole==='admin';const canOperate=canAdmin||dashboardRole==='operator';profiles.innerHTML=items.map(p=>{const r=checkResults[p.id];const compatible=p.compatible_cores||[];const canApply=Boolean(selectedCore)&&compatible.includes(selectedCore)&&canOperate;const profileStatus=r?`<span class="profile-status ${r.ok?'active':'failed'}">${r.ok?'CHECK OK':'CHECK FAILED'}${r.error?` (${esc(r.error)})`:''}</span>`:'';const compatibility=selectedCore&&compatible.includes(selectedCore)?`<span class="profile-meta">Works with ${esc(selectedCore)}</span>`:selectedCore?`<span class="profile-meta profile-incompatible">Incompatible with ${esc(selectedCore)}</span>`:'';return `<li class="profile"><div class="profile-details"><div class="profile-title-row"><b>${esc(p.name)}</b><span class="profile-kind">${esc(p.kind)}</span>${p.active?'<span class="profile-status active">ACTIVE</span>':''}</div><div class="profile-meta-row"><span class="profile-meta">Available on ${(compatible.length?compatible:['no cores']).map(esc).join(', ')}</span>${compatibility}${profileStatus}</div></div><span class="profile-actions">${canAdmin?`<button type="button" onclick="testP('${p.id}')">Test</button>`:''}<button type="button" onclick="applyP('${p.id}')" ${canApply?'':'disabled'}>${p.active?'Applied':'Apply'}</button>${p.active&&canOperate?'<button type="button" onclick="disableRouting()">Disable</button>':''}${canAdmin?`<button type="button" class="danger" onclick="deleteP('${p.id}')">Delete</button>`:''}</span></li>`}).join('')||'<li class="routing-empty"><strong>No profiles saved yet</strong><span>Add a profile to make a managed route available.</span></li>'}
+async function refresh(){routingStatus.setAttribute('aria-busy','true');profiles.setAttribute('aria-busy','true');routingRetry.hidden=true;const [profilesResult,statusResult]=await Promise.allSettled([api('/api/routing/profiles'),api('/api/routing/status')]);if(profilesResult.status==='rejected')throw profilesResult.reason;const ps=profilesResult.value;const status=statusResult.status==='fulfilled'?statusResult.value:null;routingState=status;if(status){coreSelect.value=status.selected_core;const routeActive=Boolean(status.active_profile||status.running_core);coreSelect.disabled=routeActive||dashboardRole!=='admin';routingStatus.textContent=`Selected core: ${status.selected_core} · Running core: ${status.running_core||'none'} · Active profile: ${status.active_profile||'none'}${routeActive?' · Disable routing to change core.':''}`;routingStatus.className='routing-status status muted';routingStatus.dataset.state=routeActive?'active':'idle';routingRetry.hidden=true}else{coreSelect.disabled=true;routingStatus.textContent=`Routing status unavailable: ${statusResult.reason?.message||'request failed'}`;routingStatus.className='routing-status status error';routingStatus.dataset.state='error';routingRetry.hidden=false}const canAdmin=dashboardRole==='admin';document.getElementById('profileForm').hidden=!canAdmin;document.getElementById('checkAll').hidden=!canAdmin;const permission=document.getElementById('routingPermission');permission.hidden=canAdmin;permission.textContent=dashboardRole==='operator'?'Operator access can apply or disable routes, but profile management requires an administrator.':'Viewer access is read-only. Ask an administrator to manage routing profiles.';routingStatus.append(routingRetry);routingStatus.setAttribute('aria-busy','false');renderProfiles(ps,status);profiles.setAttribute('aria-busy','false')}
 async function selectCore(core){try{await api('/api/routing/core',{method:'POST',body:JSON.stringify({core})});setMessage(`Selected ${core}`,'success');await refresh()}catch(e){setMessage(e.message,'error');await refresh()}}
 async function testP(id){try{const r=await api(`/api/routing/profiles/${id}/test`,{method:'POST'});setMessage(`Valid ${r.kind} profile (${r.transport||'tcp'})`,'success')}catch(e){setMessage(e.message,'error')}}
 async function checkAllProfiles(){const button=document.getElementById('checkAll');button.disabled=true;checkSummary.textContent='Checking…';try{const r=await api('/api/routing/profiles/check-all',{method:'POST'});checkResults=Object.fromEntries(r.results.map(x=>[x.id,x]));checkSummary.textContent=`${r.passed}/${r.checked} passed`;message.textContent=r.valid?'All configurations passed':'Some configurations failed';await refresh()}catch(e){checkSummary.textContent=e.message}finally{button.disabled=false}}
 async function applyP(id){setProfilesBusy(true);try{await api(`/api/routing/profiles/${id}/apply`,{method:'POST'});setMessage('Profile applied','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
-async function disableRouting(){if(!confirm('Disable the active routing profile? Saved profiles will remain available.'))return;setProfilesBusy(true);try{await api('/api/routing/disable',{method:'POST'});setMessage('Routing disabled','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
-async function deleteP(id){if(!confirm('Delete this profile?'))return;try{await api(`/api/routing/profiles/${id}`,{method:'DELETE'});await refresh()}catch(e){setMessage(e.message,'error')}}
+async function disableRouting(){if(!confirm('Disable the active routing profile? Saved profiles will remain available.'))return;setProfilesBusy(true);setMessage('Disabling routing…','busy');try{await api('/api/routing/disable',{method:'POST'});setMessage('Routing disabled','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
+async function deleteP(id){if(!confirm('Delete this profile?'))return;setProfilesBusy(true);setMessage('Deleting profile…','busy');try{await api(`/api/routing/profiles/${id}`,{method:'DELETE'});setMessage('Profile deleted','success');await refresh()}catch(e){setMessage(e.message,'error')}finally{setProfilesBusy(false)}}
 async function loadRole(){try{const c=await api('/api/config');dashboardRole=c.dashboard_role||'viewer';sidebarRole.textContent=dashboardRole}catch(e){dashboardRole='viewer';sidebarRole.textContent='unknown'}}
-async function loadRouting(){try{await refresh()}catch(e){routingStatus.textContent='Routing state could not be loaded.';routingStatus.append(routingRetry);routingStatus.className='status error';routingStatus.setAttribute('aria-busy','false');routingRetry.hidden=false;profiles.setAttribute('aria-busy','false');profiles.innerHTML='<li class="muted">Saved profiles are unavailable until routing state loads.</li>';}}
-profileForm.onsubmit=async e=>{e.preventDefault();const submit=document.getElementById('profileSubmit');submit.disabled=true;setMessage('Saving profile…','busy');try{await api('/api/routing/profiles',{method:'POST',body:JSON.stringify({name:profileName.value,url:profileUrl.value})});profileName.value='';profileUrl.value='';setMessage('Profile created','success');await refresh()}catch(x){setMessage(x.message,'error')}finally{submit.disabled=false}};routingRetry.onclick=loadRouting;(async()=>{await loadRole();await loadRouting()})();
+async function loadRouting(){try{await refresh()}catch(e){routingStatus.textContent=`Routing profiles could not be loaded: ${e.message}`;routingStatus.append(routingRetry);routingStatus.className='status error';routingStatus.setAttribute('aria-busy','false');routingRetry.hidden=false;profiles.setAttribute('aria-busy','false');profiles.innerHTML='<li class="routing-empty muted">Saved profiles are unavailable until the profiles request succeeds.</li>';}}
+profileForm.onsubmit=async e=>{e.preventDefault();const submit=document.getElementById('profileSubmit');submit.disabled=true;setMessage('Saving profile…','busy');try{await api('/api/routing/profiles',{method:'POST',body:JSON.stringify({name:profileName.value,url:profileUrl.value})});profileName.value='';profileUrl.value='';setMessage('Profile created','success');await refresh();profileName.focus()}catch(x){setMessage(x.message,'error')}finally{submit.disabled=false}};routingRetry.onclick=loadRouting;(async()=>{await loadRole();await loadRouting()})();
 </script>
 </main>
 </body>
