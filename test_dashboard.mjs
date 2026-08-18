@@ -20,9 +20,9 @@ const stubs = {
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, progressLabel };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, progressLabel } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel } = load(...Object.values(stubs));
 
 assert.doesNotMatch(body, /<button class="db-summary"/);
 assert.match(body, /class="db-summary-main"/);
@@ -30,6 +30,7 @@ assert.match(body, /className = 'db-row'/);
 assert.match(body, /class="db-status"/);
 assert.match(body, /class="db-pipeline"/);
 assert.match(body, /class="db-progress"/);
+assert.match(body, /class="db-upload-row" hidden/);
 assert.match(body, /class="db-progress-percent"/);
 assert.match(body, /class="db-progress-bytes"/);
 assert.match(body, /class="db-progress-meter" role="progressbar"/);
@@ -47,11 +48,13 @@ assert.match(body, /setAttribute\('aria-controls', historyId\)/);
 assert.match(body, /role="switch"/);
 assert.match(body, /class="db-backup"/);
 assert.match(html, /\.db-backup\.cancel-action \{[\s\S]*background: var\(--err\)/);
-assert.match(html, /\.db-toggle, \.db-backup \{[\s\S]*width: 5\.8rem/);
-assert.match(html, /\.db-backup \{[\s\S]*font-size: \.5rem/);
+assert.match(html, /\.db-toggle, \.db-backup \{[\s\S]*width: 6\.3rem/);
+assert.match(html, /\.db-backup \{[\s\S]*font-size: \.56rem/);
 assert.match(body, /Backup Now/);
-assert.match(body, /class="tr-chunk"/);
-assert.doesNotMatch(body, /class="tr-bar"/);
+assert.match(body, /class="db-chunk-info" hidden/);
+assert.match(body, /class="db-chunk-count"/);
+assert.match(body, /class="db-chunk-current"/);
+assert.doesNotMatch(body, /class="tr-chunk"/);
 assert.match(body, /current_chunk_done/);
 assert.match(body, /current_chunk_total/);
 assert.match(html, /id="manualBackupModal"/);
@@ -92,7 +95,11 @@ assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/)
 assert.match(body, /'disable', 'disabled'/);
 assert.match(body, /'enable', 'enabled'/);
 assert.match(html, /\.db-row \{/);
-assert.match(html, /grid-template-columns: minmax\(12rem, 1\.45fr\) minmax\(5\.5rem, \.6fr\) minmax\(17rem, 1\.35fr\) minmax\(10rem, 1fr\) auto/);
+assert.match(html, /grid-template-columns: minmax\(12rem, 1\.45fr\) minmax\(5rem, \.45fr\) minmax\(22rem, 1\.8fr\) auto/);
+assert.match(html, /\.db-timeline \{[\s\S]*width: 100%;[\s\S]*max-width: none/);
+assert.match(html, /\.db-timeline \{ max-width: 320px; \}/);
+assert.match(html, /\.db-upload-row \{/);
+assert.match(html, /\.db-upload-row\[hidden\] \{ display: none; \}/);
 assert.match(html, /\.db-progress-meter \{/);
 assert.match(html, /\.db-row\.running \.db-progress-meter span \{ background: var\(--warn\); \}/);
 assert.match(html, /\.db-row\.done \.db-progress-meter span \{ background: var\(--up\); \}/);
@@ -100,7 +107,7 @@ assert.match(html, /\.db-row\.disabled \.db-progress-meter span,[\s\S]*backgroun
 assert.match(html, /\.db-row\.failed \.db-progress-meter span \{ background: var\(--err\); \}/);
 assert.match(html, /font-variant-numeric: tabular-nums/);
 assert.match(html, /\.db-row:focus-within/);
-assert.match(html, /@media \(max-width: 640px\)[\s\S]*\.db-summary-main, \.db-status, \.db-pipeline, \.db-progress, \.db-actions/);
+assert.match(html, /@media \(max-width: 640px\)[\s\S]*\.db-summary-main, \.db-status, \.db-pipeline, \.db-actions/);
 assert.doesNotMatch(html, /\.db-card:hover/);
 assert.doesNotMatch(body, /closest\?\.\('\.card, \.db-card'\)/);
 assert.match(body, /page_size=\$\{state\.pageSize\}/);
@@ -195,6 +202,14 @@ assert.equal(fmtSpeed(4 * 1024 ** 2), '4.0 MB/s');
 assert.equal(uploadPercent({ bytes_done: 250, bytes_total: 1000 }), 25);
 assert.equal(uploadPercent({ bytes_done: 2000, bytes_total: 1000 }), 100);
 assert.equal(uploadPercent({ bytes_done: 2000, bytes_total: 0 }), 0);
+assert.equal(uploadDetailsVisible({ stage: 'queued' }), false);
+assert.equal(uploadDetailsVisible({ stage: 'dump' }), false);
+assert.equal(uploadDetailsVisible({ stage: 'compression' }), false);
+assert.equal(uploadDetailsVisible({ stage: 'encryption' }), false);
+assert.equal(uploadDetailsVisible({ stage: 'upload' }), true);
+assert.equal(uploadDetailsVisible({ stage: 'done' }), true);
+assert.equal(uploadDetailsVisible({ stage: 'failed' }), false);
+assert.equal(uploadDetailsVisible({ stage: 'cancelled' }), false);
 assert.equal(progressLabel({ stage: 'queued' }, dbView({ state: 'UP', stage: 'queued' }), 0),
     'Backup queued; upload progress unavailable');
 assert.equal(progressLabel({ stage: 'upload' }, dbView({ state: 'DEGRADED', stage: 'upload' }), 42),

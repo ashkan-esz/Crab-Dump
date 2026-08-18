@@ -503,11 +503,16 @@
             width: 100%;
             min-width: 0;
             display: grid;
-        grid-template-columns: minmax(12rem, 1.45fr) minmax(5.5rem, .6fr) minmax(17rem, 1.35fr) minmax(10rem, 1fr) auto;
+            grid-template-columns: minmax(12rem, 1.45fr) minmax(5rem, .45fr) minmax(22rem, 1.8fr) auto;
             align-items: center;
             gap: 1rem;
             padding: .8rem 1rem .8rem .9rem;
         }
+        .db-upload-row {
+            border-top: 1px solid var(--border);
+            padding: .75rem 1rem .85rem .9rem;
+        }
+        .db-upload-row[hidden] { display: none; }
         .db-history { border-top: 1px solid var(--border); padding: 1rem 1.15rem 1.15rem; }
         .db-history[hidden] { display: none; }
         .history-heading { display: flex; justify-content: space-between; gap: .75rem; align-items: baseline; margin-bottom: .8rem; }
@@ -586,7 +591,7 @@
             display: inline-flex;
             align-items: center;
             gap: .45rem;
-            min-height: 24px;
+            min-height: 28px;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg);
@@ -643,8 +648,8 @@
             background: transparent;
             color: var(--accent);
             cursor: pointer;
-            padding: .2rem .3rem;
-            font-size: .5rem;
+            padding: .25rem .4rem;
+            font-size: .56rem;
             line-height: 1;
             letter-spacing: -.01em;
             font-weight: 650;
@@ -652,7 +657,7 @@
             white-space: nowrap;
         }
         .db-toggle, .db-backup {
-            width: 5.8rem;
+            width: 6.3rem;
             box-sizing: border-box;
             justify-content: center;
         }
@@ -960,13 +965,23 @@
         .db-row.done .db-progress-speed { color: var(--up); }
         .db-row.failed .db-progress-speed { color: var(--err); }
         .db-progress-speed[hidden] { display: none; }
-        .tr-chunk {
+        .db-chunk-info {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .25rem .55rem;
+            min-width: 0;
+            font: .66rem var(--mono);
+            font-variant-numeric: tabular-nums;
+        }
+        .db-chunk-info[hidden] { display: none; }
+        .db-chunk-count,
+        .db-chunk-current {
             min-width: 0;
             color: var(--text-muted);
-            text-align: right;
             overflow-wrap: anywhere;
         }
-        .tr-chunk strong { color: var(--text); font-weight: 600; }
+        .db-chunk-count strong,
+        .db-chunk-current strong { color: var(--text); font-weight: 600; }
         .db-progress-meta {
             display: flex;
             flex-wrap: wrap;
@@ -985,6 +1000,8 @@
 
         /* Row 5: pipeline timeline (dump → compression → encryption → upload) */
         .db-timeline {
+            width: 100%;
+            max-width: none;
             display: flex;
             align-items: flex-start;
         }
@@ -1346,12 +1363,12 @@
         .db-top { gap: .45rem; }
         .db-name { font-size: .8rem; }
         .db-step { min-height: 1.8em; font-size: .7rem; }
-        .db-timeline { max-width: 240px; }
+        .db-timeline { max-width: 320px; }
             .tl-stage { width: 3.6rem; }
         .tl-label { font-size: .54rem; }
         .db-actions { flex-direction: column; align-items: flex-end; }
-        .db-toggle { min-height: 26px; }
-        .db-backup { padding: .2rem .3rem; font-size: .5rem; line-height: 1; }
+        .db-toggle { min-height: 28px; }
+        .db-backup { padding: .25rem .4rem; font-size: .56rem; line-height: 1; }
         .controls { justify-content: flex-end; margin-top: 1.15rem; }
         .footer { margin-top: 1.25rem; padding-bottom: 1.5rem; }
         .btn { border-radius: 7px; padding: .5rem .75rem; font-size: .72rem; }
@@ -1391,7 +1408,7 @@
                 align-items: stretch;
                 gap: .75rem;
             }
-            .db-summary-main, .db-status, .db-pipeline, .db-progress, .db-actions {
+            .db-summary-main, .db-status, .db-pipeline, .db-actions {
                 grid-column: 1 / -1;
             }
             .db-summary-main .db-column-label,
@@ -1400,6 +1417,7 @@
             .db-progress .db-column-label,
             .db-actions .db-column-label { display: block; }
             .db-summary-main .db-column-label { margin-bottom: .25rem; }
+            .db-upload-row { padding: .7rem .9rem .8rem; }
             .db-actions {
                 width: 100%;
                 justify-content: flex-end;
@@ -2083,8 +2101,8 @@
      * updateDbCard() so the 2-second poll never rebuilds the DOM (no flicker,
      * no lost hover, no restarted animations).
      *
-     * Desktop columns: database/details, status, pipeline, progress, actions.
-     * The history region remains full-width below the operational row.
+     * Desktop columns: database/details, status, pipeline, actions.
+     * Upload details and history remain full-width below the operational row.
      */
     function buildDbCard() {
         const el = document.createElement('article');
@@ -2113,6 +2131,17 @@
                     </div>
                     <div class="db-foot"><span class="db-stage"></span><span class="db-updated"></span></div>
                 </div>
+                <div class="db-actions">
+                    <button class="db-toggle" type="button" role="switch" aria-checked="true">
+                        <span class="toggle-track" aria-hidden="true"></span>
+                        <span class="db-toggle-label">On</span>
+                    </button>
+                    <button class="db-backup" type="button">Backup Now</button>
+                    <span class="db-toggle-error" role="alert" hidden></span>
+                    <span class="db-backup-error" role="alert" hidden></span>
+                </div>
+            </div>
+            <div class="db-upload-row" hidden>
                 <div class="db-progress">
                     <span class="db-column-label">Progress</span>
                     <div class="db-transfer">
@@ -2127,22 +2156,16 @@
                         </div>
                         <div class="db-progress-details">
                             <span class="db-progress-speed" hidden></span>
-                            <span class="tr-chunk"></span>
                         </div>
                         <div class="db-progress-meta">
                             <div class="db-size" hidden></div>
-                            <span class="db-progress-empty">Preparing upload…</span>
+                            <div class="db-chunk-info" hidden>
+                                <span class="db-chunk-count"></span>
+                                <span class="db-chunk-current"></span>
+                            </div>
+                            <span class="db-progress-empty">Waiting for upload metrics</span>
                         </div>
                     </div>
-                </div>
-                <div class="db-actions">
-                    <button class="db-toggle" type="button" role="switch" aria-checked="true">
-                        <span class="toggle-track" aria-hidden="true"></span>
-                        <span class="db-toggle-label">On</span>
-                    </button>
-                    <button class="db-backup" type="button">Backup Now</button>
-                    <span class="db-toggle-error" role="alert" hidden></span>
-                    <span class="db-backup-error" role="alert" hidden></span>
                 </div>
             </div>
             <section class="db-history" hidden aria-live="polite"></section>`;
@@ -2192,6 +2215,10 @@
         const total = Number(db.bytes_total) || 0;
         if (total <= 0) return 0;
         return Math.round(Math.min(1, Math.max(0, (Number(db.bytes_done) || 0) / total)) * 100);
+    }
+
+    function uploadDetailsVisible(db) {
+        return db.stage === 'upload' || db.stage === 'done';
     }
 
     function progressLabel(db, view, percent) {
@@ -2281,17 +2308,19 @@
             : (db.detail || '-');
         step.removeAttribute('title');
 
-        // Upload completion module. The meter remains present while the dump
-        // or compression/encryption stage is active, but reports unavailable
-        // progress until
-        // the backend knows the packaged total.
+        // Upload details appear only after the upload stage begins, and remain
+        // visible for the completed result.
+        const uploadRow = el.querySelector('.db-upload-row');
+        uploadRow.hidden = !uploadDetailsVisible(db);
         const transfer = el.querySelector('.db-transfer');
         const total = db.bytes_total || 0;
         const percent = v.cls === 'done' ? 100 : uploadPercent(db);
         const done = Math.min(Number(db.bytes_done) || 0, total);
         const meter = transfer.querySelector('.db-progress-meter');
         const speed = transfer.querySelector('.db-progress-speed');
-        const chunk = transfer.querySelector('.tr-chunk');
+        const chunkInfo = transfer.querySelector('.db-chunk-info');
+        const chunkCountEl = transfer.querySelector('.db-chunk-count');
+        const currentChunkEl = transfer.querySelector('.db-chunk-current');
         transfer.querySelector('.db-progress-percent').textContent =
             total > 0 ? `${percent}%` : '—';
         transfer.querySelector('.db-progress-bytes').textContent =
@@ -2310,10 +2339,25 @@
         const chunkTotal = db.current_chunk_total || 0;
         const chunkNumber = db.current_chunk || 0;
         const chunkCount = db.chunk_count || 0;
-        chunk.innerHTML = enabled && v.cls === 'running' && db.stage === 'upload' &&
-            chunkTotal > 0 && chunkNumber > 0
-            ? `chunk ${chunkNumber}/${chunkCount} · <strong>${fmtBytes(Math.min(chunkDone, chunkTotal))}</strong> / ${fmtBytes(chunkTotal)}`
-            : '';
+        chunkInfo.hidden = !enabled;
+        chunkCountEl.innerHTML = chunkCount > 0
+            ? `<strong>${chunkCount}</strong> ${chunkCount === 1 ? 'chunk' : 'chunks'} total`
+            : 'chunks: calculating…';
+        if (v.cls === 'done' && chunkCount > 0) {
+            currentChunkEl.innerHTML = `all <strong>${chunkCount}</strong> chunks uploaded`;
+        } else if (db.stage === 'upload' && chunkNumber > 0 && chunkCount > 0) {
+            const chunkBytes = chunkTotal > 0
+                ? ` · <strong>${fmtBytes(Math.min(chunkDone, chunkTotal))}</strong> / ${fmtBytes(chunkTotal)}`
+                : '';
+            const action = v.cls === 'failed' ? 'stopped on' : 'uploading';
+            currentChunkEl.innerHTML = `${action} chunk <strong>${chunkNumber}</strong> of ${chunkCount}${chunkBytes}`;
+        } else if (v.cls === 'done') {
+            currentChunkEl.textContent = 'all chunks uploaded';
+        } else if (db.stage === 'upload') {
+            currentChunkEl.textContent = 'current chunk: waiting for metrics…';
+        } else {
+            currentChunkEl.textContent = '';
+        }
 
         // Logical dump size — grows live during the dump stage, then stays put.
         const size = el.querySelector('.db-size');
