@@ -423,6 +423,17 @@ assert.match(routingHtml, /const routingStatus=document\.getElementById\('routin
 assert.match(routingHtml, /profileSubmit/);
 assert.match(routingHtml, /setMessage\('Saving profile…','busy'\)/);
 assert.match(routingHtml, /dashboardRole==='admin'/);
+assert.match(routingHtml, /onclick="editP\('\$\{p\.id\}'\)">Edit/);
+assert.match(routingHtml, /let checkResults=\{\};let routingState=null;let dashboardRole='viewer';let editingProfile=null/);
+assert.match(routingHtml, /function setProfileFormMode\(profile=null\)/);
+assert.match(routingHtml, /profileFormTitle\.textContent=editing\?'Edit profile':'Add a profile'/);
+assert.match(routingHtml, /profileSubmitLabel\.textContent=editing\?'Save changes':'Create profile'/);
+assert.match(routingHtml, /id="profileCancel" class="routing-form-cancel" type="button" hidden/);
+assert.match(routingHtml, /function cancelEdit\(\)\{setProfileFormMode\(\)\}/);
+assert.match(routingHtml, /Saved share URLs are never displayed\. Paste the profile URL again/);
+assert.match(routingHtml, /const path=editing\?`\/api\/routing\/profiles\/\$\{editing\.id\}`:'\/api\/routing\/profiles'/);
+assert.match(routingHtml, /const method=editing\?'PUT':'POST'/);
+assert.match(routingHtml, /Profile updated\. Re-apply it to use the new configuration\./);
 assert.match(routingHtml, /routingPermission/);
 assert.match(routingHtml, /canOperate=canAdmin\|\|dashboardRole==='operator'/);
 assert.match(routingHtml, /Operator access can apply or disable routes/);
@@ -431,6 +442,8 @@ assert.match(routingHtml, /profiles\.setAttribute\('aria-busy','false'\)/);
 assert.match(routingHtml, /\(async\(\)=>\{await loadRole\(\);await loadRouting\(\)\}\)\(\)/);
 assert.doesNotMatch(routingHtml, /Promise\.all\(\[loadRouting\(\),loadRole\(\)\]\)\.then\(\(\)=>refresh\(\)\)/);
 assert.match(routingHtml, /routingStatus\.append\(routingRetry\).*routingRetry\.hidden=false/);
+assert.match(routingHtml, /routingStatus\.className='routing-status status error'/);
+assert.match(routingHtml, /routingStatus\.append\(routingRetry\);routingStatus\.className='routing-status status error'/);
 console.log('Routing disable workspace contract OK');
 
 // Shared operations shell contract. Every dashboard surface must expose the
@@ -483,6 +496,7 @@ assert.match(authJs, /Sign in/);
 assert.match(authJs, /try again/);
 const dashboardCss = readFileSync(new URL('./dashboard.css', import.meta.url), 'utf8');
 assert.match(dashboardCss, /\.routing-status \{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word/);
+assert.match(dashboardCss, /\.routing-status button \{[\s\S]*max-width: 100%;[\s\S]*overflow-wrap: anywhere/);
 assert.match(dashboardCss, /body \{[\s\S]*overflow-x: hidden/);
 assert.match(dashboardCss, /button:focus-visible,[\s\S]*a:focus-visible/);
 assert.match(dashboardCss, /@media \(prefers-reduced-motion: reduce\)/);

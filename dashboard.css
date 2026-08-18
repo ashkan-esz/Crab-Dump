@@ -1763,6 +1763,21 @@ td:nth-last-child(-n + 2) {
   font-size: .74rem;
 }
 
+.routing-form-panel .routing-form button.routing-form-cancel {
+  min-height: 0;
+  margin-top: -8px;
+  padding: 0;
+  color: var(--dash-muted);
+  background: transparent;
+  border: 0;
+  justify-content: center;
+}
+
+.routing-form-panel .routing-form button.routing-form-cancel:hover {
+  color: var(--dash-text);
+  background: transparent;
+}
+
 .routing-form-panel .routing-form button span:last-child {
   font-size: 1.05rem;
   line-height: 1;
