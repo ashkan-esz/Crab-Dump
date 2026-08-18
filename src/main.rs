@@ -1123,12 +1123,13 @@ fn backup_pipeline(
     metrics: &mut AttemptMetrics,
     cancellation: &CancellationToken,
 ) -> Result<BackupResult> {
-    // Report "running" status to the dashboard before starting heavy work.
-    web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
-
     // ── Resolve encryption mode ────────────────────────────────────────────
     let encryption_mode = effective_encryption_mode(cfg, options);
     let encrypted = encryption_mode.encrypted();
+    let compressed = cfg.compression_codec.is_some();
+    web::set_db_pipeline_config(db_name, compressed, encrypted);
+    // Report "running" status to the dashboard before starting heavy work.
+    web::set_db_status(db_name, 1, "dump", "Dumping PostgreSQL via pg_dump …");
 
     // ── Start pg_dump subprocess ───────────────────────────────────────────
     // Keep the DumpPipe alive so we can verify pg_dump's exit status after
@@ -1233,32 +1234,14 @@ fn backup_pipeline(
     metrics.dump_bytes = raw_bytes;
 
     // ── Finalize pipeline stages ───────────────────────────────────────────
-    // Unwind the writer stack in reverse order:
-    //   1. compressor finish → InnerWriter
-    //   2. age::StreamWriter::finish() → Result<ChunkWriter> (if encrypted)
-    //   3. ChunkWriter::finish() → Result<(paths, hash, total)>
-    web::set_db_status(
-        db_name,
-        1,
-        "package",
-        if encrypted {
-            if cfg.compression_codec.is_some() {
-                "Flushing compression + encryption, writing chunks …"
-            } else {
-                "Flushing encryption, writing chunks …"
-            }
-        } else if cfg.compression_codec.is_some() {
-            "Flushing compression, writing chunks …"
-        } else {
-            "Writing raw dump chunks …"
-        },
-    );
+    // Sink::finish unwinds compression, encryption, and chunking in the same
+    // order as the wire pipeline while publishing each visible stage.
     if cancellation_requested(cancellation) {
         pipe.cancel().context("terminating cancelled pg_dump")?;
         return Err(cancelled());
     }
     let (chunks, hash, total_bytes) = sink
-        .finish()
+        .finish(db_name, compressed, encrypted)
         .with_context(|| format!("finalizing pipeline stages (db={db_name})"))?;
 
     // Now that stdout is drained, confirm pg_dump exited successfully.
@@ -1960,16 +1943,49 @@ impl Sink {
     ///   1. compressor `finish(self)` → `io::Result<InnerWriter>`
     ///   2. `age::StreamWriter::finish()` → `Result<ChunkWriter>`
     ///   3. `ChunkWriter::finish()` → `Result<(paths, hash, total)>`
-    fn finish(self) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
+    fn finish(
+        self,
+        db_name: &str,
+        compression_enabled: bool,
+        encryption_enabled: bool,
+    ) -> Result<(Vec<PathBuf>, [u8; 32], u64)> {
         match self {
             Sink::PlainCompressed(encoder) => {
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "compression",
+                    "Finalizing compression and writing chunks …",
+                );
                 let chunker = encoder.finish().context("compression finish")?;
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "encryption",
+                    if encryption_enabled {
+                        "Encryption is next …"
+                    } else {
+                        "Encryption disabled; writing chunks …"
+                    },
+                );
                 chunker
                     .finish()
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
             Sink::EncryptedCompressed(encoder) => {
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "compression",
+                    "Finalizing compression and writing encrypted stream …",
+                );
                 let age_writer = encoder.finish().context("compression finish")?;
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "encryption",
+                    "Finalizing encryption and writing chunks …",
+                );
                 let chunker = age_writer
                     .finish()
                     .map_err(|e| anyhow::anyhow!("age writer finish: {e}"))?;
@@ -1978,6 +1994,22 @@ impl Sink {
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
             Sink::EncryptedRaw(age_writer) => {
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "compression",
+                    if compression_enabled {
+                        "Compression is next …"
+                    } else {
+                        "Compression disabled; writing encrypted stream …"
+                    },
+                );
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "encryption",
+                    "Finalizing encryption and writing chunks …",
+                );
                 let chunker = age_writer
                     .finish()
                     .map_err(|e| anyhow::anyhow!("age writer finish: {e}"))?;
@@ -1985,9 +2017,23 @@ impl Sink {
                     .finish()
                     .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
             }
-            Sink::PlainRaw(chunker) => chunker
-                .finish()
-                .map_err(|e| anyhow::anyhow!("chunker finish: {e}")),
+            Sink::PlainRaw(chunker) => {
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "compression",
+                    "Compression disabled; writing raw dump chunks …",
+                );
+                web::set_db_status(
+                    db_name,
+                    1,
+                    "encryption",
+                    "Encryption disabled; writing chunks …",
+                );
+                chunker
+                    .finish()
+                    .map_err(|e| anyhow::anyhow!("chunker finish: {e}"))
+            }
         }
     }
 }
@@ -2144,7 +2190,7 @@ mod tests {
             let original: Vec<u8> = (0..5000).map(|n| (n % 251) as u8).collect();
             let mut sink = Sink::PlainRaw(ChunkWriter::new(&root, "raw.dump", limit));
             sink.write_all(&original).unwrap();
-            let (parts, _, total) = sink.finish().unwrap();
+            let (parts, _, total) = sink.finish("test", false, false).unwrap();
 
             assert_eq!(parts.len(), expected_parts);
             assert_eq!(total, original.len() as u64);
@@ -2167,7 +2213,7 @@ mod tests {
         let original: Vec<u8> = (0..5000).map(|n| (n % 251) as u8).collect();
         let mut sink = Sink::PlainRaw(ChunkWriter::new(&root, "raw.dump", 1024));
         write_sink_chunk(&mut sink, &original, "test").unwrap();
-        let (parts, _, total) = sink.finish().unwrap();
+        let (parts, _, total) = sink.finish("test", false, false).unwrap();
 
         assert_eq!(total, original.len() as u64);
         let reassembled = root.join("reassembled");

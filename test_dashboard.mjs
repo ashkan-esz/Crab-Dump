@@ -20,16 +20,38 @@ const stubs = {
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, progressLabel };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, progressLabel } = load(...Object.values(stubs));
 
 assert.doesNotMatch(body, /<button class="db-summary"/);
 assert.match(body, /class="db-summary-main"/);
+assert.match(body, /className = 'db-row'/);
+assert.match(body, /class="db-status"/);
+assert.match(body, /class="db-pipeline"/);
+assert.match(body, /class="db-progress"/);
+assert.match(body, /class="db-progress-percent"/);
+assert.match(body, /class="db-progress-bytes"/);
+assert.match(body, /class="db-progress-meter" role="progressbar"/);
+assert.match(body, /aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"/);
+assert.match(body, /aria-label="Upload progress unavailable"/);
+assert.match(body, /class="db-progress-speed"/);
+assert.match(body, /class="db-column-label">Status/);
+assert.match(body, /class="db-column-label">Database/);
+assert.match(body, /class="db-column-label">Pipeline/);
+assert.match(body, /class="db-column-label">Progress/);
+assert.doesNotMatch(body, /class="db-column-label">Actions/);
+assert.match(html, /\.db-actions \{ flex-direction: column; align-items: flex-end; \}/);
+assert.match(body, /<section class="db-history" hidden/);
+assert.match(body, /setAttribute\('aria-controls', historyId\)/);
 assert.match(body, /role="switch"/);
 assert.match(body, /class="db-backup"/);
-assert.match(body, /Backup now/);
+assert.match(html, /\.db-backup\.cancel-action \{[\s\S]*background: var\(--err\)/);
+assert.match(html, /\.db-toggle, \.db-backup \{[\s\S]*width: 5\.8rem/);
+assert.match(html, /\.db-backup \{[\s\S]*font-size: \.5rem/);
+assert.match(body, /Backup Now/);
 assert.match(body, /class="tr-chunk"/);
+assert.doesNotMatch(body, /class="tr-bar"/);
 assert.match(body, /current_chunk_done/);
 assert.match(body, /current_chunk_total/);
 assert.match(html, /id="manualBackupModal"/);
@@ -69,7 +91,18 @@ assert.match(html, /history-table \.action \{ color: var\(--text-muted\); \}/);
 assert.match(html, /history-table \.action-disable \{ color: var\(--warn\); \}/);
 assert.match(body, /'disable', 'disabled'/);
 assert.match(body, /'enable', 'enabled'/);
-assert.match(html, /\.db-group-list \{ display: flex; flex-direction: column; gap: 1rem; \}/);
+assert.match(html, /\.db-row \{/);
+assert.match(html, /grid-template-columns: minmax\(12rem, 1\.45fr\) minmax\(5\.5rem, \.6fr\) minmax\(17rem, 1\.35fr\) minmax\(10rem, 1fr\) auto/);
+assert.match(html, /\.db-progress-meter \{/);
+assert.match(html, /\.db-row\.running \.db-progress-meter span \{ background: var\(--warn\); \}/);
+assert.match(html, /\.db-row\.done \.db-progress-meter span \{ background: var\(--up\); \}/);
+assert.match(html, /\.db-row\.disabled \.db-progress-meter span,[\s\S]*background: var\(--idle\)/);
+assert.match(html, /\.db-row\.failed \.db-progress-meter span \{ background: var\(--err\); \}/);
+assert.match(html, /font-variant-numeric: tabular-nums/);
+assert.match(html, /\.db-row:focus-within/);
+assert.match(html, /@media \(max-width: 640px\)[\s\S]*\.db-summary-main, \.db-status, \.db-pipeline, \.db-progress, \.db-actions/);
+assert.doesNotMatch(html, /\.db-card:hover/);
+assert.doesNotMatch(body, /closest\?\.\('\.card, \.db-card'\)/);
 assert.match(body, /page_size=\$\{state\.pageSize\}/);
 assert.match(body, /historyCacheKey\(name, state\.page, state\.pageSize\)/);
 assert.match(html, /id="resourceCard"/);
@@ -102,36 +135,40 @@ assert.match(body, /cancelDatabase\(db\.name\)/);
 assert.match(body, /container scope/);
 assert.match(html, /WORK_DIR disk/);
 
-assert.deepEqual(STAGES, ['dump', 'package', 'upload']);
+assert.deepEqual(STAGES, ['dump', 'compression', 'encryption', 'upload']);
 
 /** Assert badge text plus the node/bar classes for one backend payload. */
 function check(db, badge, nodes, bars) {
     const v = dbView(db);
-    const tl = timelineClasses(v);
+    const tl = timelineClasses(v, db);
     assert.equal(v.badge, badge, `badge for stage=${db.stage} state=${db.state}`);
     assert.deepEqual(tl.nodes, nodes, `nodes for stage=${db.stage} state=${db.state}`);
     assert.deepEqual(tl.bars, bars, `bars for stage=${db.stage} state=${db.state}`);
 }
 
 // Queued: nothing lit up yet.
-check({ state: 'UP', stage: 'queued' }, 'QUEUED', ['', '', ''], ['', '']);
+check({ state: 'UP', stage: 'queued' }, 'QUEUED', ['', '', '', ''], ['', '', '']);
 
 // Running: current stage active, earlier stages and bars green.
-check({ state: 'DEGRADED', stage: 'dump' },    'RUNNING', ['active', '', ''],                 ['', '']);
-check({ state: 'DEGRADED', stage: 'package' }, 'RUNNING', ['completed', 'active', ''],        ['filled', '']);
-check({ state: 'DEGRADED', stage: 'upload' },  'RUNNING', ['completed', 'completed', 'active'], ['filled', 'filled']);
+check({ state: 'DEGRADED', stage: 'dump' },        'RUNNING', ['active', '', '', ''],                         ['', '', '']);
+check({ state: 'DEGRADED', stage: 'compression' }, 'RUNNING', ['completed', 'active', '', ''],              ['filled', '', '']);
+check({ state: 'DEGRADED', stage: 'encryption' },  'RUNNING', ['completed', 'completed', 'active', ''],     ['filled', 'filled', '']);
+check({ state: 'DEGRADED', stage: 'upload' },      'RUNNING', ['completed', 'completed', 'completed', 'active'], ['filled', 'filled', 'filled']);
 
 // Done: every stage and bar green.
 check({ state: 'UP', stage: 'done' }, 'DONE',
-    ['completed', 'completed', 'completed'], ['filled', 'filled']);
+    ['completed', 'completed', 'completed', 'completed'], ['filled', 'filled', 'filled']);
 
 // Failed: the stage that broke is marked, earlier ones stay green.
-check({ state: 'DOWN', stage: 'package' }, 'FAILED', ['completed', 'failed', ''], ['filled', '']);
-check({ state: 'DOWN', stage: 'upload' },  'FAILED', ['completed', 'completed', 'failed'], ['filled', 'filled']);
+check({ state: 'DOWN', stage: 'compression' }, 'FAILED', ['completed', 'failed', '', ''], ['filled', '', '']);
+check({ state: 'DOWN', stage: 'encryption' },  'FAILED', ['completed', 'completed', 'failed', ''], ['filled', 'filled', '']);
+check({ state: 'DOWN', stage: 'upload' },      'FAILED', ['completed', 'completed', 'completed', 'failed'], ['filled', 'filled', 'filled']);
 
 // Failing before the first stage must not leave the timeline blank.
-check({ state: 'DOWN', stage: 'queued' }, 'FAILED', ['failed', '', ''], ['', '']);
-check({ enabled: false, state: 'UP', stage: 'disabled' }, 'DISABLED', ['', '', ''], ['', '']);
+check({ state: 'DOWN', stage: 'queued' }, 'FAILED', ['failed', '', '', ''], ['', '', '']);
+check({ enabled: false, state: 'UP', stage: 'disabled' }, 'DISABLED', ['', '', '', ''], ['', '', '']);
+check({ state: 'DEGRADED', stage: 'encryption', compression_enabled: false, encryption_enabled: false },
+    'RUNNING', ['completed', 'skipped', 'skipped', ''], ['filled', 'filled', '']);
 
 assert.deepEqual(
     databaseOrder([
@@ -155,6 +192,21 @@ assert.equal(fmtSpeed(Number.NaN), '-');
 assert.equal(fmtSpeed(Number.POSITIVE_INFINITY), '-');
 assert.equal(fmtSpeed(-1), '-');
 assert.equal(fmtSpeed(4 * 1024 ** 2), '4.0 MB/s');
+assert.equal(uploadPercent({ bytes_done: 250, bytes_total: 1000 }), 25);
+assert.equal(uploadPercent({ bytes_done: 2000, bytes_total: 1000 }), 100);
+assert.equal(uploadPercent({ bytes_done: 2000, bytes_total: 0 }), 0);
+assert.equal(progressLabel({ stage: 'queued' }, dbView({ state: 'UP', stage: 'queued' }), 0),
+    'Backup queued; upload progress unavailable');
+assert.equal(progressLabel({ stage: 'upload' }, dbView({ state: 'DEGRADED', stage: 'upload' }), 42),
+    'Uploading backup: 42% complete');
+assert.equal(progressLabel({ stage: 'done' }, dbView({ state: 'UP', stage: 'done' }), 100),
+    'Backup completed: 100% uploaded');
+assert.equal(progressLabel({ stage: 'compression' }, dbView({ state: 'DOWN', stage: 'compression' }), 42),
+    'Backup failed during compression; 42% uploaded');
+assert.equal(progressLabel({ stage: 'disabled' }, dbView({ enabled: false, state: 'UP', stage: 'disabled' }), 0),
+    'Backups disabled; upload progress unavailable');
+assert.equal(progressLabel({ stage: 'cancelled' }, dbView({ state: 'UP', stage: 'cancelled' }), 0),
+    'Backup cancelled; upload progress unavailable');
 
 assert.equal(telegramDestinationText(0), '0 destinations');
 assert.equal(telegramDestinationText(1), '1 destination');

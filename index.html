@@ -476,45 +476,37 @@
         .summary-pill.speed   { background: rgba(245,158,11,.12);  color: var(--warn);     border: 1px solid rgba(245,158,11,.25); }
         .summary-pill.zero    { opacity: .4; }
 
-        /* Database cards container */
+        /* Operational database list */
         .db-grid {
             width: 100%;
             max-width: 920px;
             display: flex;
             flex-direction: column;
-            gap: .65rem;
+            gap: 0;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-card);
         }
 
-        /* Individual database card */
-        .db-card {
+        /* Individual operational row */
+        .db-row {
+            --db-accent: var(--idle);
             background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-left: 3px solid var(--idle);
-            border-radius: 10px;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 0;
-            transition: border-color .3s, box-shadow .3s, transform .15s;
+            border-bottom: 1px solid var(--border);
+            border-left: 3px solid var(--db-accent);
             position: relative;
             overflow: hidden;
         }
-        .db-card::before {
-            content: '';
-            position: absolute;
-            inset: 0;
-            border-radius: var(--radius);
-            opacity: 0;
-            transition: opacity .3s;
-            pointer-events: none;
-            background: radial-gradient(600px circle at var(--mx, 50%) var(--my, 50%), rgba(255,255,255,.02), transparent 40%);
-        }
-        .db-card:hover::before { opacity: 1; }
-        .db-card:hover { transform: translateY(-2px); }
+        .db-row:last-child { border-bottom: 0; }
         .db-summary {
-            width: 100%; border: 0; background: transparent; color: inherit;
-            padding: 1.05rem 1.15rem; display: flex; flex-direction: column;
-            gap: .8rem; text-align: left; font: inherit; cursor: pointer;
+            width: 100%;
+            min-width: 0;
+            display: grid;
+        grid-template-columns: minmax(12rem, 1.45fr) minmax(5.5rem, .6fr) minmax(17rem, 1.35fr) minmax(10rem, 1fr) auto;
+            align-items: center;
+            gap: 1rem;
+            padding: .8rem 1rem .8rem .9rem;
         }
         .db-history { border-top: 1px solid var(--border); padding: 1rem 1.15rem 1.15rem; }
         .db-history[hidden] { display: none; }
@@ -538,24 +530,18 @@
         .history-table .action { color: var(--text-muted); }
         .history-table .action-disable { color: var(--warn); }
         .history-table .manual-source { color: var(--accent); font-weight: 650; }
-        .db-card.disabled {
+        .db-row.disabled {
             opacity: .86;
-            border-style: dashed;
-            border-left-color: var(--idle);
             background: rgba(124,138,160,.055);
         }
-        .db-card.disabled .db-badge {
+        .db-row.disabled .db-badge {
             background: var(--idle-bg);
             color: var(--text-muted);
             border-color: var(--idle-border);
         }
-        .db-summary {
-            flex-direction: row;
-            align-items: flex-start;
-        }
         .db-summary-main {
-            flex: 1;
             min-width: 0;
+            width: 100%;
             border: 0;
             background: transparent;
             color: inherit;
@@ -564,31 +550,50 @@
             font: inherit;
             cursor: pointer;
         }
+        .db-top, .db-status, .db-pipeline, .db-progress { min-width: 0; }
+        .db-column-label {
+            display: block;
+            margin-bottom: .25rem;
+            color: var(--text-muted);
+            font: 700 .58rem var(--mono);
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .db-summary-main .db-column-label { display: none; }
+        .db-status { display: grid; justify-items: start; }
+        .db-pipeline, .db-progress { display: flex; flex-direction: column; gap: .35rem; }
+        .db-progress { justify-content: center; }
+        .db-progress .db-size { margin-top: .1rem; }
+        .db-progress-empty {
+            color: var(--text-muted);
+            font-size: .68rem;
+            line-height: 1.3;
+        }
+        .db-progress-empty[hidden] { display: none; }
         .db-summary-main:focus-visible {
             outline: 2px solid var(--accent);
             outline-offset: 4px;
             border-radius: 6px;
         }
         .db-actions {
-            flex: 0 0 auto;
+            min-width: 0;
             display: flex;
             flex-direction: column;
             align-items: flex-end;
             gap: .3rem;
-            margin-left: .8rem;
         }
         .db-toggle {
             display: inline-flex;
             align-items: center;
             gap: .45rem;
-            min-height: 32px;
+            min-height: 24px;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg);
             color: var(--text-muted);
             cursor: pointer;
-            padding: .22rem .55rem .22rem .3rem;
-            font-size: .68rem;
+            padding: .1rem .3rem .1rem .2rem;
+            font-size: .6rem;
             font-weight: 650;
             font-family: var(--font);
             white-space: nowrap;
@@ -601,8 +606,8 @@
         .db-toggle[aria-checked="false"] { color: var(--text-muted); }
         .toggle-track {
             position: relative;
-            width: 28px;
-            height: 16px;
+            width: 24px;
+            height: 14px;
             border-radius: 999px;
             background: var(--border);
             transition: background .2s;
@@ -612,18 +617,18 @@
             position: absolute;
             top: 2px;
             left: 2px;
-            width: 12px;
-            height: 12px;
+            width: 10px;
+            height: 10px;
             border-radius: 50%;
             background: var(--text-muted);
             transition: transform .2s, background .2s;
         }
         .db-toggle[aria-checked="true"] .toggle-track { background: rgba(34,197,94,.28); }
         .db-toggle[aria-checked="true"] .toggle-track::after {
-            transform: translateX(12px);
+            transform: translateX(10px);
             background: var(--up);
         }
-        .db-toggle-label { min-width: 2.8rem; text-align: left; }
+        .db-toggle-label { min-width: 2.4rem; text-align: left; }
         .db-toggle-error {
             max-width: 180px;
             color: var(--err);
@@ -638,19 +643,27 @@
             background: transparent;
             color: var(--accent);
             cursor: pointer;
-            padding: .38rem .65rem;
-            font-size: .68rem;
+            padding: .2rem .3rem;
+            font-size: .5rem;
+            line-height: 1;
+            letter-spacing: -.01em;
             font-weight: 650;
             font-family: var(--font);
             white-space: nowrap;
+        }
+        .db-toggle, .db-backup {
+            width: 5.8rem;
+            box-sizing: border-box;
+            justify-content: center;
         }
         .db-backup:hover { background: rgba(59,130,246,.10); }
         .db-backup:disabled { cursor: wait; opacity: .7; }
         .db-backup.cancel-action {
             border-color: var(--err);
-            color: var(--err);
+            color: var(--bg);
+            background: var(--err);
         }
-        .db-backup.cancel-action:hover { background: var(--err-bg); }
+        .db-backup.cancel-action:hover { background: var(--err-border); }
         .db-backup-error { max-width: 180px; color: var(--err); font-size: .64rem; line-height: 1.3; text-align: right; }
         .db-backup-error[hidden] { display: none; }
         .db-manual-form { display: contents; }
@@ -786,8 +799,8 @@
         .history-muted, .history-error-state { color: var(--text-muted); font-size: .75rem; }
         .history-error-state { color: var(--err); display: flex; gap: .6rem; align-items: center; }
         .history-skeleton { display: grid; gap: .55rem; }
-        .db-group { display: flex; flex-direction: column; gap: .8rem; }
-        .db-group-list { display: flex; flex-direction: column; gap: 1rem; }
+        .db-group { display: flex; flex-direction: column; }
+        .db-group-list { display: flex; flex-direction: column; }
         .db-group[hidden] { display: none; }
         .db-group-heading {
             display: flex;
@@ -808,11 +821,11 @@
         }
         @media (max-width: 720px) { .history-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
-        /* State accents — border-color first, then the left edge overrides it */
-        .db-card.running { border-color: var(--warn-border); border-left-color: var(--warn); box-shadow: 0 0 16px rgba(245,158,11,.06); }
-        .db-card.done    { border-color: var(--up-border);   border-left-color: var(--up);   box-shadow: 0 0 16px rgba(34,197,94,.06); }
-        .db-card.failed  { border-color: var(--err-border);  border-left-color: var(--err);  box-shadow: 0 0 16px rgba(239,68,68,.06); }
-        .db-card.cancelled { border-color: var(--idle-border); border-left-color: var(--idle); }
+        /* State accents use the row rail, indicator, badge, and progress bar. */
+        .db-row.running { --db-accent: var(--warn); }
+        .db-row.done { --db-accent: var(--up); }
+        .db-row.failed { --db-accent: var(--err); }
+        .db-row.cancelled { --db-accent: var(--idle); }
 
         /* Row 1: dot + name + state badge */
         .db-top {
@@ -826,9 +839,9 @@
             flex-shrink: 0;
             background: var(--idle);
         }
-        .db-card.running .db-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn-glow); animation: pulse-dot 1.6s ease-in-out infinite; }
-        .db-card.done    .db-dot { background: var(--up);   box-shadow: 0 0 8px var(--up-glow); }
-        .db-card.failed  .db-dot { background: var(--err);  box-shadow: 0 0 8px var(--err-glow); }
+        .db-row.running .db-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn-glow); animation: pulse-dot 1.6s ease-in-out infinite; }
+        .db-row.done    .db-dot { background: var(--up);   box-shadow: 0 0 8px var(--up-glow); }
+        .db-row.failed  .db-dot { background: var(--err);  box-shadow: 0 0 8px var(--err-glow); }
 
         .db-name {
             flex: 1;
@@ -850,10 +863,10 @@
             color: var(--idle);
             border: 1px solid var(--idle-border);
         }
-        .db-card.running .db-badge { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-border); }
-        .db-card.done    .db-badge { background: var(--up-bg);   color: var(--up);   border-color: var(--up-border); }
-        .db-card.failed  .db-badge { background: var(--err-bg);  color: var(--err);  border-color: var(--err-border); }
-        .db-card.cancelled .db-badge { background: var(--idle-bg); color: var(--idle); border-color: var(--idle-border); }
+        .db-row.running .db-badge { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-border); }
+        .db-row.done    .db-badge { background: var(--up-bg);   color: var(--up);   border-color: var(--up-border); }
+        .db-row.failed  .db-badge { background: var(--err-bg);  color: var(--err);  border-color: var(--err-border); }
+        .db-row.cancelled .db-badge { background: var(--idle-bg); color: var(--idle); border-color: var(--idle-border); }
 
         /* Row 2: what the database is doing right now */
         .db-step {
@@ -876,57 +889,92 @@
             background: var(--idle-bg);
             color: var(--idle);
         }
-        .db-card.running .step-icon { background: var(--warn-bg); color: var(--warn); }
-        .db-card.done    .step-icon { background: var(--up-bg);   color: var(--up); }
-        .db-card.failed  .step-icon { background: var(--err-bg);  color: var(--err); }
+        .db-row.running .step-icon { background: var(--warn-bg); color: var(--warn); }
+        .db-row.done    .step-icon { background: var(--up-bg);   color: var(--up); }
+        .db-row.failed  .step-icon { background: var(--err-bg);  color: var(--err); }
         .step-text {
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
-        .db-card.failed .step-text { color: var(--err); opacity: .85; }
-        .db-card.cancelled .step-text { color: var(--idle); }
+        .db-row.failed .step-text { color: var(--err); opacity: .85; }
+        .db-row.cancelled .step-text { color: var(--idle); }
 
-        /* Row 3: upload size + speed (hidden until the size is known) */
-        .db-transfer { display: flex; flex-direction: column; gap: .35rem; }
+        /* Upload progress module: completion first, transfer details second. */
+        .db-transfer { display: flex; flex-direction: column; gap: .45rem; }
         .db-transfer[hidden] { display: none; }
-        .tr-bar {
-            height: 4px;
+        .db-progress-overview {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: .65rem;
+            min-width: 0;
+        }
+        .db-progress-percent {
+            color: var(--text);
+            font: 700 1.25rem/1 var(--mono);
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -.04em;
+        }
+        .db-progress-bytes {
+            min-width: 0;
+            color: var(--text-muted);
+            font: .66rem var(--mono);
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+            overflow-wrap: anywhere;
+        }
+        .db-progress-meter {
+            height: 10px;
+            border: 1px solid var(--border);
             border-radius: 999px;
-            background: var(--border);
+            background: var(--surface);
             overflow: hidden;
         }
-        .tr-bar span {
+        .db-progress-meter span {
             display: block;
             height: 100%;
             width: 0;
-            border-radius: 999px;
+            border-radius: inherit;
             background: var(--warn);
             transition: width .4s;
         }
-        .db-card.done   .tr-bar span { background: var(--up); }
-        .db-card.failed .tr-bar span { background: var(--err); }
-        .tr-meta {
+        .db-row.queued .db-progress-meter span { background: var(--idle); }
+        .db-row.running .db-progress-meter span { background: var(--warn); }
+        .db-row.done .db-progress-meter span { background: var(--up); }
+        .db-row.failed .db-progress-meter span { background: var(--err); }
+        .db-row.disabled .db-progress-meter span,
+        .db-row.cancelled .db-progress-meter span { background: var(--idle); }
+        .db-progress-details {
             display: flex;
             justify-content: space-between;
-            gap: .5rem;
-            font-family: var(--mono);
-            font-size: .68rem;
-            color: var(--text-muted);
+            align-items: baseline;
+            gap: .55rem;
+            min-width: 0;
+            font: .66rem var(--mono);
+            font-variant-numeric: tabular-nums;
         }
-        .tr-size strong { color: var(--text); font-weight: 600; }
-        .tr-speed { color: var(--warn); }
-        .db-card.done   .tr-speed { color: var(--up); }
-        .db-card.failed .tr-speed { color: var(--err); }
+        .db-progress-speed {
+            color: var(--warn);
+            white-space: nowrap;
+        }
+        .db-row.done .db-progress-speed { color: var(--up); }
+        .db-row.failed .db-progress-speed { color: var(--err); }
+        .db-progress-speed[hidden] { display: none; }
         .tr-chunk {
+            min-width: 0;
             color: var(--text-muted);
-            font-family: var(--mono);
-            font-size: .66rem;
+            text-align: right;
+            overflow-wrap: anywhere;
         }
         .tr-chunk strong { color: var(--text); font-weight: 600; }
-
-        /* Row 4: dumped size + compression ratio (hidden until bytes arrive) */
+        .db-progress-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .25rem .55rem;
+            min-width: 0;
+        }
+        .db-progress-meta .db-size { margin-top: 0; }
+        /* Dump size + compression ratio (secondary metadata). */
         .db-size {
             font-family: var(--mono);
             font-size: .68rem;
@@ -935,7 +983,7 @@
         .db-size[hidden] { display: none; }
         .db-size strong { color: var(--text); font-weight: 600; }
 
-        /* Row 5: pipeline timeline (dump → package → upload) */
+        /* Row 5: pipeline timeline (dump → compression → encryption → upload) */
         .db-timeline {
             display: flex;
             align-items: flex-start;
@@ -978,6 +1026,8 @@
         .tl-stage.active .tl-label    { opacity: 1; color: var(--warn); font-weight: 600; }
         .tl-stage.failed .tl-node     { background: var(--err); border-color: var(--err); box-shadow: 0 0 8px var(--err-glow); }
         .tl-stage.failed .tl-label    { opacity: 1; color: var(--err); font-weight: 600; }
+        .tl-stage.skipped .tl-node    { border-style: dashed; opacity: .55; }
+        .tl-stage.skipped .tl-label   { opacity: .55; text-decoration: line-through; }
 
         @keyframes pulse-node {
             0%, 100% { box-shadow: 0 0 5px var(--warn-glow);  transform: scale(1); }
@@ -994,6 +1044,8 @@
             color: var(--text-muted);
             opacity: .6;
         }
+        .db-summary-main:hover .db-name { color: var(--accent); }
+        .db-row:focus-within { background: rgba(59,130,246,.025); }
 
         /* ---------- controls ---------- */
         .controls {
@@ -1271,7 +1323,7 @@
             transition: border-color .15s, box-shadow .15s;
         }
         .card:hover { transform: none; }
-        .card::before, .db-card::before { display: none; }
+        .card::before { display: none; }
         .service-card {
             padding: 0;
         }
@@ -1287,32 +1339,19 @@
         .db-head h2 { font-size: 1.05rem; }
         .summary-row { max-width: none; margin-bottom: .7rem; }
         .summary-pill { border-radius: 6px; padding: .35rem .55rem; font-size: .65rem; }
-        .db-grid { max-width: none; gap: .7rem; padding-bottom: 2rem; }
-        .db-grid::before {
-            content: 'Database   Status   Pipeline   Progress   Actions';
-            display: block;
-            padding: .5rem 1rem;
-            color: var(--text-muted);
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 7px 7px 0 0;
-            font: 700 .62rem var(--mono);
-            letter-spacing: .06em;
-            text-transform: uppercase;
-        }
-        .db-group-list { gap: .75rem; }
+        .db-grid { max-width: none; padding-bottom: 2rem; }
+        .db-group-list { gap: 0; }
         .db-group-heading { margin: .65rem .1rem .1rem; font-size: .62rem; }
-        .db-card { border-radius: 7px; }
         .db-summary { padding: .8rem .9rem; gap: .55rem; }
         .db-top { gap: .45rem; }
         .db-name { font-size: .8rem; }
         .db-step { min-height: 1.8em; font-size: .7rem; }
         .db-timeline { max-width: 240px; }
-        .tl-stage { width: 3.8rem; }
+            .tl-stage { width: 3.6rem; }
         .tl-label { font-size: .54rem; }
-        .db-actions { flex-direction: row; align-items: center; }
-        .db-toggle { min-height: 28px; }
-        .db-backup { padding: .32rem .55rem; font-size: .64rem; }
+        .db-actions { flex-direction: column; align-items: flex-end; }
+        .db-toggle { min-height: 26px; }
+        .db-backup { padding: .2rem .3rem; font-size: .5rem; line-height: 1; }
         .controls { justify-content: flex-end; margin-top: 1.15rem; }
         .footer { margin-top: 1.25rem; padding-bottom: 1.5rem; }
         .btn { border-radius: 7px; padding: .5rem .75rem; font-size: .72rem; }
@@ -1347,9 +1386,26 @@
             .header-actions { justify-content: flex-start; }
             .info-bar { overflow-x: auto; flex-wrap: nowrap; padding-bottom: .2rem; }
             .grid { grid-template-columns: 1fr; }
-            .db-grid::before { content: 'Database status and progress'; }
-            .db-summary { flex-direction: column; }
-            .db-actions { width: 100%; justify-content: space-between; margin-left: 0; }
+            .db-summary {
+                grid-template-columns: minmax(0, 1fr);
+                align-items: stretch;
+                gap: .75rem;
+            }
+            .db-summary-main, .db-status, .db-pipeline, .db-progress, .db-actions {
+                grid-column: 1 / -1;
+            }
+            .db-summary-main .db-column-label,
+            .db-status .db-column-label,
+            .db-pipeline .db-column-label,
+            .db-progress .db-column-label,
+            .db-actions .db-column-label { display: block; }
+            .db-summary-main .db-column-label { margin-bottom: .25rem; }
+            .db-actions {
+                width: 100%;
+                justify-content: flex-end;
+                padding-top: .25rem;
+                border-top: 1px solid var(--border);
+            }
         }
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
@@ -1562,7 +1618,7 @@
     <section id="dbSection" style="display:none;" aria-labelledby="dbSectionTitle">
         <div class="db-head">
             <h2 id="dbSectionTitle">Active backups</h2>
-            <span class="hint">dump → package → upload</span>
+            <span class="hint">dump → compression → encryption → upload</span>
         </div>
         <div class="summary-row" id="dbSummary"></div>
         <div class="db-grid" id="dbGrid" role="table" aria-label="Live database backup status">
@@ -1981,15 +2037,17 @@
         }
     }
 
-    // ── Database card rendering ────────────────────────────────────
+    // ── Database row rendering ─────────────────────────────────────
 
     /** Ordered pipeline stages drawn as timeline nodes — must match src/web.rs. */
-    const STAGES = ['dump', 'package', 'upload'];
+    const STAGES = ['dump', 'compression', 'encryption', 'upload'];
 
     /** Icon for the current-step line, keyed by backend stage. */
-    const STEP_ICON = { queued: '◌', dump: '↓', package: '▣', upload: '↑', done: '✓' };
+    const STEP_ICON = {
+        queued: '◌', dump: '↓', compression: '≋', encryption: '◇', upload: '↑', done: '✓'
+    };
 
-    /** Card elements keyed by database name, so polling updates them in place. */
+    /** Row elements keyed by database name, so polling updates them in place. */
     const dbCards = new Map();
     const historyCache = new Map();
     const historyPageState = new Map();
@@ -2021,50 +2079,68 @@
     }
 
     /**
-     * Build an empty database card. Text and state classes are filled in by
+     * Build an empty database row. Text and state classes are filled in by
      * updateDbCard() so the 2-second poll never rebuilds the DOM (no flicker,
      * no lost hover, no restarted animations).
      *
-     * Layout (top → bottom):
-     *   1. dot + name + state badge
-     *   2. current/next step description
-     *   3. upload size + speed (once the payload size is known)
-     *   4. dumped size + compression ratio (once bytes have been dumped)
-     *   5. pipeline timeline (dump → package → upload)
-     *   6. step counter + relative timestamp
+     * Desktop columns: database/details, status, pipeline, progress, actions.
+     * The history region remains full-width below the operational row.
      */
     function buildDbCard() {
         const el = document.createElement('article');
-        el.className = 'db-card';
+        el.className = 'db-row';
         el.setAttribute('role', 'row');
         el.setAttribute('aria-label', 'Database backup status');
         el.innerHTML = `
             <div class="db-summary">
                 <button class="db-summary-main" type="button" aria-expanded="false">
+                    <span class="db-column-label">Database</span>
                     <div class="db-top">
                         <span class="db-dot"></span>
                         <span class="db-name"></span>
-                        <span class="db-badge"></span>
                     </div>
                     <div class="db-step"><span class="step-icon"></span><span class="step-text"></span></div>
-                    <div class="db-transfer" hidden>
-                        <div class="tr-bar"><span></span></div>
-                        <div class="tr-meta"><span class="tr-size"></span><span class="tr-speed"></span></div>
-                        <div class="tr-chunk"></div>
-                    </div>
-                    <div class="db-size" hidden></div>
+                </button>
+                <div class="db-status">
+                    <span class="db-column-label">Status</span>
+                    <span class="db-badge"></span>
+                </div>
+                <div class="db-pipeline">
+                    <span class="db-column-label">Pipeline</span>
                     <div class="db-timeline">
                         ${STAGES.map((s, i) => `${i ? '<span class="tl-bar"></span>' : ''}
                         <span class="tl-stage"><span class="tl-node"></span><span class="tl-label">${s}</span></span>`).join('')}
                     </div>
                     <div class="db-foot"><span class="db-stage"></span><span class="db-updated"></span></div>
-                </button>
+                </div>
+                <div class="db-progress">
+                    <span class="db-column-label">Progress</span>
+                    <div class="db-transfer">
+                        <div class="db-progress-overview">
+                            <strong class="db-progress-percent">—</strong>
+                            <span class="db-progress-bytes">Upload size unavailable</span>
+                        </div>
+                        <div class="db-progress-meter" role="progressbar"
+                             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                             aria-label="Upload progress unavailable">
+                            <span></span>
+                        </div>
+                        <div class="db-progress-details">
+                            <span class="db-progress-speed" hidden></span>
+                            <span class="tr-chunk"></span>
+                        </div>
+                        <div class="db-progress-meta">
+                            <div class="db-size" hidden></div>
+                            <span class="db-progress-empty">Preparing upload…</span>
+                        </div>
+                    </div>
+                </div>
                 <div class="db-actions">
                     <button class="db-toggle" type="button" role="switch" aria-checked="true">
                         <span class="toggle-track" aria-hidden="true"></span>
                         <span class="db-toggle-label">On</span>
                     </button>
-                    <button class="db-backup" type="button">Backup now</button>
+                    <button class="db-backup" type="button">Backup Now</button>
                     <span class="db-toggle-error" role="alert" hidden></span>
                     <span class="db-backup-error" role="alert" hidden></span>
                 </div>
@@ -2080,10 +2156,15 @@
      * `nodes[i]` styles stage i; `bars[i]` styles the connector between
      * stage i and stage i+1, which fills once stage i is done.
      */
-    function timelineClasses(v) {
+    function timelineClasses(v, db = {}) {
+        const enabled = {
+            compression: db.compression_enabled !== false,
+            encryption: db.encryption_enabled !== false,
+        };
         return {
             nodes: STAGES.map((_, i) =>
                 v.failed && i === v.idx ? 'failed' :
+                enabled[STAGES[i]] === false ? 'skipped' :
                 i < v.idx              ? 'completed' :
                 i === v.idx            ? 'active' : ''),
             bars: STAGES.slice(1).map((_, i) => (i < v.idx ? 'filled' : '')),
@@ -2107,14 +2188,35 @@
             : size;
     }
 
-    /** Apply one database's status to an existing card. Returns its view state. */
+    function uploadPercent(db) {
+        const total = Number(db.bytes_total) || 0;
+        if (total <= 0) return 0;
+        return Math.round(Math.min(1, Math.max(0, (Number(db.bytes_done) || 0) / total)) * 100);
+    }
+
+    function progressLabel(db, view, percent) {
+        if (view.cls === 'disabled') return 'Backups disabled; upload progress unavailable';
+        if (view.cls === 'cancelled') return 'Backup cancelled; upload progress unavailable';
+        if (view.cls === 'queued') return 'Backup queued; upload progress unavailable';
+        if (view.cls === 'done') return 'Backup completed: 100% uploaded';
+        if (view.cls === 'failed') {
+            return `Backup failed during ${db.stage || 'preparation'}; ${percent}% uploaded`;
+        }
+        if (db.stage === 'upload') return `Uploading backup: ${percent}% complete`;
+        return `Backup preparing during ${db.stage || 'startup'}; upload progress unavailable`;
+    }
+
+    /** Apply one database's status to an existing row. Returns its view state. */
     function updateDbCard(el, db) {
         const v = dbView(db);
-        el.className = `db-card ${v.cls}`;
+        el.className = `db-row ${v.cls}`;
 
         const name = el.querySelector('.db-name');
         name.textContent = db.name;
         name.removeAttribute('title');
+        const historyId = `db-history-${encodeURIComponent(db.name)}`;
+        el.querySelector('.db-history').id = historyId;
+        el.querySelector('.db-summary-main').setAttribute('aria-controls', historyId);
         el.querySelector('.db-badge').textContent = v.badge;
         const toggle = el.querySelector('.db-toggle');
         const enabled = db.enabled !== false;
@@ -2158,7 +2260,7 @@
             ? 'Cancelling...'
             : canCancel ? 'Cancel backup' : manualRequests.has(db.name)
             ? (db.state === 'DEGRADED' ? 'Running...' : 'Queued...')
-            : 'Backup now';
+            : 'Backup Now';
         backup.classList.toggle('cancel-action', canCancel);
         backup.onclick = event => {
             event.stopPropagation();
@@ -2179,34 +2281,62 @@
             : (db.detail || '-');
         step.removeAttribute('title');
 
-        // Upload size + speed. Hidden until packaging reports the total, since
-        // the dump is streamed and its final size is unknown before then.
+        // Upload completion module. The meter remains present while the dump
+        // or compression/encryption stage is active, but reports unavailable
+        // progress until
+        // the backend knows the packaged total.
         const transfer = el.querySelector('.db-transfer');
         const total = db.bytes_total || 0;
-        transfer.hidden = !enabled || total <= 0;
-        if (total > 0) {
-            const done = Math.min(db.bytes_done || 0, total);
-            transfer.querySelector('.tr-bar span').style.width = `${(done / total) * 100}%`;
-            transfer.querySelector('.tr-size').innerHTML =
-                `<strong>${fmtBytes(done)}</strong> / ${fmtBytes(total)}`;
-            transfer.querySelector('.tr-speed').textContent = fmtSpeed(db.speed_bps || 0);
-            const chunkDone = db.current_chunk_done || 0;
-            const chunkTotal = db.current_chunk_total || 0;
-            const chunkNumber = db.current_chunk || 0;
-            const chunkCount = db.chunk_count || 0;
-            transfer.querySelector('.tr-chunk').innerHTML =
-                chunkTotal > 0 && chunkNumber > 0
-                    ? `chunk ${chunkNumber}/${chunkCount} · <strong>${fmtBytes(Math.min(chunkDone, chunkTotal))}</strong> / ${fmtBytes(chunkTotal)}`
-                    : '';
+        const percent = v.cls === 'done' ? 100 : uploadPercent(db);
+        const done = Math.min(Number(db.bytes_done) || 0, total);
+        const meter = transfer.querySelector('.db-progress-meter');
+        const speed = transfer.querySelector('.db-progress-speed');
+        const chunk = transfer.querySelector('.tr-chunk');
+        transfer.querySelector('.db-progress-percent').textContent =
+            total > 0 ? `${percent}%` : '—';
+        transfer.querySelector('.db-progress-bytes').textContent =
+            total > 0 ? `${fmtBytes(done)} / ${fmtBytes(total)}` : 'Upload size unavailable';
+        meter.querySelector('span').style.width = `${percent}%`;
+        meter.setAttribute('aria-valuenow', String(percent));
+        meter.setAttribute('aria-label', progressLabel(db, v, percent));
+        if (enabled && v.cls === 'running' && db.stage === 'upload' && total > 0) {
+            speed.hidden = false;
+            speed.textContent = fmtSpeed(db.speed_bps || 0);
+        } else {
+            speed.hidden = true;
+            speed.textContent = '';
         }
+        const chunkDone = db.current_chunk_done || 0;
+        const chunkTotal = db.current_chunk_total || 0;
+        const chunkNumber = db.current_chunk || 0;
+        const chunkCount = db.chunk_count || 0;
+        chunk.innerHTML = enabled && v.cls === 'running' && db.stage === 'upload' &&
+            chunkTotal > 0 && chunkNumber > 0
+            ? `chunk ${chunkNumber}/${chunkCount} · <strong>${fmtBytes(Math.min(chunkDone, chunkTotal))}</strong> / ${fmtBytes(chunkTotal)}`
+            : '';
 
         // Logical dump size — grows live during the dump stage, then stays put.
         const size = el.querySelector('.db-size');
         const sizeHtml = sizeLine(db);
         size.hidden = !enabled || !sizeHtml;
         size.innerHTML = sizeHtml;
+        const empty = el.querySelector('.db-progress-empty');
+        empty.hidden = enabled && total > 0;
+        empty.textContent = !enabled
+            ? 'Upload unavailable while disabled'
+            : v.cls === 'cancelled'
+            ? 'Upload cancelled'
+            : v.cls === 'queued'
+            ? 'Waiting for backup to start'
+            : v.cls === 'failed'
+            ? 'Upload failed before completion'
+            : db.stage === 'upload'
+            ? 'Waiting for upload metrics'
+            : 'Preparing upload…';
 
-        const tl = !enabled ? { nodes: STAGES.map(() => ''), bars: STAGES.slice(1).map(() => '') } : timelineClasses(v);
+        const tl = !enabled
+            ? { nodes: STAGES.map(() => ''), bars: STAGES.slice(1).map(() => '') }
+            : timelineClasses(v, db);
         el.querySelectorAll('.tl-stage').forEach((node, i) => {
             node.className = `tl-stage ${tl.nodes[i]}`;
         });
@@ -2786,10 +2916,9 @@
     }
 
     // ── Mouse glow effect ──────────────────────────────────────────
-    // Only the card under the pointer needs updating — looping over every
-    // card on each mousemove gets expensive once many databases are listed.
+    // Database rows intentionally have no decorative pointer glow.
     document.addEventListener('mousemove', (e) => {
-        const card = e.target.closest?.('.card, .db-card');
+        const card = e.target.closest?.('.card');
         if (!card) return;
         const r = card.getBoundingClientRect();
         card.style.setProperty('--mx', (e.clientX - r.left) + 'px');

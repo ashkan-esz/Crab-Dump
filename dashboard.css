@@ -475,7 +475,7 @@ th,
   background: var(--dash-surface-raised);
   border: 1px solid var(--dash-border-strong);
   border-radius: var(--dash-radius-sm);
-  font-size: .78rem;
+  font-size: .7rem;
   font-weight: 650;
   line-height: 1.2;
   transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;

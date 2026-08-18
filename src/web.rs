@@ -137,7 +137,8 @@ pub fn compression_config() -> Arc<CompressionConfigStore> {
 struct DbStatus {
     /// Severity code: 0=UP, 1=DEGRADED, 2=DOWN.
     code: u8,
-    /// Pipeline stage: "queued", "dump", "package", "upload" or "done".
+    /// Pipeline stage: "queued", "dump", "compression", "encryption",
+    /// "upload" or "done".
     /// The three middle values are the timeline nodes drawn by the dashboard.
     stage: &'static str,
     /// Short description of what this stage is currently doing.
@@ -163,6 +164,10 @@ struct DbStatus {
     dump_bytes: u64,
     /// RFC 3339 timestamp of the last update to this entry.
     updated: String,
+    /// Whether compression is active for the current run.
+    compression_enabled: bool,
+    /// Whether encryption is active for the current run.
+    encryption_enabled: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -431,9 +436,14 @@ pub fn unregister_database(db_name: &str) {
 /// the maximum severity across all tracked databases.
 pub fn set_db_status(db_name: &str, code: u8, stage: &'static str, detail: impl Into<String>) {
     let mut statuses = DUMP_STATUSES.write().expect("dump status lock poisoned");
-    let dump_bytes = match statuses.get(db_name) {
-        Some(prev) if stage != "queued" && stage != "dump" => prev.dump_bytes,
-        _ => 0,
+    let (dump_bytes, compression_enabled, encryption_enabled) = match statuses.get(db_name) {
+        Some(prev) if stage != "queued" && stage != "dump" => (
+            prev.dump_bytes,
+            prev.compression_enabled,
+            prev.encryption_enabled,
+        ),
+        Some(prev) => (0, prev.compression_enabled, prev.encryption_enabled),
+        _ => (0, true, true),
     };
     statuses.insert(
         db_name.to_string(),
@@ -450,8 +460,20 @@ pub fn set_db_status(db_name: &str, code: u8, stage: &'static str, detail: impl 
             chunk_count: 0,
             dump_bytes,
             updated: chrono::Utc::now().to_rfc3339(),
+            compression_enabled,
+            encryption_enabled,
         },
     );
+}
+
+/// Publish the packaging choices resolved for one database run.
+pub fn set_db_pipeline_config(db_name: &str, compression_enabled: bool, encryption_enabled: bool) {
+    let mut statuses = DUMP_STATUSES.write().expect("dump status lock poisoned");
+    if let Some(entry) = statuses.get_mut(db_name) {
+        entry.compression_enabled = compression_enabled;
+        entry.encryption_enabled = encryption_enabled;
+        entry.updated = chrono::Utc::now().to_rfc3339();
+    }
 }
 
 /// Publish the uncompressed size dumped so far for a database.
@@ -527,6 +549,8 @@ pub fn fail_db(db_name: &str, detail: impl Into<String>) {
         chunk_count: 0,
         dump_bytes: 0,
         updated: String::new(),
+        compression_enabled: true,
+        encryption_enabled: true,
     });
     entry.code = 2;
     entry.detail = detail.into();
@@ -551,6 +575,8 @@ pub fn cancel_db(db_name: &str) {
         chunk_count: 0,
         dump_bytes: 0,
         updated: String::new(),
+        compression_enabled: true,
+        encryption_enabled: true,
     });
     entry.code = 0;
     entry.stage = "cancelled";
@@ -1012,6 +1038,10 @@ struct DatabaseResponse {
     chunk_count: usize,
     /// Uncompressed bytes read from `pg_dump` this run; 0 while unknown.
     dump_bytes: u64,
+    /// Whether compression is active for the current run.
+    compression_enabled: bool,
+    /// Whether encryption is active for the current run.
+    encryption_enabled: bool,
     /// RFC 3339 timestamp of the last status update.
     timestamp: String,
 }
@@ -1040,6 +1070,8 @@ async fn api_databases_list() -> impl Responder {
             current_chunk_total: s.current_chunk_total,
             chunk_count: s.chunk_count,
             dump_bytes: s.dump_bytes,
+            compression_enabled: s.compression_enabled,
+            encryption_enabled: s.encryption_enabled,
             timestamp: s.updated.clone(),
         })
         .collect();
@@ -2813,8 +2845,10 @@ mod tests {
         set_db_status("test-size", 1, "dump", "dumping");
         set_db_dump_bytes("test-size", 4096);
 
-        // Packaging and uploading keep showing the size dumped this run.
-        set_db_status("test-size", 1, "package", "packaging");
+        // Compression, encryption, and uploading keep showing the size dumped
+        // this run.
+        set_db_status("test-size", 1, "compression", "compressing");
+        set_db_status("test-size", 1, "encryption", "encrypting");
         assert_eq!(dump_bytes("test-size"), 4096);
         set_db_status("test-size", 1, "upload", "uploading");
         assert_eq!(dump_bytes("test-size"), 4096);

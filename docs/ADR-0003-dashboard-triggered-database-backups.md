@@ -29,7 +29,7 @@ receives that one backup and optionally bypass age encryption for that request:
 
 ## Decision
 
-Add a per-database `Backup now` action to the dashboard. Manual requests are
+Add a per-database `Backup Now` action to the dashboard. Manual requests are
 accepted by the running process, queued in memory, and executed by the
 existing blocking scheduler and backup pipeline.
 
@@ -140,7 +140,7 @@ ADR-0002.
 
 ### Dashboard behavior
 
-Each enabled database card includes a `Backup now` button. The button:
+Each enabled database card includes a `Backup Now` button. The button:
 
 - lets the operator choose an enabled dashboard-managed Telegram user;
 - includes an administrator-only, unchecked-by-default encryption-bypass
