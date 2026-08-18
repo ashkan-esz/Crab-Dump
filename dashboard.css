@@ -182,11 +182,22 @@
   }
 }
 
+/* Pages with local stylesheets declare this reset themselves; routing.html
+ * ships no local styles, so the shared shell must provide it. Without it the
+ * nav renders content-box: 248px content + 28px padding + 1px border = 277px,
+ * overrunning the --dash-nav-width-based content gutter. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 html {
   background: var(--dash-bg);
 }
 
 body {
+  margin: 0;
   background:
     radial-gradient(circle at 86% -10%, rgba(51, 103, 164, .14), transparent 34rem),
     var(--dash-bg);
