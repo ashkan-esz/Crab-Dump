@@ -9,6 +9,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html'];
+const pageHtml = Object.fromEntries(dashboardPages.map(file => [
+    file,
+    readFileSync(new URL(`./${file}`, import.meta.url), 'utf8'),
+]));
 const authJs = readFileSync(new URL('./dashboard-auth.js', import.meta.url), 'utf8');
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
@@ -23,6 +28,32 @@ const load = new Function(
     `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel };`,
 );
 const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel } = load(...Object.values(stubs));
+
+function operationsLinks(source) {
+    const nav = source.match(/<span class="app-nav-label">Operations<\/span>\s*<div class="app-nav-links">([\s\S]*?)<\/div>/);
+    assert.ok(nav, 'Operations navigation group must exist');
+    return [...nav[1].matchAll(/<a href="([^"]+)"[^>]*>[\s\S]*?<span>([^<]+)<\/span><\/a>/g)]
+        .map(([, href, label]) => ({ href, label }));
+}
+
+const expectedOperations = [
+    { href: '/', label: 'Overview' },
+    { href: '/databases', label: 'Databases' },
+    { href: '/users', label: 'Telegram users' },
+    { href: '/routing', label: 'Routing' },
+];
+for (const [file, source] of Object.entries(pageHtml)) {
+    const operations = source.match(/<span class="app-nav-label">Operations<\/span>\s*<div class="app-nav-links">([\s\S]*?)<\/div>/)?.[1] ?? '';
+    assert.doesNotMatch(operations, />Backup history</, `${file} must omit the Backup history sidebar link`);
+    assert.deepEqual(operationsLinks(source), expectedOperations, `${file} Operations navigation`);
+}
+const routingStyles = pageHtml['routing.html'].split('<link rel="stylesheet" href="/dashboard.css">', 1)[0];
+assert.doesNotMatch(routingStyles, /\.app-nav\s*\{/, 'routing.html must use shared sidebar geometry');
+assert.doesNotMatch(routingStyles, /(?:^|[}])\s*main(?:\s*[,{]|\s*\{)/, 'routing.html must not override main layout');
+assert.doesNotMatch(routingStyles, /\.routing-main\s*\{[^}]*\b(?:width|margin-left|position)\s*:/, 'routing.html must not override shared content geometry');
+assert.match(pageHtml['routing.html'], /<main id="routing-main" class="routing-main">/);
+assert.match(pageHtml['routing.html'], /id="profileForm"/);
+assert.match(pageHtml['routing.html'], /id="profiles" aria-label="Saved routing profiles"/);
 
 assert.doesNotMatch(body, /<button class="db-summary"/);
 assert.match(body, /class="db-summary-main"/);
@@ -318,6 +349,9 @@ const databasesHtml = readFileSync(new URL('./databases.html', import.meta.url),
 
 assert.match(usersHtml, /<table>/);
 assert.match(usersHtml, /class="table-scroll"/);
+assert.match(usersHtml, /\.summary \{[\s\S]*border: 1px solid var\(--border\)/);
+assert.match(usersHtml, /\.summary-item \{[\s\S]*gap: 7px; \}/);
+assert.doesNotMatch(usersHtml, /margin-left:\s*12px/);
 assert.match(usersHtml, /class="inspector".*role="dialog"/);
 assert.match(usersHtml, /role="alertdialog"/);
 assert.match(usersHtml, /id="cancel-delete"/);

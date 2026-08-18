@@ -63,7 +63,8 @@
     .back-link { white-space: nowrap; margin-top: 8px; }
     .summary {
       display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
-      padding: 16px 0 18px; color: var(--muted); font-size: 13px;
+      padding: 12px 14px; color: var(--muted); font-size: 13px;
+      border: 1px solid var(--border); border-radius: var(--radius);
     }
     .summary strong { color: var(--text); font-size: 18px; }
     .summary-item { display: inline-flex; align-items: center; gap: 7px; }
@@ -237,9 +238,8 @@
     <div class="app-nav-links">
       <a href="/"><span aria-hidden="true">◈</span><span>Overview</span></a>
       <a href="/databases"><span aria-hidden="true">▤</span><span>Databases</span></a>
-      <a href="/#dbSection"><span aria-hidden="true">↺</span><span>Backup history</span></a>
-      <a href="/routing"><span aria-hidden="true">⇄</span><span>Routing</span></a>
       <a href="/users" aria-current="page"><span aria-hidden="true">◎</span><span>Telegram users</span></a>
+      <a href="/routing"><span aria-hidden="true">⇄</span><span>Routing</span></a>
     </div>
     <span class="app-nav-label">System</span>
     <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
