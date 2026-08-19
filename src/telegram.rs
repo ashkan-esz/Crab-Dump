@@ -155,15 +155,15 @@ fn format_backup_summary_with_label(
 ) -> String {
     let part_label = if parts == 1 { "part" } else { "parts" };
     let size_mb = total_bytes as f64 / (1024.0 * 1024.0);
+    let hashtag = escape_html(&database.replace('-', "_"));
     format!(
         "{label}\n\n\
-         🗄️ <b>Database:</b> <code>{}</code>\n\
+         🗄️ <b>Database:</b> #{hashtag}\n\
          📄 <b>File:</b> <code>{}</code>\n\
          📏 <b>Packaged size:</b> <code>{size_mb:.2} MB</code>\n\
          🧩 <b>Parts:</b> <code>{parts} {part_label}</code>\n\
          🗜️ <b>Compression:</b> <code>{}</code>\n\
          🔐 <b>Encryption:</b> <code>{}</code>",
-        escape_html(database),
         escape_html(filename),
         escape_html(compression),
         escape_html(encryption_type),
@@ -629,6 +629,7 @@ mod tests {
             "zstd",
         );
         assert!(message.contains("analytics"));
+        assert!(message.contains("#analytics"));
         assert!(message.contains("analytics_20260812T031500Z.dump.zst.age"));
         assert!(message.contains("95.37 MB"));
         assert!(message.contains("3 parts"));
@@ -647,6 +648,7 @@ mod tests {
             "zstd",
         );
         assert!(message.contains("orders"));
+        assert!(message.contains("#orders"));
         assert!(message.contains("0.00 MB"));
         assert!(message.contains("1 part"));
         assert!(message.contains("zstd"));
@@ -659,6 +661,7 @@ mod tests {
         let message =
             format_backup_completion("analytics", "analytics_20260812T031500Z.dump.zst.age", 3);
         assert!(message.contains("analytics"));
+        assert!(!message.contains("#analytics"));
         assert!(message.contains("All <code>3</code> parts"));
         assert!(message.contains("uploaded"));
     }
@@ -674,6 +677,7 @@ mod tests {
             "zstd",
         );
         assert!(summary.contains("Scheduled backup ready"));
+        assert!(summary.contains("#analytics"));
         assert!(summary.contains("analytics"));
         assert!(summary.contains("95.37 MB"));
         assert!(summary.contains("3 parts"));
@@ -686,6 +690,21 @@ mod tests {
             3,
         );
         assert!(completion.contains("Scheduled backup uploaded"));
+        assert!(!completion.contains("#analytics"));
         assert!(completion.contains("All <code>3</code> parts"));
+    }
+
+    #[test]
+    fn backup_summary_normalizes_hyphens_in_database_hashtag() {
+        let message = format_backup_summary(
+            "my-database",
+            "my-database_20260812T031500Z.dump.zst",
+            42,
+            1,
+            "none",
+            "zstd",
+        );
+
+        assert!(message.contains("#my_database"));
     }
 }
