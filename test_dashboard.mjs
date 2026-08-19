@@ -8,13 +8,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+const dashboardDir = './dashboard/';
+const html = readFileSync(new URL(`${dashboardDir}index.html`, import.meta.url), 'utf8');
 const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html'];
 const pageHtml = Object.fromEntries(dashboardPages.map(file => [
     file,
-    readFileSync(new URL(`./${file}`, import.meta.url), 'utf8'),
+    readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8'),
 ]));
-const authJs = readFileSync(new URL('./dashboard-auth.js', import.meta.url), 'utf8');
+const authJs = readFileSync(new URL(`${dashboardDir}dashboard-auth.js`, import.meta.url), 'utf8');
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 const noop = () => {};
@@ -345,9 +346,9 @@ console.log('dashboard timeline, history formatting, and expansion state OK');
 // Telegram users workspace contract checks. The page is intentionally
 // dependency-free, so these assertions protect the rendered states and
 // mutation wiring at the HTML/JavaScript boundary.
-const usersHtml = readFileSync(new URL('./users.html', import.meta.url), 'utf8');
+const usersHtml = readFileSync(new URL(`${dashboardDir}users.html`, import.meta.url), 'utf8');
 const usersBody = usersHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
-const databasesHtml = readFileSync(new URL('./databases.html', import.meta.url), 'utf8');
+const databasesHtml = readFileSync(new URL(`${dashboardDir}databases.html`, import.meta.url), 'utf8');
 
 assert.match(usersHtml, /<table>/);
 assert.match(usersHtml, /class="table-scroll"/);
@@ -393,7 +394,7 @@ assert.doesNotMatch(usersHtml, /—/);
 
 console.log('Telegram users workspace contract OK');
 
-const routingHtml = readFileSync(new URL('./routing.html', import.meta.url), 'utf8');
+const routingHtml = readFileSync(new URL(`${dashboardDir}routing.html`, import.meta.url), 'utf8');
 assert.match(routingHtml, /disableRouting/);
 assert.match(routingHtml, /api\/routing\/disable/);
 assert.match(routingHtml, /ss:\/\/|trojan:\/\//);
@@ -450,7 +451,7 @@ console.log('Routing disable workspace contract OK');
 // same destinations so operators do not have to hunt for a return link.
 const pageFiles = ['index.html', 'databases.html', 'routing.html', 'users.html'];
 for (const file of pageFiles) {
-    const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+    const source = readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8');
     assert.match(source, /<nav class="app-nav" aria-label="Primary navigation">/);
     assert.match(source, /class="skip-link"/);
     assert.match(source, /Skip to main content/);
@@ -494,7 +495,7 @@ assert.match(authJs, /dashboard-auth-error/);
 assert.match(authJs, /disabled = true/);
 assert.match(authJs, /Sign in/);
 assert.match(authJs, /try again/);
-const dashboardCss = readFileSync(new URL('./dashboard.css', import.meta.url), 'utf8');
+const dashboardCss = readFileSync(new URL(`${dashboardDir}dashboard.css`, import.meta.url), 'utf8');
 assert.match(dashboardCss, /\.routing-status \{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word/);
 assert.match(dashboardCss, /\.routing-status button \{[\s\S]*max-width: 100%;[\s\S]*overflow-wrap: anywhere/);
 assert.match(dashboardCss, /body \{[\s\S]*overflow-x: hidden/);

@@ -44,7 +44,7 @@ RUN mkdir src \
     && rm -rf src
 
 COPY src ./src
-COPY index.html users.html routing.html ./
+COPY dashboard ./dashboard
 # Build the final application into a separate target directory. This prevents
 # Cargo from ever reusing the placeholder executable built for dependency
 # caching above, even when Docker restores an otherwise valid stale layer.

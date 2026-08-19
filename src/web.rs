@@ -2712,39 +2712,39 @@ fn hostname() -> String {
 async fn serve_dashboard() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(include_str!("../index.html"))
+        .body(include_str!("../dashboard/index.html"))
 }
 
 async fn serve_users() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(include_str!("../users.html"))
+        .body(include_str!("../dashboard/users.html"))
 }
 
 async fn serve_routing() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(include_str!("../routing.html"))
+        .body(include_str!("../dashboard/routing.html"))
 }
 
 async fn serve_databases() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(include_str!("../databases.html"))
+        .body(include_str!("../dashboard/databases.html"))
 }
 
 /// Serve the shared dashboard surface stylesheet embedded at compile time.
 async fn serve_dashboard_styles() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/css; charset=utf-8")
-        .body(include_str!("../dashboard.css"))
+        .body(include_str!("../dashboard/dashboard.css"))
 }
 
 /// Serve the shared dashboard authentication client embedded at compile time.
 async fn serve_dashboard_auth() -> impl Responder {
     HttpResponse::Ok()
         .content_type("application/javascript; charset=utf-8")
-        .body(include_str!("../dashboard-auth.js"))
+        .body(include_str!("../dashboard/dashboard-auth.js"))
 }
 
 /// Start the HTTP server and block until it stops.
