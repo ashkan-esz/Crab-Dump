@@ -636,6 +636,25 @@ assert.match(servicesBody, /d\.recipients/);
 assert.match(servicesBody, /definition\.enabled/);
 assert.match(servicesBody, /NOT POLLED/);
 
+// Recipients are picked from the Telegram user directory, never typed as raw
+// chat IDs, and an already-saved recipient must survive an edit even once the
+// directory no longer lists it as enabled.
+assert.doesNotMatch(servicesHtml, /<input id="service-recipients"/,
+    'recipients must be a directory picker, not a free-text chat ID field');
+assert.match(servicesHtml, /<div class="svc-recipients" id="service-recipients"/);
+assert.match(servicesHtml, /<legend>Alert recipients<\/legend>/);
+assert.match(servicesBody, /call\('\/api\/telegram-users'\)/);
+assert.match(servicesBody, /function loadDirectory\(\)/);
+assert.match(servicesBody, /function recipientOptions\(\)/);
+assert.match(servicesBody, /function renderRecipientPicker\(\)/);
+assert.match(servicesBody, /recipientPicks = new Set\(\(d\?\.recipients \|\| \[\]\)\.map\(String\)\)/);
+assert.match(servicesBody, /recipients: \[\.\.\.recipientPicks\]/);
+assert.match(servicesBody, /filter\(user => user\.enabled\)/);
+assert.match(servicesBody, /NOT IN DIRECTORY/);
+assert.match(servicesBody, /input\[data-recipient\]/);
+assert.match(servicesBody, /Directory unavailable:/);
+assert.match(servicesBody, /id="retry-directory"/);
+
 // Live refresh: interval control, persistence, pause when hidden, and a poll
 // failure that keeps the last good render instead of blanking the panels.
 assert.match(servicesHtml, /id="refreshInterval"/);
@@ -681,4 +700,7 @@ assert.match(servicesBody, /No services monitored/);
 assert.match(servicesBody, /Services could not be loaded/);
 assert.match(servicesBody, /No incidents recorded/);
 assert.match(servicesBody, /Incidents could not be loaded/);
+assert.match(servicesBody, /No enabled users in the directory/);
+assert.match(dashboardCss, /\.svc-recipient-list \{/);
+assert.match(dashboardCss, /\.svc-recipients-field \{/);
 console.log('services workspace contract OK');

@@ -115,10 +115,11 @@
         <span class="svc-hint">Response header read to track the deployed version.</span>
         <input id="service-version" value="X-Version" autocomplete="off">
       </label>
-      <label class="svc-field"><span>Alert recipients</span>
-        <span class="svc-hint">Telegram chat IDs, comma separated. Only enabled directory users are notified.</span>
-        <input id="service-recipients" autocomplete="off" placeholder="123456789, 987654321">
-      </label>
+      <fieldset class="svc-field svc-recipients-field">
+        <legend>Alert recipients</legend>
+        <span class="svc-hint">Pick from the Telegram user directory. Only enabled users are polled for alerts.</span>
+        <div class="svc-recipients" id="service-recipients" aria-busy="false"></div>
+      </fieldset>
       <div class="svc-check">
         <input id="service-enabled" type="checkbox" checked>
         <div><label for="service-enabled">Enabled</label><span class="svc-hint">Disabled services keep their configuration and incident history but are not polled.</span></div>
@@ -144,6 +145,9 @@
   let refreshTimer = null;
   let latency = new Map();
   let incidentState = { name: null, page: 1, data: null, error: null, loading: false };
+  let directory = [];
+  let directoryState = { loading: false, error: null, loaded: false };
+  let recipientPicks = new Set();
 
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const canAdmin = () => dashboardRole === 'admin';
@@ -311,7 +315,7 @@
         <div class="svc-fact"><span>Expected status</span><strong>${d.expected_status}</strong></div>
         <div class="svc-fact"><span>Extra retries</span><strong>${d.retries}</strong></div>
         <div class="svc-fact"><span>Version header</span><strong>${esc(d.version_header)}</strong></div>
-        <div class="svc-fact"><span>Alert recipients</span><strong>${d.recipients.length ? esc(d.recipients.join(', ')) : 'none'}</strong></div>
+        <div class="svc-fact"><span>Alert recipients</span><strong>${d.recipients.length ? esc(d.recipients.map(recipientLabel).join(', ')) : 'none'}</strong></div>
       </div>
       ${canAdmin() ? `<div class="svc-detail-actions"><button class="button" type="button" id="edit-service">Edit service</button><button class="button danger" type="button" id="delete-service">Delete service</button></div>` : ''}
       <section class="svc-incidents" aria-label="Incident history">
@@ -479,6 +483,100 @@
     scheduleRefresh();
   }
 
+  /* ---------- recipients ---------- */
+
+  /**
+   * The directory is admin-only (`GET /api/telegram-users` requires Admin), so
+   * operators and viewers keep seeing raw chat IDs. Never fatal: a failed load
+   * degrades the picker, it does not block saving a service.
+   */
+  async function loadDirectory() {
+    if (!canAdmin()) return;
+    directoryState = { loading: true, error: null, loaded: directoryState.loaded };
+    renderRecipientPicker();
+    try {
+      const users = await call('/api/telegram-users');
+      directory = Array.isArray(users) ? users : [];
+      directoryState = { loading: false, error: null, loaded: true };
+    } catch (error) {
+      directoryState = { loading: false, error: error.message, loaded: directoryState.loaded };
+    }
+    renderRecipientPicker();
+  }
+
+  function recipientLabel(chatId) {
+    const user = directory.find(entry => String(entry.chat_id) === String(chatId));
+    return user ? user.name : chatId;
+  }
+
+  /**
+   * Enabled users are the selectable set, but a chat ID already on the service
+   * is always listed and stays checked even when it is now disabled or gone
+   * from the directory — editing a service must not silently drop recipients.
+   */
+  function recipientOptions() {
+    const options = directory
+      .filter(user => user.enabled)
+      .map(user => ({ chat_id: String(user.chat_id), name: user.name, state: '' }));
+    const listed = new Set(options.map(option => option.chat_id));
+    [...recipientPicks].forEach(chatId => {
+      if (listed.has(chatId)) return;
+      const known = directory.find(user => String(user.chat_id) === chatId);
+      options.push({
+        chat_id: chatId,
+        name: known ? known.name : chatId,
+        state: known ? 'disabled' : 'unknown',
+      });
+    });
+    return options;
+  }
+
+  function renderRecipientPicker() {
+    const host = $('service-recipients');
+    if (!host) return;
+    host.setAttribute('aria-busy', directoryState.loading ? 'true' : 'false');
+
+    if (directoryState.loading && !directoryState.loaded) {
+      host.innerHTML = '<p class="svc-recipients-state">Loading the Telegram user directory.</p>';
+      return;
+    }
+
+    const options = recipientOptions();
+    const rows = options.map(option => {
+      const checked = recipientPicks.has(option.chat_id) ? ' checked' : '';
+      const marker = option.state === 'disabled'
+        ? '<span class="status disabled">DISABLED</span>'
+        : option.state === 'unknown'
+          ? '<span class="status disabled">NOT IN DIRECTORY</span>'
+          : '';
+      return `<label class="svc-recipient">
+        <input type="checkbox" data-recipient="${esc(option.chat_id)}" value="${esc(option.chat_id)}"${checked}>
+        <span class="svc-recipient-name">${esc(option.name)}</span>
+        <span class="svc-recipient-id mono">${esc(option.chat_id)}</span>
+        ${marker}
+      </label>`;
+    }).join('');
+
+    const notice = directoryState.error
+      ? `<p class="svc-recipients-state error">Directory unavailable: ${esc(directoryState.error)} <button class="button small" type="button" id="retry-directory">Try again</button></p>`
+      : '';
+
+    const empty = options.length
+      ? ''
+      : `<p class="svc-recipients-state">${directoryState.error
+        ? 'No recipients can be listed until the directory loads.'
+        : 'No enabled users in the directory. Add one on the Telegram users page first.'}</p>`;
+
+    host.innerHTML = `${notice}${empty}${options.length ? `<div class="svc-recipient-list">${rows}</div>` : ''}`;
+    if (directoryState.error) $('retry-directory').onclick = () => loadDirectory();
+    host.querySelectorAll('input[data-recipient]').forEach(input => {
+      input.onchange = () => {
+        if (input.checked) recipientPicks.add(input.dataset.recipient);
+        else recipientPicks.delete(input.dataset.recipient);
+      };
+    });
+  }
+
   /* ---------- editor ---------- */
 
   function formSummary(text) {
@@ -500,9 +598,11 @@
     $('service-retries').value = d?.retries ?? 2;
     $('service-threshold').value = d?.failure_threshold ?? 3;
     $('service-version').value = d?.version_header || 'X-Version';
-    $('service-recipients').value = (d?.recipients || []).join(', ');
+    recipientPicks = new Set((d?.recipients || []).map(String));
+    renderRecipientPicker();
     $('service-enabled').checked = d?.enabled ?? true;
     $('service-dialog').showModal();
+    loadDirectory();
   }
 
   async function deleteService(name) {
@@ -548,7 +648,7 @@
       retries: Number($('service-retries').value),
       failure_threshold: Number($('service-threshold').value),
       version_header: $('service-version').value.trim(),
-      recipients: $('service-recipients').value.split(',').map(value => value.trim()).filter(Boolean),
+      recipients: [...recipientPicks],
       enabled: $('service-enabled').checked,
     };
     button.disabled = true;
@@ -579,6 +679,7 @@
       $('refreshInterval').value = String(refreshMs);
     }
     await loadRole();
+    await loadDirectory();
     await refresh();
     if (selected) await loadIncidents(selected, 1);
     scheduleRefresh();

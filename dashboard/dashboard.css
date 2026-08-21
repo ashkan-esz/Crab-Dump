@@ -2689,6 +2689,95 @@ td:nth-last-child(-n + 2) {
   font-weight: 400;
 }
 
+/* Recipient picker: a checkbox group over the Telegram user directory, so chat
+   IDs are chosen rather than typed. Overrides `.svc-field`'s grid + input rules. */
+.svc-recipients-field {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.svc-recipients-field > legend {
+  padding: 0;
+  color: var(--dash-muted);
+  font-size: .7rem;
+  font-weight: 650;
+}
+
+.svc-recipients-field > .svc-hint {
+  display: block;
+  margin: 5px 0 8px;
+  color: var(--dash-subtle);
+  font-size: .64rem;
+}
+
+.svc-recipient-list {
+  display: grid;
+  gap: 1px;
+  max-height: 190px;
+  overflow-y: auto;
+  background: var(--dash-border);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-sm);
+}
+
+.svc-recipient {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  background: #0b1320;
+  color: var(--dash-text);
+  font-size: .74rem;
+  cursor: pointer;
+}
+
+.svc-recipient:hover {
+  background: var(--dash-surface-hover);
+}
+
+.svc-recipient input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--dash-accent);
+}
+
+.svc-recipient-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.svc-recipient-id {
+  flex: 0 0 auto;
+  color: var(--dash-subtle);
+  font-size: .66rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-recipients-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dash-space-2);
+  margin: 0 0 8px;
+  color: var(--dash-muted);
+  font-size: .68rem;
+}
+
+.svc-recipients-state.error {
+  color: var(--dash-danger);
+}
+
 #service-dialog .form-summary {
   padding: 10px 12px;
   font-size: .72rem;
