@@ -29,6 +29,7 @@ mod database_registry;
 mod database_state;
 mod dump;
 mod encrypt;
+mod health_monitor;
 mod history;
 mod resource_usage;
 mod routing;
@@ -42,6 +43,7 @@ use config::{Config, DatabaseConfig, Schedule, SharedConfig, DATA_DIR};
 use database_registry::DatabaseRegistry;
 use database_state::DatabaseStateStore;
 use encrypt::EncryptionMode;
+use health_monitor::HealthMonitor;
 use history::{HistoryRecord, HistoryStore};
 use routing::{ProfileStore, RouteManager, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH};
 
@@ -165,6 +167,13 @@ fn main() -> Result<()> {
             drop(client);
         }
     });
+    let health_monitor = HealthMonitor::load(
+        &data_dir,
+        Arc::clone(&telegram_client),
+        shared_cfg.tg_bot_token.clone(),
+        Arc::clone(&telegram_users),
+    )
+    .context("loading health monitor")?;
 
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
@@ -190,6 +199,7 @@ fn main() -> Result<()> {
     let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
     let dashboard_work_dir = shared_cfg.work_dir.clone();
     let dashboard_registry = Arc::clone(&registry);
+    let dashboard_health_monitor = Arc::clone(&health_monitor);
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -217,6 +227,7 @@ fn main() -> Result<()> {
                 dashboard_fallback_proxy,
                 dashboard_work_dir,
                 dashboard_registry,
+                dashboard_health_monitor,
             )
             .await
             {
@@ -268,6 +279,7 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    health_monitor.start();
 
     // ── Scheduled mode ──────────────────────────────────────────────────────
     // With BACKUP_INTERVAL set the process stays alive and repeats the cycle

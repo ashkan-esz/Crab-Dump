@@ -214,6 +214,21 @@ persisted to `./data/database-state.json`; both files share the fixed
 monthly backup history. An existing root-level `telegram_users.toml` is no
 longer read automatically.
 
+### Dashboard service monitoring
+
+The `/services` dashboard page manages authenticated HTTP health checks. Each
+service has a unique name, URL, expected status, interval, retry count,
+failure threshold, version header, enabled state, and selected Telegram users.
+Defaults are `60s`, two additional retries, three consecutive failures, and
+`X-Version`. Alerts are transition-only: one outage notification and one
+recovery notification are sent to enabled selected users.
+
+Definitions and bounded outage/recovery history are stored atomically in
+`./data/health-services.json` and `./data/health-incidents.json`. The Compose
+`data` volume must remain persistent. Operators can acknowledge or clear
+incident presentation state; this does not change monitoring or alert behavior.
+Viewers can inspect services and history but cannot mutate them.
+
 ### Multiple databases
 
 Declare databases with indexed environment variables, contiguous from `0` — a

@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Services · crab-dump</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard-auth.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#services-main">Skip to main content</a>
+  <nav class="app-nav" aria-label="Primary navigation">
+    <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
+    <div class="app-role" aria-label="Current dashboard role"><span>Current role</span><strong id="sidebarRole">Loading...</strong></div>
+    <span class="app-nav-label">Operations</span>
+    <div class="app-nav-links">
+      <a href="/"><span aria-hidden="true">◈</span><span>Overview</span></a>
+      <a href="/databases"><span aria-hidden="true">▤</span><span>Databases</span></a>
+      <a href="/services" aria-current="page"><span aria-hidden="true">◌</span><span>Services</span></a>
+      <a href="/users"><span aria-hidden="true">◎</span><span>Telegram users</span></a>
+      <a href="/routing"><span aria-hidden="true">⇄</span><span>Routing</span></a>
+    </div>
+    <span class="app-nav-label">System</span>
+    <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
+    <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
+  </nav>
+  <main id="services-main" class="page">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow"><a href="/">Overview</a> / Operations</p>
+        <h1>Services</h1>
+        <p class="lede">HTTP health checks, observed versions, and outage history. Each service is polled on its own interval and alerts its Telegram recipients on state changes.</p>
+      </div>
+      <div class="header-actions">
+        <button class="button primary" id="add-service" type="button" hidden>Add service</button>
+      </div>
+    </header>
+
+    <section class="svc-summary" aria-label="Health summary">
+      <div class="svc-counts">
+        <span class="svc-summary-item"><strong id="count-total">0</strong> <span id="label-total">services</span></span>
+        <span class="svc-summary-item"><span class="svc-dot up" aria-hidden="true"></span><span id="count-up">0 up</span></span>
+        <span class="svc-summary-item"><span class="svc-dot down" aria-hidden="true"></span><span id="count-down">0 down</span></span>
+        <span class="svc-summary-item"><span class="svc-dot unknown" aria-hidden="true"></span><span id="count-unknown">0 unknown</span></span>
+        <span class="svc-summary-item"><span class="svc-dot" aria-hidden="true"></span><span id="count-off">0 disabled</span></span>
+      </div>
+      <div class="svc-refresh">
+        <span class="svc-updated" id="updated" role="status" aria-live="polite">Loading</span>
+        <label class="svc-summary-item" for="refreshInterval"><span>Refresh</span>
+          <select id="refreshInterval" aria-label="Automatic refresh interval">
+            <option value="5000">5s</option>
+            <option value="10000" selected>10s</option>
+            <option value="30000">30s</option>
+            <option value="60000">60s</option>
+            <option value="0">Off</option>
+          </select>
+        </label>
+        <button class="button small" id="refresh-now" type="button">Refresh</button>
+      </div>
+    </section>
+
+    <div class="notice" id="refresh-notice" role="alert" hidden>
+      <span id="refresh-notice-text"></span><button class="button small subtle" id="retry-refresh" type="button">Retry</button>
+    </div>
+    <div class="notice muted" id="svc-permission" hidden>
+      <span id="svc-permission-text"></span>
+    </div>
+
+    <div class="svc-layout">
+      <section class="svc-list-panel" aria-labelledby="svc-list-title">
+        <div class="svc-list-head"><span id="svc-list-title">Service</span><span>Latency</span></div>
+        <ul class="svc-list" id="svc-list" aria-label="Monitored services" aria-busy="true">
+          <li class="svc-skeleton-row"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+          <li class="svc-skeleton-row"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+          <li class="svc-skeleton-row"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+        </ul>
+      </section>
+
+      <section class="svc-detail-panel" id="svc-detail" aria-live="polite" aria-label="Service detail">
+        <p class="svc-list-state">Loading services.</p>
+      </section>
+    </div>
+  </main>
+
+  <dialog class="dialog" id="service-dialog" aria-labelledby="service-dialog-title">
+    <form class="svc-form" id="service-form" novalidate>
+      <div>
+        <p class="panel-kicker">Administrator action</p>
+        <h2 id="service-dialog-title">Add service</h2>
+      </div>
+      <div class="form-summary" id="form-summary" role="alert" hidden></div>
+      <label class="svc-field"><span>Name</span>
+        <span class="svc-hint">Used in alerts and incident records. Cannot be changed later.</span>
+        <input id="service-name" required maxlength="120" autocomplete="off" placeholder="api-gateway">
+      </label>
+      <label class="svc-field"><span>Health URL</span>
+        <span class="svc-hint">Polled with GET. Must be http or https.</span>
+        <input id="service-url" type="url" required autocomplete="off" inputmode="url" placeholder="https://example.test/healthz">
+      </label>
+      <div class="svc-form-grid">
+        <label class="svc-field"><span>Expected status</span>
+          <input id="service-status" type="number" min="100" max="599" value="200">
+        </label>
+        <label class="svc-field"><span>Interval (seconds)</span>
+          <input id="service-interval" type="number" min="1" value="60">
+        </label>
+        <label class="svc-field"><span>Extra retries</span>
+          <input id="service-retries" type="number" min="0" max="10" value="2">
+        </label>
+        <label class="svc-field"><span>Failure threshold</span>
+          <input id="service-threshold" type="number" min="1" value="3">
+        </label>
+      </div>
+      <label class="svc-field"><span>Version header</span>
+        <span class="svc-hint">Response header read to track the deployed version.</span>
+        <input id="service-version" value="X-Version" autocomplete="off">
+      </label>
+      <label class="svc-field"><span>Alert recipients</span>
+        <span class="svc-hint">Telegram chat IDs, comma separated. Only enabled directory users are notified.</span>
+        <input id="service-recipients" autocomplete="off" placeholder="123456789, 987654321">
+      </label>
+      <div class="svc-check">
+        <input id="service-enabled" type="checkbox" checked>
+        <div><label for="service-enabled">Enabled</label><span class="svc-hint">Disabled services keep their configuration and incident history but are not polled.</span></div>
+      </div>
+      <div class="svc-dialog-actions">
+        <button class="button subtle" id="cancel-service" type="button">Cancel</button>
+        <button class="button primary" id="save-service" type="submit">Save service</button>
+      </div>
+    </form>
+  </dialog>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const REFRESH_KEY = 'crab-dump.services-refresh-ms';
+  const INCIDENT_PAGE_SIZE = 20;
+  const SPARK_SAMPLES = 30;
+
+  let services = [];
+  let selected = null;
+  let editing = null;
+  let dashboardRole = 'viewer';
+  let refreshMs = 10000;
+  let refreshTimer = null;
+  let latency = new Map();
+  let incidentState = { name: null, page: 1, data: null, error: null, loading: false };
+
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const canAdmin = () => dashboardRole === 'admin';
+  const canOperate = () => canAdmin() || dashboardRole === 'operator';
+
+  async function call(url, options = {}) {
+    const response = await window.dashboardAuth.request(url, {
+      credentials: 'same-origin',
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Request failed (${response.status})`);
+    }
+    return response.status === 204 ? null : response.json();
+  }
+
+  /** Absolute timestamps are unreadable at a glance; keep the exact value in a title. */
+  function relTime(value) {
+    if (!value) return '-';
+    const then = Date.parse(value);
+    if (Number.isNaN(then)) return esc(value);
+    const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+  }
+
+  function stampCell(value) {
+    return value
+      ? `<span title="${esc(value)}">${esc(relTime(value))}</span>`
+      : '-';
+  }
+
+  function stateOf(entry) {
+    if (!entry.definition.enabled) return 'off';
+    const status = String(entry.runtime.status || 'unknown').toLowerCase();
+    return status === 'up' || status === 'down' ? status : 'unknown';
+  }
+
+  /* ---------- summary ---------- */
+
+  function renderSummary() {
+    const counts = { up: 0, down: 0, unknown: 0, off: 0 };
+    services.forEach(entry => { counts[stateOf(entry)] += 1; });
+    $('count-total').textContent = services.length;
+    $('label-total').textContent = services.length === 1 ? 'service' : 'services';
+    $('count-up').textContent = `${counts.up} up`;
+    $('count-down').textContent = `${counts.down} down`;
+    $('count-unknown').textContent = `${counts.unknown} unknown`;
+    $('count-off').textContent = `${counts.off} disabled`;
+  }
+
+  function renderPermission() {
+    const notice = $('svc-permission');
+    notice.hidden = canAdmin();
+    $('svc-permission-text').textContent = dashboardRole === 'operator'
+      ? 'Operator access can acknowledge incidents, but adding, editing, and deleting services requires an administrator.'
+      : 'Viewer access is read-only. Ask an administrator to manage monitored services.';
+    $('add-service').hidden = !canAdmin();
+  }
+
+  /* ---------- service list ---------- */
+
+  function renderList() {
+    const list = $('svc-list');
+    if (!services.length) {
+      list.innerHTML = '<li><div class="empty-state"><strong>No services monitored</strong><span>Add a service to start health checks and outage alerts.</span></div></li>';
+      return;
+    }
+    list.innerHTML = services.map(entry => {
+      const state = stateOf(entry);
+      const name = entry.definition.name;
+      const isSelected = name === selected;
+      const trailing = state === 'off'
+        ? '<span class="svc-row-off">Off</span>'
+        : `<span class="svc-row-latency">${entry.runtime.latency_ms == null ? '-' : `${entry.runtime.latency_ms} ms`}</span>`;
+      return `<li><button class="svc-row" type="button" ${isSelected ? 'aria-current="true"' : ''} data-select="${esc(name)}"><span class="svc-dot ${state}" aria-hidden="true"></span><span class="svc-row-name">${esc(name)}</span>${trailing}</button></li>`;
+    }).join('');
+    list.querySelectorAll('[data-select]').forEach(button => {
+      button.onclick = () => selectService(button.dataset.select);
+    });
+  }
+
+  /* ---------- latency trend ---------- */
+
+  /** Samples come from polling, so only record a genuinely new check. */
+  function recordLatency(entry) {
+    const { name } = entry.definition;
+    const { last_check: at, latency_ms: ms } = entry.runtime;
+    if (!at || ms == null) return;
+    const samples = latency.get(name) || [];
+    if (samples.length && samples[samples.length - 1].at === at) return;
+    samples.push({ at, ms });
+    if (samples.length > SPARK_SAMPLES) samples.splice(0, samples.length - SPARK_SAMPLES);
+    latency.set(name, samples);
+  }
+
+  function sparkline(name) {
+    const samples = latency.get(name) || [];
+    if (samples.length < 2) {
+      return '<div class="svc-spark"><span class="svc-spark-empty">Latency trend appears after a few checks.</span></div>';
+    }
+    const values = samples.map(sample => sample.ms);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const points = values.map((value, index) => {
+      const x = (index / (values.length - 1)) * 100;
+      const y = 26 - ((value - min) / span) * 22;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join(' ');
+    const label = `Latency trend over the last ${values.length} checks: ${min} to ${max} ms`;
+    return `<div class="svc-spark"><svg viewBox="0 0 100 30" preserveAspectRatio="none" role="img" aria-label="${esc(label)}"><polyline points="${points}"></polyline></svg></div>`;
+  }
+
+  /* ---------- detail panel ---------- */
+
+  function renderDetail() {
+    const panel = $('svc-detail');
+    if (!services.length) {
+      panel.innerHTML = '<div class="empty-state"><strong>Nothing to inspect</strong><span>Monitored services and their incident history appear here.</span></div>';
+      return;
+    }
+    const entry = services.find(item => item.definition.name === selected);
+    if (!entry) {
+      panel.innerHTML = '<div class="empty-state"><strong>Select a service</strong><span>Pick a service from the list to see its checks and incidents.</span></div>';
+      return;
+    }
+    const d = entry.definition;
+    const r = entry.runtime;
+    const state = stateOf(entry);
+    const statusClass = { up: 'status success', down: 'status disabled', unknown: 'status svc-status-unknown', off: 'status' }[state];
+    const statusText = { up: 'UP', down: 'DOWN', unknown: 'UNKNOWN', off: 'DISABLED' }[state];
+    const reason = state === 'down' && (r.last_reason || r.last_status_code != null)
+      ? `<p class="svc-reason">${esc(r.last_reason || 'Health check failed')}${r.last_status_code != null ? ` · HTTP ${r.last_status_code}` : ''}</p>`
+      : '';
+
+    panel.innerHTML = `
+      <div class="svc-detail-head">
+        <div>
+          <p class="panel-kicker">Health record</p>
+          <h2>${esc(d.name)}</h2>
+        </div>
+        <div class="svc-detail-badges">
+          <span class="${statusClass}">${statusText}</span>
+          ${d.enabled ? '' : '<span class="status">NOT POLLED</span>'}
+        </div>
+      </div>
+      <p class="svc-detail-url">${esc(d.url)}</p>
+      <div class="svc-vitals">
+        <div class="svc-vital"><span>Latency</span><strong>${r.latency_ms == null ? '-' : `${r.latency_ms} ms`}</strong></div>
+        <div class="svc-vital"><span>Version</span><strong>${esc(r.current_version || r.last_observed_version || '-')}</strong></div>
+        <div class="svc-vital"><span>Failures</span><strong>${r.consecutive_failures} / ${d.failure_threshold}</strong></div>
+        ${sparkline(d.name)}
+      </div>
+      ${reason}
+      <div class="svc-facts">
+        <div class="svc-fact"><span>Last check</span><strong>${stampCell(r.last_check)}</strong></div>
+        <div class="svc-fact"><span>Last success</span><strong>${stampCell(r.last_success)}</strong></div>
+        <div class="svc-fact"><span>Last failure</span><strong>${stampCell(r.last_failure)}</strong></div>
+        <div class="svc-fact"><span>Interval</span><strong>every ${d.interval_secs}s</strong></div>
+        <div class="svc-fact"><span>Expected status</span><strong>${d.expected_status}</strong></div>
+        <div class="svc-fact"><span>Extra retries</span><strong>${d.retries}</strong></div>
+        <div class="svc-fact"><span>Version header</span><strong>${esc(d.version_header)}</strong></div>
+        <div class="svc-fact"><span>Alert recipients</span><strong>${d.recipients.length ? esc(d.recipients.join(', ')) : 'none'}</strong></div>
+      </div>
+      ${canAdmin() ? `<div class="svc-detail-actions"><button class="button" type="button" id="edit-service">Edit service</button><button class="button danger" type="button" id="delete-service">Delete service</button></div>` : ''}
+      <section class="svc-incidents" aria-label="Incident history">
+        <div class="svc-incidents-head"><h3>Incident history</h3><span class="svc-updated" id="incident-count"></span></div>
+        <div id="incident-body"></div>
+      </section>`;
+
+    if (canAdmin()) {
+      $('edit-service').onclick = () => openEditor(d.name);
+      $('delete-service').onclick = () => deleteService(d.name);
+    }
+    renderIncidents();
+  }
+
+  /* ---------- incidents ---------- */
+
+  function renderIncidents() {
+    const body = $('incident-body');
+    const counter = $('incident-count');
+    if (!body) return;
+    if (incidentState.loading) {
+      body.innerHTML = '<p class="svc-list-state">Loading incidents.</p>';
+      counter.textContent = '';
+      return;
+    }
+    if (incidentState.error) {
+      body.innerHTML = `<div class="error-state"><strong>Incidents could not be loaded</strong><span>${esc(incidentState.error)}</span><button class="button small" type="button" id="retry-incidents">Try again</button></div>`;
+      counter.textContent = '';
+      $('retry-incidents').onclick = () => loadIncidents(incidentState.name, incidentState.page);
+      return;
+    }
+    const data = incidentState.data;
+    if (!data || !data.records.length) {
+      body.innerHTML = '<div class="empty-state"><strong>No incidents recorded</strong><span>Outages and recoveries are logged here as they happen.</span></div>';
+      counter.textContent = '';
+      return;
+    }
+
+    const total = data.total_records;
+    const size = data.page_size || INCIDENT_PAGE_SIZE;
+    const first = (data.page - 1) * size + 1;
+    const last = Math.min(total, first + data.records.length - 1);
+    const pages = Math.max(1, Math.ceil(total / size));
+    counter.textContent = `${first}-${last} of ${total}`;
+
+    const rows = data.records.map(incident => {
+      const isOutage = incident.event === 'outage';
+      const detail = incident.reason || (incident.version ? `version ${incident.version}` : '');
+      const action = canOperate()
+        ? `<button class="button small" type="button" data-incident="${incident.id}" data-action="${incident.acknowledged ? 'clear' : 'ack'}">${incident.acknowledged ? 'Clear' : 'Acknowledge'}</button>`
+        : '';
+      return `<tr>
+        <td><span class="status ${isOutage ? 'disabled' : 'success'}">${isOutage ? 'OUTAGE' : 'RECOVERY'}</span></td>
+        <td>${stampCell(incident.timestamp)}</td>
+        <td>${esc(detail || '-')}${incident.status_code != null ? ` <span class="svc-row-latency">HTTP ${incident.status_code}</span>` : ''}</td>
+        <td>${incident.acknowledged ? 'Acknowledged' : 'Open'}</td>
+        <td class="actions">${action}</td>
+      </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="svc-incident-table">
+        <div class="table-scroll">
+          <table>
+            <caption>Incident history for ${esc(incidentState.name)}</caption>
+            <thead><tr><th scope="col">Event</th><th scope="col">When</th><th scope="col">Detail</th><th scope="col">State</th><th scope="col">Action</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+      ${pages > 1 ? `<div class="svc-pager"><span>Page ${data.page} of ${pages}</span><span class="svc-pager-buttons"><button class="button small history-page-button history-prev" type="button" id="incident-prev" ${data.page <= 1 ? 'disabled' : ''}>Previous</button><button class="button small history-page-button history-next" type="button" id="incident-next" ${data.page >= pages ? 'disabled' : ''}>Next</button></span></div>` : ''}`;
+
+    body.querySelectorAll('[data-incident]').forEach(button => {
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          await call(`/api/service-incidents/${button.dataset.incident}/${button.dataset.action}`, { method: 'POST' });
+          await loadIncidents(incidentState.name, incidentState.page);
+        } catch (error) {
+          incidentState.error = error.message;
+          renderIncidents();
+        }
+      };
+    });
+    if (pages > 1) {
+      $('incident-prev').onclick = () => loadIncidents(incidentState.name, data.page - 1);
+      $('incident-next').onclick = () => loadIncidents(incidentState.name, data.page + 1);
+    }
+  }
+
+  async function loadIncidents(name, page = 1) {
+    incidentState = { name, page, data: incidentState.data, error: null, loading: true };
+    renderIncidents();
+    try {
+      const data = await call(`/api/services/${encodeURIComponent(name)}/incidents?page=${page}&page_size=${INCIDENT_PAGE_SIZE}`);
+      if (incidentState.name !== name) return;
+      incidentState = { name, page: data.page, data, error: null, loading: false };
+    } catch (error) {
+      if (incidentState.name !== name) return;
+      incidentState = { name, page, data: null, error: error.message, loading: false };
+    }
+    renderIncidents();
+  }
+
+  /* ---------- selection and loading ---------- */
+
+  function selectService(name) {
+    if (selected === name) return;
+    selected = name;
+    renderList();
+    renderDetail();
+    loadIncidents(name, 1);
+  }
+
+  function noticeError(text) {
+    $('refresh-notice-text').textContent = text;
+    $('refresh-notice').hidden = false;
+  }
+
+  async function refresh() {
+    $('svc-list').setAttribute('aria-busy', 'true');
+    try {
+      const data = await call('/api/services');
+      services = data;
+      services.forEach(recordLatency);
+      const names = new Set(services.map(entry => entry.definition.name));
+      if (!selected || !names.has(selected)) selected = services[0]?.definition.name || null;
+      $('refresh-notice').hidden = true;
+      $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      renderSummary();
+      renderList();
+      if (selected && incidentState.name !== selected) {
+        renderDetail();
+        loadIncidents(selected, 1);
+      } else {
+        renderDetail();
+      }
+    } catch (error) {
+      // Keep the last good render on screen; a failed poll must not blank the page.
+      noticeError(`Refresh failed. Showing last known data. ${error.message}`);
+      if (!services.length) {
+        $('svc-list').innerHTML = '<li><div class="error-state"><strong>Services could not be loaded</strong><span>Use Retry once the server is reachable.</span></div></li>';
+        $('svc-detail').innerHTML = '<div class="error-state"><strong>Service detail unavailable</strong><span>The service list request has to succeed first.</span></div>';
+      }
+    } finally {
+      $('svc-list').setAttribute('aria-busy', 'false');
+    }
+  }
+
+  /* ---------- polling ---------- */
+
+  function scheduleRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = null;
+    if (!refreshMs) return;
+    refreshTimer = setTimeout(async () => {
+      if (!document.hidden) await refresh();
+      scheduleRefresh();
+    }, refreshMs);
+  }
+
+  function setRefreshInterval(value) {
+    refreshMs = Number(value) || 0;
+    try { localStorage.setItem(REFRESH_KEY, String(refreshMs)); } catch (error) { /* private mode */ }
+    scheduleRefresh();
+  }
+
+  /* ---------- editor ---------- */
+
+  function formSummary(text) {
+    const summary = $('form-summary');
+    summary.textContent = text || '';
+    summary.hidden = !text;
+  }
+
+  function openEditor(name) {
+    editing = services.find(entry => entry.definition.name === name)?.definition || null;
+    const d = editing;
+    formSummary('');
+    $('service-dialog-title').textContent = d ? 'Edit service' : 'Add service';
+    $('service-name').value = d?.name || '';
+    $('service-name').disabled = Boolean(d);
+    $('service-url').value = d?.url || '';
+    $('service-status').value = d?.expected_status ?? 200;
+    $('service-interval').value = d?.interval_secs ?? 60;
+    $('service-retries').value = d?.retries ?? 2;
+    $('service-threshold').value = d?.failure_threshold ?? 3;
+    $('service-version').value = d?.version_header || 'X-Version';
+    $('service-recipients').value = (d?.recipients || []).join(', ');
+    $('service-enabled').checked = d?.enabled ?? true;
+    $('service-dialog').showModal();
+  }
+
+  async function deleteService(name) {
+    if (!confirm(`Delete ${name}? This removes its configuration and incident history and cannot be undone.`)) return;
+    try {
+      await call(`/api/services/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      latency.delete(name);
+      if (selected === name) selected = null;
+      incidentState = { name: null, page: 1, data: null, error: null, loading: false };
+      await refresh();
+    } catch (error) {
+      noticeError(error.message);
+    }
+  }
+
+  async function loadRole() {
+    try {
+      const config = await call('/api/config');
+      dashboardRole = config.dashboard_role || 'viewer';
+      $('sidebarRole').textContent = dashboardRole;
+    } catch (error) {
+      dashboardRole = 'viewer';
+      $('sidebarRole').textContent = 'unknown';
+    }
+    renderPermission();
+  }
+
+  $('add-service').onclick = () => openEditor(null);
+  $('cancel-service').onclick = () => $('service-dialog').close();
+  $('refresh-now').onclick = () => refresh();
+  $('retry-refresh').onclick = () => refresh();
+  $('refreshInterval').onchange = event => setRefreshInterval(event.target.value);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+
+  $('service-form').onsubmit = async event => {
+    event.preventDefault();
+    const button = $('save-service');
+    const body = {
+      name: $('service-name').value.trim(),
+      url: $('service-url').value.trim(),
+      expected_status: Number($('service-status').value),
+      interval_secs: Number($('service-interval').value),
+      retries: Number($('service-retries').value),
+      failure_threshold: Number($('service-threshold').value),
+      version_header: $('service-version').value.trim(),
+      recipients: $('service-recipients').value.split(',').map(value => value.trim()).filter(Boolean),
+      enabled: $('service-enabled').checked,
+    };
+    button.disabled = true;
+    button.textContent = 'Saving...';
+    formSummary('');
+    try {
+      await call(editing ? `/api/services/${encodeURIComponent(editing.name)}` : '/api/services', {
+        method: editing ? 'PUT' : 'POST',
+        body: JSON.stringify(body),
+      });
+      selected = body.name;
+      $('service-dialog').close();
+      await refresh();
+      await loadIncidents(body.name, 1);
+    } catch (error) {
+      formSummary(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Save service';
+    }
+  };
+
+  (async () => {
+    let stored = null;
+    try { stored = localStorage.getItem(REFRESH_KEY); } catch (error) { /* private mode */ }
+    if (stored !== null && !Number.isNaN(Number(stored))) {
+      refreshMs = Number(stored);
+      $('refreshInterval').value = String(refreshMs);
+    }
+    await loadRole();
+    await refresh();
+    if (selected) await loadIncidents(selected, 1);
+    scheduleRefresh();
+  })();
+</script>
+</body>
+</html>

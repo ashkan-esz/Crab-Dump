@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 
 const dashboardDir = './dashboard/';
 const html = readFileSync(new URL(`${dashboardDir}index.html`, import.meta.url), 'utf8');
-const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html'];
+const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html', 'services.html'];
 const pageHtml = Object.fromEntries(dashboardPages.map(file => [
     file,
     readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8'),
@@ -40,6 +40,7 @@ function operationsLinks(source) {
 const expectedOperations = [
     { href: '/', label: 'Overview' },
     { href: '/databases', label: 'Databases' },
+    { href: '/services', label: 'Services' },
     { href: '/users', label: 'Telegram users' },
     { href: '/routing', label: 'Routing' },
 ];
@@ -449,7 +450,7 @@ console.log('Routing disable workspace contract OK');
 
 // Shared operations shell contract. Every dashboard surface must expose the
 // same destinations so operators do not have to hunt for a return link.
-const pageFiles = ['index.html', 'databases.html', 'routing.html', 'users.html'];
+const pageFiles = ['index.html', 'databases.html', 'routing.html', 'users.html', 'services.html'];
 for (const file of pageFiles) {
     const source = readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8');
     assert.match(source, /<nav class="app-nav" aria-label="Primary navigation">/);
@@ -507,6 +508,21 @@ assert.match(dashboardCss, /var\(--dash-border\)/);
 assert.match(dashboardCss, /var\(--dash-radius-lg\)/);
 assert.match(dashboardCss, /var\(--dash-z-dialog\)/);
 assert.match(dashboardCss, /var\(--dash-shadow-dialog\)/);
+// Pages with no local CSS depend on the shared sheet for these two; without
+// them routing.html and services.html show a permanently visible skip link and
+// default cursors on every button.
+assert.match(dashboardCss, /\.skip-link \{[\s\S]*position: fixed;[\s\S]*transform: translateY\(-180%\)/);
+assert.match(dashboardCss, /\.skip-link:focus,[\s\S]*transform: translateY\(0\)/);
+assert.match(dashboardCss, /button \{\s*cursor: pointer;\s*\}/);
+// Service workspace: `.svc-*` namespace, split layout, and the released table
+// floor for the panel-sized incident table.
+assert.match(dashboardCss, /Service health workspace/);
+assert.match(dashboardCss, /\.svc-layout \{[\s\S]*grid-template-columns: minmax\(230px, \.8fr\) minmax\(0, 1\.7fr\)/);
+assert.match(dashboardCss, /\.svc-row\[aria-current="true"\] \{[\s\S]*box-shadow: inset 2px 0 0 var\(--dash-accent\)/);
+assert.match(dashboardCss, /\.svc-incident-table table \{\s*min-width: 0;\s*\}/);
+assert.doesNotMatch(dashboardCss.replace(/\/\*[\s\S]*?\*\//g, ''),
+    /\.service-card|\.service-summary|\.service-meta|\.service-grid/,
+    'dashboard.css must not claim the .service-* names index.html owns locally');
 assert.match(routingHtml, /<header class="page-header">[\s\S]*class="eyebrow"[\s\S]*<h1>Routing profiles<\/h1>[\s\S]*class="lede"/);
 assert.doesNotMatch(routingHtml.slice(0, routingHtml.indexOf('<link rel="stylesheet" href="/dashboard.css">')), /<style/);
 assert.match(dashboardCss, /\.routing-main > form \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1\.4fr\) auto/);
@@ -575,3 +591,94 @@ assert.match(databasesHtml, /save-database/);
 assert.match(databasesHtml, /Saving…/);
 assert.match(databasesHtml, /form\.setAttribute\('aria-busy','true'\)/);
 console.log('shared operations shell and state-region contract OK');
+
+// Service health workspace contract. The page is a split master/detail surface
+// with zero page-local CSS, so these assertions protect the shared-shell
+// migration, the poll loop, role gating, and the paginated incident table.
+const servicesHtml = readFileSync(new URL(`${dashboardDir}services.html`, import.meta.url), 'utf8');
+const servicesBody = servicesHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+// Constructing (never calling) the page script is a cheap syntax gate: the
+// dashboard has no build step, so a typo here would only surface in a browser.
+assert.doesNotThrow(() => new Function('document', 'window', 'localStorage', 'confirm', servicesBody),
+    'services.html inline script must parse');
+
+// Fully design-system driven, like routing.html: no <style> block at all.
+assert.doesNotMatch(servicesHtml, /<style/, 'services.html must not ship page-local CSS');
+assert.match(servicesHtml, /<main id="services-main" class="page">/);
+assert.match(servicesHtml, /<header class="page-header">[\s\S]*class="eyebrow"[\s\S]*<h1>Services<\/h1>[\s\S]*class="lede"/);
+assert.match(servicesHtml, /class="svc-layout"/);
+assert.match(servicesHtml, /id="svc-list" aria-label="Monitored services" aria-busy="true"/);
+assert.match(servicesHtml, /id="svc-detail"/);
+assert.doesNotMatch(servicesHtml, /id="service-grid"/, 'the flat card grid is retired');
+
+// The `.service-*` namespace belongs to index.html's Telegram/dump status
+// cards; this page must not collide with it in shared CSS.
+assert.doesNotMatch(servicesHtml, /class="service-card"|class="service-grid"|class="service-meta"/);
+
+// Endpoints and payload fields.
+assert.match(servicesBody, /api\/services/);
+assert.match(servicesBody, /api\/service-incidents/);
+assert.match(servicesBody, /dashboardAuth\.request/);
+assert.match(servicesHtml, /failure_threshold/);
+assert.match(servicesHtml, /version_header/);
+assert.match(servicesBody, /data-action/);
+assert.match(servicesBody, /method: editing \? 'PUT' : 'POST'/);
+assert.match(servicesBody, /method: 'DELETE'/);
+
+// Runtime fields the old page fetched but never rendered.
+assert.match(servicesBody, /last_reason/);
+assert.match(servicesBody, /last_status_code/);
+assert.match(servicesBody, /last_success/);
+assert.match(servicesBody, /last_failure/);
+assert.match(servicesBody, /last_observed_version/);
+assert.match(servicesBody, /d\.recipients/);
+assert.match(servicesBody, /definition\.enabled/);
+assert.match(servicesBody, /NOT POLLED/);
+
+// Live refresh: interval control, persistence, pause when hidden, and a poll
+// failure that keeps the last good render instead of blanking the panels.
+assert.match(servicesHtml, /id="refreshInterval"/);
+assert.match(servicesHtml, /id="refresh-now"/);
+assert.match(servicesBody, /crab-dump\.services-refresh-ms/);
+assert.match(servicesBody, /function scheduleRefresh\(\)/);
+assert.match(servicesBody, /function setRefreshInterval\(value\)/);
+assert.match(servicesBody, /Refresh failed\. Showing last known data\./);
+assert.match(servicesBody, /document\.hidden/);
+assert.match(servicesBody, /visibilitychange/);
+
+// Latency trend is a client-side ring buffer, deduplicated on last_check so a
+// poll faster than interval_secs cannot inflate the series.
+assert.match(servicesBody, /function recordLatency\(entry\)/);
+assert.match(servicesBody, /samples\[samples\.length - 1\]\.at === at/);
+assert.match(servicesBody, /SPARK_SAMPLES/);
+assert.match(servicesBody, /<polyline points=/);
+
+// Incident pagination: the backend has always supported ?page=, the old page
+// silently capped at the first 20 records.
+assert.match(servicesBody, /page=\$\{page\}&page_size=\$\{INCIDENT_PAGE_SIZE\}/);
+assert.match(servicesBody, /history-page-button history-prev/);
+assert.match(servicesBody, /history-page-button history-next/);
+assert.match(servicesBody, /total_records/);
+assert.match(servicesBody, /id="incident-prev"/);
+assert.match(servicesBody, /id="incident-next"/);
+
+// Role gating mirrors the backend: Admin manages services, Operator may
+// acknowledge incidents, Viewer is read-only.
+assert.match(servicesBody, /loadRole/);
+assert.match(servicesBody, /dashboard_role/);
+assert.match(servicesBody, /canAdmin = \(\) => dashboardRole === 'admin'/);
+assert.match(servicesBody, /canOperate = \(\) => canAdmin\(\) \|\| dashboardRole === 'operator'/);
+assert.match(servicesBody, /canOperate\(\)\s*\?/);
+assert.match(servicesHtml, /Viewer access is read-only/);
+assert.match(servicesBody, /add-service'\)\.hidden = !canAdmin\(\)/);
+
+// Region states and the shared editor skin.
+assert.match(servicesHtml, /<dialog class="dialog" id="service-dialog"/);
+assert.match(servicesHtml, /id="form-summary" role="alert" hidden/);
+assert.match(servicesHtml, /class="skeleton-line"/);
+assert.match(servicesBody, /No services monitored/);
+assert.match(servicesBody, /Services could not be loaded/);
+assert.match(servicesBody, /No incidents recorded/);
+assert.match(servicesBody, /Incidents could not be loaded/);
+console.log('services workspace contract OK');

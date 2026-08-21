@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
 use crate::database_registry::{redact_url, DatabaseMutation, DatabaseRegistry, DatabaseSource};
 use crate::database_state::DatabaseStateStore;
+use crate::health_monitor::{HealthMonitor, ServiceInput};
 use crate::history::HistoryStore;
 use crate::resource_usage::ResourceCollector;
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
@@ -1988,9 +1989,16 @@ async fn logout(req: HttpRequest, auth: web::Data<DashboardAuth>) -> impl Respon
 
 fn minimum_role(req: &ServiceRequest) -> DashboardRole {
     let path = req.path();
-    if path.starts_with("/api/telegram-users") {
+    if path.starts_with("/api/telegram-users")
+        || (path.starts_with("/api/services")
+            && matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE))
+    {
         DashboardRole::Admin
-    } else if path.ends_with("/backup") || path.ends_with("/enable") || path.ends_with("/disable") {
+    } else if path.starts_with("/api/service-incidents/")
+        || path.ends_with("/backup")
+        || path.ends_with("/enable")
+        || path.ends_with("/disable")
+    {
         DashboardRole::Operator
     } else if matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE) {
         DashboardRole::Admin
@@ -2024,6 +2032,7 @@ async fn dashboard_auth(
             | "/users"
             | "/routing"
             | "/databases"
+            | "/services"
             | "/dashboard.css"
             | "/dashboard-auth.js"
             | "/healthz"
@@ -2733,6 +2742,125 @@ async fn serve_databases() -> impl Responder {
         .body(include_str!("../dashboard/databases.html"))
 }
 
+async fn serve_services() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../dashboard/services.html"))
+}
+
+async fn api_services(monitor: web::Data<Arc<HealthMonitor>>) -> impl Responder {
+    let services = monitor
+        .list()
+        .into_iter()
+        .map(|service| {
+            let runtime = monitor.runtime(&service.name);
+            serde_json::json!({"definition": service, "runtime": runtime})
+        })
+        .collect::<Vec<_>>();
+    HttpResponse::Ok().json(services)
+}
+
+async fn api_service_detail(
+    path: web::Path<String>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    match monitor.details(&path.into_inner()) {
+        Some((definition, runtime)) => HttpResponse::Ok()
+            .json(serde_json::json!({"definition": definition, "runtime": runtime})),
+        None => HttpResponse::NotFound().json(serde_json::json!({"error": "service not found"})),
+    }
+}
+
+async fn create_health_service(
+    monitor: web::Data<Arc<HealthMonitor>>,
+    payload: web::Json<ServiceInput>,
+) -> impl Responder {
+    match monitor.create(payload.into_inner()) {
+        Ok(service) => HttpResponse::Created().json(
+            serde_json::json!({"definition": service, "runtime": monitor.runtime(&service.name)}),
+        ),
+        Err(error) => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+async fn update_health_service(
+    path: web::Path<String>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+    payload: web::Json<ServiceInput>,
+) -> impl Responder {
+    match monitor.update(&path.into_inner(), payload.into_inner()) {
+        Ok(Some(service)) => HttpResponse::Ok().json(
+            serde_json::json!({"definition": service, "runtime": monitor.runtime(&service.name)}),
+        ),
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "service not found"}))
+        }
+        Err(error) => {
+            HttpResponse::BadRequest().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+async fn delete_health_service(
+    path: web::Path<String>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    match monitor.delete(&path.into_inner()) {
+        Ok(true) => HttpResponse::NoContent().finish(),
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "service not found"}))
+        }
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "service could not be deleted"})),
+    }
+}
+
+#[derive(Deserialize)]
+struct IncidentQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
+async fn api_service_incidents(
+    path: web::Path<String>,
+    query: web::Query<IncidentQuery>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    let (records, total) = monitor.incidents(
+        &path,
+        query.page.unwrap_or(1),
+        query.page_size.unwrap_or(20),
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "service": path.into_inner(), "records": records, "total_records": total,
+        "page": query.page.unwrap_or(1).max(1), "page_size": query.page_size.unwrap_or(20).clamp(1, 100)
+    }))
+}
+
+async fn acknowledge_health_incident(
+    path: web::Path<u64>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    if monitor.acknowledge(path.into_inner(), true) {
+        HttpResponse::Ok().json(serde_json::json!({"acknowledged": true}))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({"error": "incident not found"}))
+    }
+}
+
+async fn clear_health_incident(
+    path: web::Path<u64>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    if monitor.acknowledge(path.into_inner(), false) {
+        HttpResponse::Ok().json(serde_json::json!({"acknowledged": false}))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({"error": "incident not found"}))
+    }
+}
+
 /// Serve the shared dashboard surface stylesheet embedded at compile time.
 async fn serve_dashboard_styles() -> impl Responder {
     HttpResponse::Ok()
@@ -2781,6 +2909,7 @@ pub async fn start_server(
     fallback_proxy: Option<String>,
     work_dir: std::path::PathBuf,
     database_registry: Arc<DatabaseRegistry>,
+    health_monitor: Arc<HealthMonitor>,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -2799,6 +2928,7 @@ pub async fn start_server(
     let fallback_proxy_data = web::Data::new(fallback_proxy);
     let resource_data = web::Data::new(ResourceCollector::new(work_dir));
     let database_registry_data = web::Data::new(database_registry);
+    let health_monitor_data = web::Data::new(health_monitor);
 
     HttpServer::new(move || {
         App::new()
@@ -2814,6 +2944,7 @@ pub async fn start_server(
             .app_data(fallback_proxy_data.clone())
             .app_data(resource_data.clone())
             .app_data(database_registry_data.clone())
+            .app_data(health_monitor_data.clone())
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
             .route("/api/auth/logout", web::post().to(logout))
@@ -2835,6 +2966,26 @@ pub async fn start_server(
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
             .route("/api/status/resources", web::get().to(api_resource_status))
+            .route("/api/services", web::get().to(api_services))
+            .route("/api/services", web::post().to(create_health_service))
+            .route("/api/services/{name}", web::get().to(api_service_detail))
+            .route("/api/services/{name}", web::put().to(update_health_service))
+            .route(
+                "/api/services/{name}",
+                web::delete().to(delete_health_service),
+            )
+            .route(
+                "/api/services/{name}/incidents",
+                web::get().to(api_service_incidents),
+            )
+            .route(
+                "/api/service-incidents/{id}/ack",
+                web::post().to(acknowledge_health_incident),
+            )
+            .route(
+                "/api/service-incidents/{id}/clear",
+                web::post().to(clear_health_incident),
+            )
             .route(
                 "/api/status/database/{name}/{action}",
                 web::post().to(api_database_action),
@@ -2903,6 +3054,7 @@ pub async fn start_server(
             .route("/users", web::get().to(serve_users))
             .route("/routing", web::get().to(serve_routing))
             .route("/databases", web::get().to(serve_databases))
+            .route("/services", web::get().to(serve_services))
             .route("/dashboard.css", web::get().to(serve_dashboard_styles))
             .route("/dashboard-auth.js", web::get().to(serve_dashboard_auth))
             .wrap(from_fn(dashboard_auth))

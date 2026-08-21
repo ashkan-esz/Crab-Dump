@@ -214,6 +214,10 @@ button, input, select, textarea {
   border-radius: var(--dash-radius-sm);
 }
 
+button {
+  cursor: pointer;
+}
+
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
@@ -228,8 +232,28 @@ a {
   color: var(--dash-accent);
 }
 
+/* Pages that ship no local styles (routing.html, services.html) need the full
+ * skip-link treatment here: off-canvas until focused, never a stray visible
+ * link above the masthead. */
 .skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
   z-index: var(--dash-z-toast);
+  padding: 9px 12px;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-accent);
+  border-radius: var(--dash-radius-sm);
+  font-size: .74rem;
+  text-decoration: none;
+  transform: translateY(-180%);
+  transition: transform .15s ease;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
 }
 
 code,
@@ -2112,5 +2136,606 @@ td:nth-last-child(-n + 2) {
 @media (max-width: 480px) {
   #databases-main {
     width: calc(100% - 20px);
+  }
+}
+
+/* Service health workspace.
+   Namespaced `.svc-*` on purpose: index.html already owns `.service-card`,
+   `.service-summary`, and `.service-details-*` for its Telegram/dump status
+   cards, so those names cannot be reused here. Page-local state helpers are
+   scoped under #services-main / #service-dialog so services.html can stay
+   free of inline CSS without leaking geometry into the other pages. */
+.svc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dash-space-2) var(--dash-space-5);
+  margin-bottom: var(--dash-space-4);
+  padding: 12px 14px;
+  color: var(--dash-muted);
+  background: rgba(15, 23, 36, .72);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-md);
+  font-size: .76rem;
+}
+
+.svc-counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dash-space-2) var(--dash-space-4);
+}
+
+.svc-summary-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.svc-summary-item strong {
+  color: var(--dash-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  background: var(--dash-subtle);
+  border-radius: 50%;
+}
+
+.svc-dot.up {
+  background: var(--dash-success);
+  box-shadow: 0 0 0 3px var(--dash-success-soft);
+}
+
+.svc-dot.down {
+  background: var(--dash-danger);
+  box-shadow: 0 0 0 3px var(--dash-danger-soft);
+}
+
+.svc-dot.unknown {
+  background: var(--dash-warning);
+}
+
+.svc-refresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dash-space-2);
+  margin-left: auto;
+}
+
+.svc-updated {
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-refresh select {
+  width: auto;
+  min-width: 92px;
+  min-height: 32px;
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: var(--dash-radius-sm);
+  font: inherit;
+  font-size: .7rem;
+}
+
+#services-main .button.small,
+#service-dialog .button.small {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: .66rem;
+}
+
+/* Split master/detail: service rail on the left, full record on the right. */
+.svc-layout {
+  display: grid;
+  grid-template-columns: minmax(230px, .8fr) minmax(0, 1.7fr);
+  gap: var(--dash-space-4);
+  align-items: start;
+  max-width: 980px;
+}
+
+.svc-list-panel,
+.svc-detail-panel {
+  min-width: 0;
+  background: rgba(15, 23, 36, .82);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .1);
+}
+
+.svc-list-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.svc-detail-panel {
+  padding: var(--dash-space-5);
+}
+
+.svc-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dash-space-3);
+  padding: 10px 14px;
+  color: var(--dash-muted);
+  background: #172236;
+  border-bottom: 1px solid var(--dash-border-strong);
+  font-size: .66rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.svc-list {
+  max-height: min(60vh, 620px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.svc-list > li {
+  border-bottom: 1px solid rgba(41, 56, 79, .7);
+}
+
+.svc-list > li:last-child {
+  border-bottom: 0;
+}
+
+.svc-row {
+  display: flex;
+  align-items: center;
+  gap: var(--dash-space-3);
+  width: 100%;
+  min-height: 46px;
+  padding: 9px 14px;
+  color: var(--dash-text);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: .74rem;
+  text-align: left;
+  transition: background-color .15s ease, box-shadow .15s ease;
+}
+
+.svc-row:hover {
+  background: rgba(26, 38, 56, .62);
+}
+
+.svc-row[aria-current="true"] {
+  background: var(--dash-surface-hover);
+  box-shadow: inset 2px 0 0 var(--dash-accent);
+}
+
+.svc-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.svc-row[aria-current="true"] .svc-row-name {
+  color: var(--dash-accent);
+}
+
+.svc-row-latency {
+  flex: 0 0 auto;
+  color: var(--dash-muted);
+  font-size: .68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-row-off {
+  flex: 0 0 auto;
+  color: var(--dash-subtle);
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* Detail panel */
+.svc-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--dash-space-4);
+}
+
+.svc-detail-head h2 {
+  margin: 0;
+  color: var(--dash-text);
+  font-size: 1rem;
+  letter-spacing: -.015em;
+  overflow-wrap: anywhere;
+}
+
+.svc-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.svc-status-unknown {
+  color: var(--dash-warning);
+  background: var(--dash-warning-soft);
+  border-color: rgba(246, 200, 95, .34);
+}
+
+.svc-detail-url {
+  margin: 7px 0 0;
+  color: var(--dash-muted);
+  font-size: .72rem;
+  overflow-wrap: anywhere;
+}
+
+.svc-vitals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dash-space-4) var(--dash-space-5);
+  margin-top: var(--dash-space-4);
+  padding: var(--dash-space-4);
+  background: rgba(11, 19, 32, .6);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-sm);
+}
+
+.svc-vital,
+.svc-fact {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.svc-vital > span,
+.svc-fact > span {
+  color: var(--dash-muted);
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.svc-vital > strong {
+  color: var(--dash-text);
+  font-size: .95rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-fact > strong {
+  color: var(--dash-text);
+  font-size: .74rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* Latency trend: client-side samples, so it is decorative, not a data source. */
+.svc-spark {
+  flex: 1 1 150px;
+  min-width: 120px;
+}
+
+.svc-spark svg {
+  display: block;
+  width: 100%;
+  height: 36px;
+}
+
+.svc-spark polyline {
+  fill: none;
+  stroke: var(--dash-accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.svc-spark-empty {
+  color: var(--dash-subtle);
+  font-size: .66rem;
+}
+
+.svc-reason {
+  margin: var(--dash-space-4) 0 0;
+  padding: 10px 12px;
+  color: var(--dash-danger);
+  background: var(--dash-danger-soft);
+  border: 1px solid rgba(255, 125, 134, .34);
+  border-radius: var(--dash-radius-sm);
+  font-size: .72rem;
+  overflow-wrap: anywhere;
+}
+
+.svc-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--dash-space-4);
+  margin-top: var(--dash-space-5);
+}
+
+.svc-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dash-space-2);
+  margin-top: var(--dash-space-5);
+  padding-top: var(--dash-space-4);
+  border-top: 1px solid var(--dash-border);
+}
+
+/* Incident history lives inside the detail panel, so the shared 720px table
+   floor has to be released for this one table. */
+.svc-incidents {
+  margin-top: var(--dash-space-5);
+  padding-top: var(--dash-space-4);
+  border-top: 1px solid var(--dash-border);
+}
+
+.svc-incidents-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dash-space-3);
+  margin-bottom: var(--dash-space-3);
+}
+
+.svc-incidents-head h3 {
+  margin: 0;
+  color: var(--dash-text);
+  font-size: .84rem;
+}
+
+.svc-incident-table {
+  overflow: hidden;
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-sm);
+}
+
+.svc-incident-table .table-scroll {
+  max-height: min(42vh, 400px);
+}
+
+.svc-incident-table table {
+  min-width: 0;
+}
+
+.svc-incident-table thead th {
+  padding: 8px 10px;
+  font-size: .6rem;
+}
+
+.svc-incident-table tbody td {
+  height: auto;
+  padding: 8px 10px;
+  font-size: .64rem;
+}
+
+.svc-incident-table .actions {
+  min-width: 0;
+}
+
+.svc-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dash-space-3);
+  margin-top: var(--dash-space-3);
+  color: var(--dash-muted);
+  font-size: .68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-pager-buttons {
+  display: flex;
+  gap: var(--dash-space-2);
+}
+
+/* Region states */
+#services-main .notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dash-space-3);
+  margin: 0 0 var(--dash-space-4);
+  padding: 11px 13px;
+  font-size: .74rem;
+}
+
+#services-main .notice[hidden] {
+  display: none;
+}
+
+#services-main .empty-state,
+#services-main .error-state {
+  display: grid;
+  gap: var(--dash-space-2);
+  justify-items: center;
+  padding: var(--dash-space-7) var(--dash-space-5);
+  font-size: .76rem;
+  text-align: center;
+}
+
+#services-main .empty-state strong,
+#services-main .error-state strong {
+  color: var(--dash-text);
+  font-size: .88rem;
+}
+
+.svc-list-state {
+  padding: var(--dash-space-5) var(--dash-space-4);
+  color: var(--dash-muted);
+  font-size: .74rem;
+}
+
+.svc-skeleton-row {
+  display: grid;
+  gap: 8px;
+  padding: 13px 14px;
+}
+
+.svc-skeleton-row .skeleton-line {
+  height: 11px;
+  border-radius: 5px;
+}
+
+.svc-skeleton-row .skeleton-line.short {
+  width: 45%;
+}
+
+/* Service editor */
+#service-dialog {
+  width: min(560px, calc(100vw - 32px));
+  padding: var(--dash-space-5);
+  color: var(--dash-text);
+}
+
+#service-dialog::backdrop {
+  background: rgba(3, 7, 13, .72);
+  backdrop-filter: blur(3px);
+}
+
+#service-dialog h2 {
+  margin: 0;
+  color: var(--dash-text);
+  font-size: 1.05rem;
+  letter-spacing: -.015em;
+}
+
+.svc-form {
+  display: grid;
+  gap: var(--dash-space-4);
+  margin: 0;
+}
+
+.svc-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--dash-space-4);
+}
+
+.svc-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+}
+
+.svc-field > span {
+  color: var(--dash-muted);
+  font-size: .7rem;
+  font-weight: 650;
+}
+
+.svc-field > .svc-hint {
+  color: var(--dash-subtle);
+  font-size: .64rem;
+  font-weight: 400;
+}
+
+.svc-field input {
+  width: 100%;
+  min-height: 38px;
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: var(--dash-radius-sm);
+  font: inherit;
+  font-size: .76rem;
+}
+
+.svc-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  background: #0b1320;
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-sm);
+}
+
+.svc-check input {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 1px 0 0;
+  accent-color: var(--dash-accent);
+}
+
+.svc-check > div {
+  display: grid;
+  gap: 2px;
+  color: var(--dash-text);
+  font-size: .74rem;
+  font-weight: 650;
+}
+
+.svc-check .svc-hint {
+  color: var(--dash-muted);
+  font-size: .64rem;
+  font-weight: 400;
+}
+
+#service-dialog .form-summary {
+  padding: 10px 12px;
+  font-size: .72rem;
+}
+
+#service-dialog .form-summary[hidden] {
+  display: none;
+}
+
+.svc-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--dash-space-2);
+  padding-top: var(--dash-space-4);
+  border-top: 1px solid var(--dash-border);
+}
+
+@media (max-width: 960px) {
+  .svc-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .svc-list {
+    max-height: 260px;
+  }
+}
+
+@media (max-width: 700px) {
+  .svc-refresh {
+    margin-left: 0;
+  }
+
+  .svc-detail-panel {
+    padding: var(--dash-space-4);
+  }
+
+  .svc-detail-head {
+    flex-direction: column;
+  }
+
+  .svc-detail-badges {
+    justify-content: flex-start;
+  }
+
+  .svc-detail-actions .button,
+  .svc-form-grid {
+    flex: 1 1 100%;
   }
 }
