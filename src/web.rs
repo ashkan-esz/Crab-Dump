@@ -1990,6 +1990,7 @@ async fn logout(req: HttpRequest, auth: web::Data<DashboardAuth>) -> impl Respon
 fn minimum_role(req: &ServiceRequest) -> DashboardRole {
     let path = req.path();
     if path.starts_with("/api/telegram-users")
+        || (path.starts_with("/api/services/") && path.ends_with("/check"))
         || (path.starts_with("/api/services")
             && matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE))
     {
@@ -2771,6 +2772,33 @@ async fn api_service_detail(
     }
 }
 
+async fn check_health_service(
+    path: web::Path<String>,
+    monitor: web::Data<Arc<HealthMonitor>>,
+) -> impl Responder {
+    let name = path.into_inner();
+    match web::block({
+        let monitor = monitor.clone();
+        let name = name.clone();
+        move || monitor.check_now(&name)
+    })
+    .await
+    {
+        Ok(Ok(Some((definition, runtime)))) => HttpResponse::Ok()
+            .json(serde_json::json!({"definition": definition, "runtime": runtime})),
+        Ok(Ok(None)) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "service not found"}))
+        }
+        Ok(Err(error)) if error.to_string() == "service check already in progress" => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}))
+        }
+        Ok(Err(error)) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("service check failed: {error}")})),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("service check failed: {error}")})),
+    }
+}
+
 async fn create_health_service(
     monitor: web::Data<Arc<HealthMonitor>>,
     payload: web::Json<ServiceInput>,
@@ -2969,6 +2997,10 @@ pub async fn start_server(
             .route("/api/services", web::get().to(api_services))
             .route("/api/services", web::post().to(create_health_service))
             .route("/api/services/{name}", web::get().to(api_service_detail))
+            .route(
+                "/api/services/{name}/check",
+                web::post().to(check_health_service),
+            )
             .route("/api/services/{name}", web::put().to(update_health_service))
             .route(
                 "/api/services/{name}",

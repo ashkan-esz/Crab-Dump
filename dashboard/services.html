@@ -145,6 +145,7 @@
   let refreshTimer = null;
   let latency = new Map();
   let incidentState = { name: null, page: 1, data: null, error: null, loading: false };
+  let manualCheckState = { name: null, loading: false, error: null };
   let directory = [];
   let directoryState = { loading: false, error: null, loaded: false };
   let recipientPicks = new Set();
@@ -207,7 +208,7 @@
     const notice = $('svc-permission');
     notice.hidden = canAdmin();
     $('svc-permission-text').textContent = dashboardRole === 'operator'
-      ? 'Operator access can acknowledge incidents, but adding, editing, and deleting services requires an administrator.'
+      ? 'Operator access can acknowledge incidents and run checks, but adding, editing, and deleting services requires an administrator.'
       : 'Viewer access is read-only. Ask an administrator to manage monitored services.';
     $('add-service').hidden = !canAdmin();
   }
@@ -311,18 +312,23 @@
         <div class="svc-fact"><span>Last check</span><strong>${stampCell(r.last_check)}</strong></div>
         <div class="svc-fact"><span>Last success</span><strong>${stampCell(r.last_success)}</strong></div>
         <div class="svc-fact"><span>Last failure</span><strong>${stampCell(r.last_failure)}</strong></div>
+        <div class="svc-fact"><span>Last response error</span><strong>${r.last_error ? `${esc(r.last_error)}<br><span class="svc-row-latency">${r.last_status_code == null ? 'No HTTP response' : `HTTP ${r.last_status_code}`} · ${r.latency_ms == null ? '-' : `${r.latency_ms} ms`} · ${stampCell(r.last_failure)}</span>` : '-'}</strong></div>
         <div class="svc-fact"><span>Interval</span><strong>every ${d.interval_secs}s</strong></div>
         <div class="svc-fact"><span>Expected status</span><strong>${d.expected_status}</strong></div>
         <div class="svc-fact"><span>Extra retries</span><strong>${d.retries}</strong></div>
         <div class="svc-fact"><span>Version header</span><strong>${esc(d.version_header)}</strong></div>
         <div class="svc-fact"><span>Alert recipients</span><strong>${d.recipients.length ? esc(d.recipients.map(recipientLabel).join(', ')) : 'none'}</strong></div>
       </div>
-      ${canAdmin() ? `<div class="svc-detail-actions"><button class="button" type="button" id="edit-service">Edit service</button><button class="button danger" type="button" id="delete-service">Delete service</button></div>` : ''}
+      ${manualCheckState.name === d.name && manualCheckState.error ? `<div class="error-state svc-check-error" role="alert"><strong>Check failed</strong><span>${esc(manualCheckState.error)}</span></div>` : ''}
+      ${canOperate() || canAdmin() ? `<div class="svc-detail-actions">${canOperate() ? `<button class="button primary" type="button" id="check-service" ${manualCheckState.loading ? 'disabled' : ''}>${manualCheckState.loading ? 'Checking...' : 'Check now'}</button>` : ''}${canAdmin() ? '<button class="button" type="button" id="edit-service">Edit service</button><button class="button danger" type="button" id="delete-service">Delete service</button>' : ''}</div>` : ''}
       <section class="svc-incidents" aria-label="Incident history">
         <div class="svc-incidents-head"><h3>Incident history</h3><span class="svc-updated" id="incident-count"></span></div>
         <div id="incident-body"></div>
       </section>`;
 
+    if (canOperate()) {
+      $('check-service').onclick = () => checkService(d.name);
+    }
     if (canAdmin()) {
       $('edit-service').onclick = () => openEditor(d.name);
       $('delete-service').onclick = () => deleteService(d.name);
@@ -428,6 +434,25 @@
     renderList();
     renderDetail();
     loadIncidents(name, 1);
+  }
+
+  async function checkService(name) {
+    if (!canOperate() || manualCheckState.loading) return;
+    manualCheckState = { name, loading: true, error: null };
+    renderDetail();
+    try {
+      await call(`/api/services/${encodeURIComponent(name)}/check`, { method: 'POST' });
+      await refresh();
+      await loadIncidents(name, 1);
+    } catch (error) {
+      manualCheckState = { name, loading: false, error: error.message };
+      renderDetail();
+    } finally {
+      if (manualCheckState.name === name) {
+        manualCheckState.loading = false;
+        renderDetail();
+      }
+    }
   }
 
   function noticeError(text) {

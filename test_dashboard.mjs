@@ -16,6 +16,7 @@ const pageHtml = Object.fromEntries(dashboardPages.map(file => [
     readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8'),
 ]));
 const authJs = readFileSync(new URL(`${dashboardDir}dashboard-auth.js`, import.meta.url), 'utf8');
+const servicesPage = pageHtml['services.html'];
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 const noop = () => {};
@@ -178,6 +179,17 @@ assert.match(body, /CANCELLED/);
 assert.match(body, /cancelDatabase\(db\.name\)/);
 assert.match(body, /container scope/);
 assert.match(html, /WORK_DIR disk/);
+
+assert.match(servicesPage, /Check now/);
+assert.match(servicesPage, /Checking\.\.\./);
+assert.match(servicesPage, /Last response error/);
+assert.match(servicesPage, /last_error/);
+assert.match(servicesPage, /No HTTP response/);
+assert.match(servicesPage, /last_status_code/);
+assert.match(servicesPage, /latency_ms/);
+assert.match(servicesPage, /api\/services\/\$\{encodeURIComponent\(name\)\}\/check/);
+assert.match(servicesPage, /canOperate\(\)/);
+assert.match(servicesPage, /Check failed/);
 
 assert.deepEqual(STAGES, ['dump', 'compression', 'encryption', 'upload']);
 

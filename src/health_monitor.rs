@@ -5,6 +5,7 @@ use chrono::Utc;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,6 +59,8 @@ pub struct ServiceRuntime {
     pub last_reason: Option<String>,
     pub last_status_code: Option<u16>,
     pub latency_ms: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +101,12 @@ struct IncidentsFile {
     incidents: Vec<Incident>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct RuntimeFile {
+    #[serde(default)]
+    runtimes: HashMap<String, ServiceRuntime>,
+}
+
 struct EventData {
     reason: Option<String>,
     status_code: Option<u16>,
@@ -109,9 +118,11 @@ struct EventData {
 struct Store {
     definitions_path: PathBuf,
     incidents_path: PathBuf,
+    runtime_path: PathBuf,
     definitions: Mutex<Vec<ServiceDefinition>>,
     incidents: Mutex<Vec<Incident>>,
     runtime: Mutex<HashMap<String, ServiceRuntime>>,
+    checking: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug)]
@@ -139,16 +150,27 @@ impl HealthMonitor {
         })?;
         let definitions_path = data_dir.join("health-services.json");
         let incidents_path = data_dir.join("health-incidents.json");
+        let runtime_path = data_dir.join("health-runtime.json");
         let definitions = read_json::<DefinitionsFile>(&definitions_path)?.services;
         validate_definitions(&definitions)?;
         let incidents = read_json::<IncidentsFile>(&incidents_path)?.incidents;
+        let persisted_runtime: HashMap<String, ServiceRuntime> =
+            read_json::<RuntimeFile>(&runtime_path)?
+                .runtimes
+                .into_iter()
+                .filter(|(name, _)| definitions.iter().any(|service| service.name == *name))
+                .collect();
+        let mut runtime = runtime_from_incidents(&definitions, &incidents);
+        runtime.extend(persisted_runtime);
         Ok(Arc::new(Self {
             store: Arc::new(Store {
                 definitions_path,
                 incidents_path,
+                runtime_path,
                 definitions: Mutex::new(definitions),
                 incidents: Mutex::new(incidents),
-                runtime: Mutex::new(HashMap::new()),
+                runtime: Mutex::new(runtime),
+                checking: Mutex::new(HashSet::new()),
             }),
             client,
             bot_token,
@@ -193,7 +215,19 @@ impl HealthMonitor {
                 last_reason: None,
                 last_status_code: None,
                 latency_ms: None,
+                last_error: None,
             })
+    }
+
+    pub fn check_now(&self, name: &str) -> Result<Option<(ServiceDefinition, ServiceRuntime)>> {
+        let Some(service) = self.get(name) else {
+            return Ok(None);
+        };
+        if !self.begin_check(&service.name) {
+            anyhow::bail!("service check already in progress");
+        }
+        self.check(&service);
+        Ok(self.details(name))
     }
 
     pub fn details(&self, name: &str) -> Option<(ServiceDefinition, ServiceRuntime)> {
@@ -352,7 +386,9 @@ impl HealthMonitor {
                 .filter(|service| service.enabled)
                 .collect::<Vec<_>>();
             for service in definitions {
-                if self.should_check(&service.name, service.interval_secs) {
+                if self.should_check(&service.name, service.interval_secs)
+                    && self.begin_check(&service.name)
+                {
                     self.check(&service);
                 }
             }
@@ -412,13 +448,20 @@ impl HealthMonitor {
                         result = Ok(());
                         break;
                     }
-                    result = Err(format!("unexpected HTTP status {code}"));
+                    result = Err(format!(
+                        "unexpected HTTP status {code}; expected HTTP {} ({} attempts)",
+                        service.expected_status,
+                        service.retries.saturating_add(1)
+                    ));
                 }
                 Err(error) => {
+                    let attempts = service.retries.saturating_add(1);
                     result = Err(if error.is_timeout() {
-                        "request timed out".into()
+                        format!("request timed out ({attempts} attempts)")
+                    } else if error.is_connect() {
+                        format!("network request failed (connection error; {attempts} attempts)")
                     } else {
-                        "network request failed".into()
+                        format!("network request failed (transport error; {attempts} attempts)")
                     })
                 }
             }
@@ -427,6 +470,23 @@ impl HealthMonitor {
             }
         }
         self.record_check(service, result, status_code, version, started.elapsed());
+        self.end_check(&service.name);
+    }
+
+    fn begin_check(&self, name: &str) -> bool {
+        self.store
+            .checking
+            .lock()
+            .expect("health checking lock poisoned")
+            .insert(name.to_string())
+    }
+
+    fn end_check(&self, name: &str) {
+        self.store
+            .checking
+            .lock()
+            .expect("health checking lock poisoned")
+            .remove(name);
     }
 
     fn record_check(
@@ -457,6 +517,7 @@ impl HealthMonitor {
                 last_reason: None,
                 last_status_code: None,
                 latency_ms: None,
+                last_error: None,
             });
         let previous = entry.status;
         entry.last_check = Some(now.clone());
@@ -488,6 +549,7 @@ impl HealthMonitor {
                 entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
                 entry.last_failure = Some(now.clone());
                 entry.last_reason = Some(reason.clone());
+                entry.last_error = Some(reason.clone());
                 if entry.consecutive_failures >= service.failure_threshold {
                     entry.status = ServiceStatus::Down;
                     entry.current_version = None;
@@ -506,6 +568,14 @@ impl HealthMonitor {
                     }
                 }
             }
+        }
+        if let Err(error) = persist_json(
+            &self.store.runtime_path,
+            &RuntimeFile {
+                runtimes: runtime_map.clone(),
+            },
+        ) {
+            tracing::warn!(error = %error, "health runtime persistence failed");
         }
     }
 
@@ -611,6 +681,55 @@ fn validate_definitions(definitions: &[ServiceDefinition]) -> Result<()> {
     Ok(())
 }
 
+fn runtime_from_incidents(
+    definitions: &[ServiceDefinition],
+    incidents: &[Incident],
+) -> HashMap<String, ServiceRuntime> {
+    definitions
+        .iter()
+        .filter_map(|service| {
+            let incident = incidents.iter().rev().find(|incident| {
+                incident.service == service.name
+                    && matches!(incident.event.as_str(), "outage" | "recovery")
+            })?;
+            let last_error = incidents
+                .iter()
+                .rev()
+                .find(|incident| incident.service == service.name && incident.event == "outage");
+            Some((
+                service.name.clone(),
+                runtime_from_incident(incident, last_error),
+            ))
+        })
+        .collect()
+}
+
+fn runtime_from_incident(incident: &Incident, last_error: Option<&Incident>) -> ServiceRuntime {
+    let is_outage = incident.event == "outage";
+    ServiceRuntime {
+        name: incident.service.clone(),
+        status: if is_outage {
+            ServiceStatus::Down
+        } else {
+            ServiceStatus::Up
+        },
+        consecutive_failures: incident.consecutive_failures,
+        last_check: Some(incident.timestamp.clone()),
+        last_success: (!is_outage).then(|| incident.timestamp.clone()),
+        last_failure: is_outage.then(|| incident.timestamp.clone()),
+        current_version: (!is_outage).then(|| incident.version.clone()).flatten(),
+        last_observed_version: incident.version.clone(),
+        last_reason: if is_outage {
+            incident.reason.clone()
+        } else {
+            None
+        },
+        last_status_code: incident.status_code,
+        latency_ms: None,
+        last_error: last_error.and_then(|incident| incident.reason.clone()),
+    }
+}
+
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
     match fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content)
@@ -647,6 +766,8 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::{Arc, RwLock};
 
     fn input(name: &str) -> ServiceInput {
         ServiceInput {
@@ -662,6 +783,81 @@ mod tests {
         }
     }
 
+    fn test_service(name: &str) -> ServiceDefinition {
+        let mut service = make_definition(input(name), None).unwrap();
+        service.failure_threshold = 1;
+        service
+    }
+
+    fn test_monitor(
+        service: &ServiceDefinition,
+        incidents: &[Incident],
+    ) -> (Arc<HealthMonitor>, std::path::PathBuf) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "crab-dump-health-monitor-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&data_dir).unwrap();
+        persist_json(
+            &data_dir.join("health-services.json"),
+            &DefinitionsFile {
+                services: vec![service.clone()],
+            },
+        )
+        .unwrap();
+        persist_json(
+            &data_dir.join("health-incidents.json"),
+            &IncidentsFile {
+                incidents: incidents.to_vec(),
+            },
+        )
+        .unwrap();
+        let users =
+            Arc::new(TelegramUserStore::load(data_dir.join("telegram-users.toml")).unwrap());
+        let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
+        (
+            HealthMonitor::load(data_dir.clone(), client, "test-token".into(), users).unwrap(),
+            data_dir,
+        )
+    }
+
+    fn incident(event: &str, service: &str) -> Incident {
+        Incident {
+            id: 1,
+            service: service.into(),
+            event: event.into(),
+            timestamp: "2026-08-21T00:00:00+00:00".into(),
+            reason: Some("connection refused".into()),
+            status_code: Some(503),
+            version: Some("v1".into()),
+            consecutive_failures: 2,
+            acknowledged: false,
+        }
+    }
+
+    fn record_failure(monitor: &HealthMonitor, service: &ServiceDefinition) {
+        monitor.record_check(
+            service,
+            Err("connection refused".into()),
+            Some(503),
+            Some("v1".into()),
+            Duration::from_millis(1),
+        );
+    }
+
+    fn record_success(monitor: &HealthMonitor, service: &ServiceDefinition) {
+        monitor.record_check(
+            service,
+            Ok(()),
+            Some(200),
+            Some("v2".into()),
+            Duration::from_millis(1),
+        );
+    }
+
     #[test]
     fn defaults_and_duplicate_names() {
         let definition = make_definition(input("api"), None).unwrap();
@@ -670,5 +866,115 @@ mod tests {
         assert_eq!(definition.failure_threshold, 3);
         assert_eq!(definition.version_header, "X-Version");
         assert!(validate_definitions(&[definition.clone(), definition]).is_err());
+    }
+
+    #[test]
+    fn outage_and_recovery_events_are_emitted_once_per_transition() {
+        let service = test_service("api");
+        let (monitor, data_dir) = test_monitor(&service, &[]);
+
+        record_failure(&monitor, &service);
+        record_failure(&monitor, &service);
+        let (incidents, _) = monitor.incidents("api", 1, 100);
+        assert_eq!(
+            incidents
+                .iter()
+                .filter(|incident| incident.event == "outage")
+                .count(),
+            1
+        );
+
+        record_success(&monitor, &service);
+        record_success(&monitor, &service);
+        let (incidents, _) = monitor.incidents("api", 1, 100);
+        assert_eq!(
+            incidents
+                .iter()
+                .filter(|incident| incident.event == "recovery")
+                .count(),
+            1
+        );
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn loading_outage_state_suppresses_outage_and_recovers_on_success() {
+        let service = test_service("api");
+        let outage = incident("outage", "api");
+        let (monitor, data_dir) = test_monitor(&service, std::slice::from_ref(&outage));
+
+        let runtime = monitor.runtime("api");
+        assert_eq!(runtime.status, ServiceStatus::Down);
+        assert_eq!(runtime.consecutive_failures, outage.consecutive_failures);
+        assert_eq!(runtime.last_reason, outage.reason);
+        assert_eq!(runtime.last_status_code, outage.status_code);
+        assert_eq!(runtime.last_observed_version, outage.version);
+
+        record_failure(&monitor, &service);
+        let (incidents, _) = monitor.incidents("api", 1, 100);
+        assert_eq!(incidents.len(), 1);
+
+        record_success(&monitor, &service);
+        let (incidents, _) = monitor.incidents("api", 1, 100);
+        assert_eq!(
+            incidents
+                .iter()
+                .filter(|incident| incident.event == "recovery")
+                .count(),
+            1
+        );
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn loading_recovery_state_starts_service_up() {
+        let service = test_service("api");
+        let mut recovery = incident("recovery", "api");
+        recovery.reason = None;
+        recovery.status_code = Some(200);
+        recovery.version = Some("v2".into());
+        recovery.consecutive_failures = 0;
+        let (monitor, data_dir) = test_monitor(&service, &[recovery]);
+
+        let runtime = monitor.runtime("api");
+        assert_eq!(runtime.status, ServiceStatus::Up);
+        assert_eq!(runtime.consecutive_failures, 0);
+        assert_eq!(runtime.current_version.as_deref(), Some("v2"));
+        assert_eq!(
+            runtime.last_success.as_deref(),
+            Some("2026-08-21T00:00:00+00:00")
+        );
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn last_error_survives_recovery_and_restart() {
+        let service = test_service("api");
+        let (monitor, data_dir) = test_monitor(&service, &[]);
+
+        record_failure(&monitor, &service);
+        let failed = monitor.runtime("api");
+        assert_eq!(failed.last_error.as_deref(), Some("connection refused"));
+        assert_eq!(failed.last_failure.as_deref(), failed.last_check.as_deref());
+
+        record_success(&monitor, &service);
+        let recovered = monitor.runtime("api");
+        assert_eq!(recovered.status, ServiceStatus::Up);
+        assert_eq!(recovered.last_error.as_deref(), Some("connection refused"));
+
+        let users =
+            Arc::new(TelegramUserStore::load(data_dir.join("telegram-users-reload.toml")).unwrap());
+        let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
+        let reloaded =
+            HealthMonitor::load(data_dir.clone(), client, "test-token".into(), users).unwrap();
+        assert_eq!(
+            reloaded.runtime("api").last_error.as_deref(),
+            Some("connection refused")
+        );
+
+        fs::remove_dir_all(data_dir).unwrap();
     }
 }
