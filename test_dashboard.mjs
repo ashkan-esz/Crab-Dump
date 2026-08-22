@@ -621,6 +621,7 @@ assert.match(servicesHtml, /<main id="services-main" class="page">/);
 assert.match(servicesHtml, /<header class="page-header">[\s\S]*class="eyebrow"[\s\S]*<h1>Services<\/h1>[\s\S]*class="lede"/);
 assert.match(servicesHtml, /class="svc-layout"/);
 assert.match(servicesHtml, /id="svc-list" aria-label="Monitored services" aria-busy="true"/);
+assert.match(servicesHtml, /svc-list-head[\s\S]*>Version<\/span>/);
 assert.match(servicesHtml, /id="svc-detail"/);
 assert.doesNotMatch(servicesHtml, /id="service-grid"/, 'the flat card grid is retired');
 
@@ -649,6 +650,8 @@ assert.match(servicesBody, /last_status_code/);
 assert.match(servicesBody, /last_success/);
 assert.match(servicesBody, /last_failure/);
 assert.match(servicesBody, /last_observed_version/);
+assert.match(servicesBody, /last_up_version/);
+assert.match(servicesBody, /incident\.last_up_version \|\| incident\.version/);
 assert.match(servicesBody, /d\.recipients/);
 assert.match(servicesBody, /definition\.enabled/);
 assert.match(servicesBody, /NOT POLLED/);

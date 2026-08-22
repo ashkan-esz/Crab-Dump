@@ -2323,6 +2323,16 @@ td:nth-last-child(-n + 2) {
   text-overflow: ellipsis;
 }
 
+.svc-row-version {
+  flex: 0 1 7rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dash-muted);
+  font-size: .68rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .svc-row[aria-current="true"] .svc-row-name {
   color: var(--dash-accent);
 }

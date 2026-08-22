@@ -58,6 +58,8 @@ pub struct ServiceRuntime {
     pub last_failure: Option<String>,
     pub current_version: Option<String>,
     pub last_observed_version: Option<String>,
+    #[serde(default)]
+    pub last_up_version: Option<String>,
     pub last_reason: Option<String>,
     pub last_status_code: Option<u16>,
     pub latency_ms: Option<u64>,
@@ -74,6 +76,8 @@ pub struct Incident {
     pub reason: Option<String>,
     pub status_code: Option<u16>,
     pub version: Option<String>,
+    #[serde(default)]
+    pub last_up_version: Option<String>,
     pub consecutive_failures: u32,
     pub acknowledged: bool,
 }
@@ -115,6 +119,7 @@ struct EventData {
     reason: Option<String>,
     status_code: Option<u16>,
     version: Option<String>,
+    last_up_version: Option<String>,
     failures: u32,
 }
 
@@ -219,6 +224,7 @@ impl HealthMonitor {
                 last_failure: None,
                 current_version: None,
                 last_observed_version: None,
+                last_up_version: None,
                 last_reason: None,
                 last_status_code: None,
                 latency_ms: None,
@@ -528,6 +534,7 @@ impl HealthMonitor {
                 last_failure: None,
                 current_version: None,
                 last_observed_version: None,
+                last_up_version: None,
                 last_reason: None,
                 last_status_code: None,
                 latency_ms: None,
@@ -544,6 +551,9 @@ impl HealthMonitor {
                 entry.last_success = Some(now.clone());
                 entry.last_reason = None;
                 entry.current_version = version;
+                if entry.current_version.is_some() {
+                    entry.last_up_version = entry.current_version.clone();
+                }
                 entry.status = ServiceStatus::Up;
                 if previous == ServiceStatus::Down {
                     self.event(
@@ -554,6 +564,7 @@ impl HealthMonitor {
                             reason: None,
                             status_code,
                             version: entry.current_version.clone(),
+                            last_up_version: entry.last_up_version.clone(),
                             failures: 0,
                         },
                     );
@@ -576,6 +587,7 @@ impl HealthMonitor {
                                 reason: Some(reason),
                                 status_code,
                                 version,
+                                last_up_version: entry.last_up_version.clone(),
                                 failures: entry.consecutive_failures,
                             },
                         );
@@ -613,6 +625,7 @@ impl HealthMonitor {
             reason: data.reason,
             status_code: data.status_code,
             version: data.version,
+            last_up_version: data.last_up_version,
             consecutive_failures: data.failures,
             acknowledged: false,
         });
@@ -734,6 +747,10 @@ fn runtime_from_incident(incident: &Incident, last_error: Option<&Incident>) -> 
         last_failure: is_outage.then(|| incident.timestamp.clone()),
         current_version: (!is_outage).then(|| incident.version.clone()).flatten(),
         last_observed_version: incident.version.clone(),
+        last_up_version: incident
+            .last_up_version
+            .clone()
+            .or_else(|| incident.version.clone()),
         last_reason: if is_outage {
             incident.reason.clone()
         } else {
@@ -856,6 +873,7 @@ mod tests {
             reason: Some("connection refused".into()),
             status_code: Some(503),
             version: Some("v1".into()),
+            last_up_version: None,
             consecutive_failures: 2,
             acknowledged: false,
         }
@@ -991,6 +1009,10 @@ mod tests {
         assert_eq!(runtime.last_reason, outage.reason);
         assert_eq!(runtime.last_status_code, outage.status_code);
         assert_eq!(runtime.last_observed_version, outage.version);
+        assert_eq!(
+            runtime.last_up_version,
+            outage.last_up_version.or(outage.version)
+        );
 
         record_failure(&monitor, &service);
         let (incidents, _) = monitor.incidents("api", 1, 100);
@@ -1023,6 +1045,7 @@ mod tests {
         assert_eq!(runtime.status, ServiceStatus::Up);
         assert_eq!(runtime.consecutive_failures, 0);
         assert_eq!(runtime.current_version.as_deref(), Some("v2"));
+        assert_eq!(runtime.last_up_version.as_deref(), Some("v2"));
         assert_eq!(
             runtime.last_success.as_deref(),
             Some("2026-08-21T00:00:00+00:00")
@@ -1062,6 +1085,91 @@ mod tests {
             Some("connection refused")
         );
 
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn last_up_version_survives_outage_and_failed_version_changes() {
+        let service = test_service("api");
+        let (monitor, data_dir) = test_monitor(&service, &[]);
+
+        record_success(&monitor, &service);
+        record_failure(&monitor, &service);
+
+        let runtime = monitor.runtime("api");
+        assert_eq!(runtime.status, ServiceStatus::Down);
+        assert_eq!(runtime.current_version, None);
+        assert_eq!(runtime.last_up_version.as_deref(), Some("v2"));
+        assert_eq!(runtime.last_observed_version.as_deref(), Some("v1"));
+
+        let (incidents, _) = monitor.incidents("api", 1, 100);
+        let outage = incidents
+            .iter()
+            .find(|incident| incident.event == "outage")
+            .expect("outage incident");
+        assert_eq!(outage.version.as_deref(), Some("v1"));
+        assert_eq!(outage.last_up_version.as_deref(), Some("v2"));
+
+        let users =
+            Arc::new(TelegramUserStore::load(data_dir.join("telegram-users-reload.toml")).unwrap());
+        let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
+        let reloaded = HealthMonitor::load(
+            data_dir.clone(),
+            client,
+            Arc::new(reqwest::blocking::Client::new()),
+            "test-token".into(),
+            users,
+        )
+        .unwrap();
+        assert_eq!(
+            reloaded.runtime("api").last_up_version.as_deref(),
+            Some("v2")
+        );
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_runtime_and_incident_json_load_without_last_up_version() {
+        let service = test_service("api");
+        let data_dir = std::env::temp_dir().join(format!(
+            "crab-dump-health-monitor-legacy-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&data_dir).unwrap();
+        persist_json(
+            &data_dir.join("health-services.json"),
+            &DefinitionsFile {
+                services: vec![service.clone()],
+            },
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("health-incidents.json"),
+            r#"{"incidents":[{"id":1,"service":"api","event":"outage","timestamp":"2026-08-21T00:00:00+00:00","reason":"down","status_code":503,"version":"v1","consecutive_failures":1,"acknowledged":false}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("health-runtime.json"),
+            r#"{"runtimes":{"api":{"name":"api","status":"down","consecutive_failures":1,"last_check":"2026-08-21T00:00:00+00:00","last_success":null,"last_failure":"2026-08-21T00:00:00+00:00","current_version":null,"last_observed_version":"v1","last_reason":"down","last_status_code":503,"latency_ms":1,"last_error":null}}}"#,
+        )
+        .unwrap();
+        let users =
+            Arc::new(TelegramUserStore::load(data_dir.join("telegram-users.toml")).unwrap());
+        let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
+        let monitor = HealthMonitor::load(
+            data_dir.clone(),
+            client,
+            Arc::new(reqwest::blocking::Client::new()),
+            "test-token".into(),
+            users,
+        )
+        .unwrap();
+        assert_eq!(monitor.runtime("api").last_up_version, None);
+        assert_eq!(monitor.incidents("api", 1, 100).0[0].last_up_version, None);
         fs::remove_dir_all(data_dir).unwrap();
     }
 }

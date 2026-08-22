@@ -68,7 +68,7 @@
 
     <div class="svc-layout">
       <section class="svc-list-panel" aria-labelledby="svc-list-title">
-        <div class="svc-list-head"><span id="svc-list-title">Service</span><span>Latency</span></div>
+        <div class="svc-list-head"><span id="svc-list-title">Service</span><span>Version</span><span>Latency</span></div>
         <ul class="svc-list" id="svc-list" aria-label="Monitored services" aria-busy="true">
           <li class="svc-skeleton-row"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
           <li class="svc-skeleton-row"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
@@ -221,6 +221,7 @@
 
   function renderList() {
     const list = $('svc-list');
+    // Keep legacy last_observed_version in the API contract; DOWN display uses last_up_version.
     if (!services.length) {
       list.innerHTML = '<li><div class="empty-state"><strong>No services monitored</strong><span>Add a service to start health checks and outage alerts.</span></div></li>';
       return;
@@ -229,10 +230,15 @@
       const state = stateOf(entry);
       const name = entry.definition.name;
       const isSelected = name === selected;
+      const version = state === 'up'
+        ? entry.runtime.current_version
+        : state === 'down'
+          ? entry.runtime.last_up_version
+          : null;
       const trailing = state === 'off'
         ? '<span class="svc-row-off">Off</span>'
         : `<span class="svc-row-latency">${entry.runtime.latency_ms == null ? '-' : `${entry.runtime.latency_ms} ms`}</span>`;
-      return `<li><button class="svc-row" type="button" ${isSelected ? 'aria-current="true"' : ''} data-select="${esc(name)}"><span class="svc-dot ${state}" aria-hidden="true"></span><span class="svc-row-name">${esc(name)}</span>${trailing}</button></li>`;
+      return `<li><button class="svc-row" type="button" ${isSelected ? 'aria-current="true"' : ''} data-select="${esc(name)}"><span class="svc-dot ${state}" aria-hidden="true"></span><span class="svc-row-name">${esc(name)}</span><span class="svc-row-version">${esc(version || '-')}</span>${trailing}</button></li>`;
     }).join('');
     list.querySelectorAll('[data-select]').forEach(button => {
       button.onclick = () => selectService(button.dataset.select);
@@ -307,7 +313,7 @@
       <p class="svc-detail-url">${esc(d.url)}</p>
       <div class="svc-vitals">
         <div class="svc-vital"><span>Latency</span><strong>${r.latency_ms == null ? '-' : `${r.latency_ms} ms`}</strong></div>
-        <div class="svc-vital"><span>Version</span><strong>${esc(r.current_version || r.last_observed_version || '-')}</strong></div>
+        <div class="svc-vital"><span>Version</span><strong>${esc(state === 'up' ? (r.current_version || '-') : state === 'down' ? (r.last_up_version || '-') : '-')}</strong></div>
         <div class="svc-vital"><span>Failures</span><strong>${r.consecutive_failures} / ${d.failure_threshold}</strong></div>
         ${sparkline(d.name)}
       </div>
@@ -374,7 +380,7 @@
 
     const rows = data.records.map(incident => {
       const isOutage = incident.event === 'outage';
-      const detail = incident.reason || (incident.version ? `version ${incident.version}` : '');
+      const detail = incident.reason || ((incident.last_up_version || incident.version) ? `version ${incident.last_up_version || incident.version}` : '');
       const action = canOperate()
         ? `<button class="button small" type="button" data-incident="${incident.id}" data-action="${incident.acknowledged ? 'clear' : 'ack'}">${incident.acknowledged ? 'Clear' : 'Acknowledge'}</button>`
         : '';
