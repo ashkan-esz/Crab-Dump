@@ -220,7 +220,9 @@ The `/services` dashboard page manages authenticated HTTP health checks. Each
 service has a unique name, URL, expected status, interval, retry count,
 failure threshold, version header, enabled state, and selected Telegram users.
 Defaults are `60s`, two additional retries, three consecutive failures, and
-`X-Version`. Alerts are transition-only: one outage notification and one
+`X-Version`. Health checks use a direct connection by default; an administrator
+can enable the active routing profile per service, which also honors
+`SOCKS_PROXY`. Alerts are transition-only: one outage notification and one
 recovery notification are sent to enabled selected users.
 
 Definitions and bounded outage/recovery history are stored atomically in

@@ -32,6 +32,8 @@ pub struct ServiceDefinition {
     pub version_header: String,
     #[serde(default)]
     pub recipients: Vec<String>,
+    #[serde(default)]
+    pub use_active_routing_profile: bool,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -86,6 +88,8 @@ pub struct ServiceInput {
     pub failure_threshold: Option<u32>,
     pub version_header: Option<String>,
     pub recipients: Option<Vec<String>>,
+    #[serde(default)]
+    pub use_active_routing_profile: bool,
     pub enabled: Option<bool>,
 }
 
@@ -129,6 +133,7 @@ struct Store {
 pub struct HealthMonitor {
     store: Arc<Store>,
     client: SharedClient,
+    direct_client: Arc<Client>,
     bot_token: String,
     users: Arc<TelegramUserStore>,
     wake: Arc<(Mutex<bool>, Condvar)>,
@@ -138,6 +143,7 @@ impl HealthMonitor {
     pub fn load(
         data_dir: impl Into<PathBuf>,
         client: SharedClient,
+        direct_client: Arc<Client>,
         bot_token: String,
         users: Arc<TelegramUserStore>,
     ) -> Result<Arc<Self>> {
@@ -173,6 +179,7 @@ impl HealthMonitor {
                 checking: Mutex::new(HashSet::new()),
             }),
             client,
+            direct_client,
             bot_token,
             users,
             wake: Arc::new((Mutex::new(false), Condvar::new())),
@@ -423,17 +430,24 @@ impl HealthMonitor {
             .unwrap_or(true)
     }
 
+    fn check_client(&self, service: &ServiceDefinition) -> Arc<Client> {
+        if service.use_active_routing_profile {
+            self.client
+                .read()
+                .expect("health client lock poisoned")
+                .clone()
+        } else {
+            Arc::clone(&self.direct_client)
+        }
+    }
+
     fn check(&self, service: &ServiceDefinition) {
         let started = std::time::Instant::now();
         let mut result = Err("request failed".to_string());
         let mut status_code = None;
         let mut version = None;
         for attempt in 0..=service.retries {
-            let client = self
-                .client
-                .read()
-                .expect("health client lock poisoned")
-                .clone();
+            let client = self.check_client(service);
             match client.get(&service.url).timeout(REQUEST_TIMEOUT).send() {
                 Ok(response) => {
                     let code = response.status().as_u16();
@@ -665,6 +679,7 @@ fn make_definition(input: ServiceInput, _existing_name: Option<&str>) -> Result<
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "X-Version".into()),
         recipients: input.recipients.unwrap_or_default(),
+        use_active_routing_profile: input.use_active_routing_profile,
         enabled: input.enabled.unwrap_or(true),
         created_at: now.clone(),
         updated_at: now,
@@ -779,6 +794,7 @@ mod tests {
             failure_threshold: None,
             version_header: None,
             recipients: None,
+            use_active_routing_profile: false,
             enabled: None,
         }
     }
@@ -819,7 +835,14 @@ mod tests {
             Arc::new(TelegramUserStore::load(data_dir.join("telegram-users.toml")).unwrap());
         let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
         (
-            HealthMonitor::load(data_dir.clone(), client, "test-token".into(), users).unwrap(),
+            HealthMonitor::load(
+                data_dir.clone(),
+                client,
+                Arc::new(reqwest::blocking::Client::new()),
+                "test-token".into(),
+                users,
+            )
+            .unwrap(),
             data_dir,
         )
     }
@@ -865,7 +888,65 @@ mod tests {
         assert_eq!(definition.retries, 2);
         assert_eq!(definition.failure_threshold, 3);
         assert_eq!(definition.version_header, "X-Version");
+        assert!(!definition.use_active_routing_profile);
         assert!(validate_definitions(&[definition.clone(), definition]).is_err());
+    }
+
+    #[test]
+    fn legacy_definitions_default_to_direct_health_checks() {
+        let file: DefinitionsFile = serde_json::from_str(
+            r#"{
+                "services": [{
+                    "name": "api",
+                    "url": "https://example.test/health",
+                    "expected_status": 200,
+                    "interval_secs": 60,
+                    "retries": 2,
+                    "failure_threshold": 3,
+                    "version_header": "X-Version",
+                    "enabled": true,
+                    "created_at": "2026-08-21T00:00:00Z",
+                    "updated_at": "2026-08-21T00:00:00Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!file.services[0].use_active_routing_profile);
+    }
+
+    #[test]
+    fn explicit_routing_mode_survives_definition_creation() {
+        let mut service_input = input("api");
+        service_input.use_active_routing_profile = true;
+
+        let definition = make_definition(service_input, None).unwrap();
+
+        assert!(definition.use_active_routing_profile);
+        let encoded = serde_json::to_value(&definition).unwrap();
+        assert_eq!(encoded["use_active_routing_profile"], true);
+    }
+
+    #[test]
+    fn health_checks_select_direct_or_routed_client_per_service() {
+        let service = test_service("direct");
+        let (monitor, data_dir) = test_monitor(&service, &[]);
+        let routed_client = reqwest::blocking::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        *monitor.client.write().unwrap() = Arc::new(routed_client);
+
+        let direct_client = monitor.check_client(&service);
+        assert!(Arc::ptr_eq(&direct_client, &monitor.direct_client));
+
+        let mut routed_service = service;
+        routed_service.use_active_routing_profile = true;
+        let routed_client = monitor.check_client(&routed_service);
+        let shared_client = monitor.client.read().unwrap().clone();
+        assert!(Arc::ptr_eq(&routed_client, &shared_client));
+
+        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
@@ -968,8 +1049,14 @@ mod tests {
         let users =
             Arc::new(TelegramUserStore::load(data_dir.join("telegram-users-reload.toml")).unwrap());
         let client = Arc::new(RwLock::new(Arc::new(reqwest::blocking::Client::new())));
-        let reloaded =
-            HealthMonitor::load(data_dir.clone(), client, "test-token".into(), users).unwrap();
+        let reloaded = HealthMonitor::load(
+            data_dir.clone(),
+            client,
+            Arc::new(reqwest::blocking::Client::new()),
+            "test-token".into(),
+            users,
+        )
+        .unwrap();
         assert_eq!(
             reloaded.runtime("api").last_error.as_deref(),
             Some("connection refused")

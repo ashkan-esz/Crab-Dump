@@ -161,6 +161,7 @@ fn main() -> Result<()> {
     let telegram_client: ClientHandle = Arc::new(RwLock::new(Arc::new(
         build_http_client_for_proxy(route_proxy.as_deref().or(shared_cfg.socks_proxy.as_deref()))?,
     )));
+    let direct_health_client = Arc::new(build_http_client_for_proxy(None)?);
     let (client_drop_tx, client_drop_rx) = mpsc::channel::<Arc<Client>>();
     std::thread::spawn(move || {
         while let Ok(client) = client_drop_rx.recv() {
@@ -170,6 +171,7 @@ fn main() -> Result<()> {
     let health_monitor = HealthMonitor::load(
         &data_dir,
         Arc::clone(&telegram_client),
+        direct_health_client,
         shared_cfg.tg_bot_token.clone(),
         Arc::clone(&telegram_users),
     )

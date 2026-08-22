@@ -68,10 +68,13 @@ If a task appears to require breaking one, stop and say so instead.
    named constant in bytes. No code path emits a part larger than it, including
    the final short part's predecessors. Changing it is a wire-contract change
    (see Invariant 3).
-9. **All egress honors `SOCKS_PROXY`.** Every outbound connection routes through
-   the proxy when set — Telegram API, retries, and any preflight or health
-   check. A direct-connect fallback on proxy failure is a bug, not a
-   resilience feature: fail the upload instead.
+9. **All application egress honors `SOCKS_PROXY`.** Every Telegram API
+   connection routes through the active routing profile or configured proxy,
+   including retries and preflight checks. Monitored service health checks are
+   the narrow exception: they bypass both when `use_active_routing_profile` is
+   false (the default), and use the shared routed client when it is true. A
+   direct-connect fallback on routed application traffic failure is a bug, not
+   a resilience feature: fail the upload instead.
 10. **Rate limits are obeyed, not raced.** On HTTP 429, sleep for the
     server-provided `retry_after` before the next attempt. Never retry 429
     faster than the server asked, and never treat it as a generic 5xx.

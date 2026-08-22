@@ -124,6 +124,10 @@
         <input id="service-enabled" type="checkbox" checked>
         <div><label for="service-enabled">Enabled</label><span class="svc-hint">Disabled services keep their configuration and incident history but are not polled.</span></div>
       </div>
+      <div class="svc-check">
+        <input id="service-routing-profile" type="checkbox">
+        <div><label for="service-routing-profile">Use active routing profile for health checks</label><span class="svc-hint">Direct checks bypass the active profile and SOCKS_PROXY.</span></div>
+      </div>
       <div class="svc-dialog-actions">
         <button class="button subtle" id="cancel-service" type="button">Cancel</button>
         <button class="button primary" id="save-service" type="submit">Save service</button>
@@ -317,6 +321,7 @@
         <div class="svc-fact"><span>Expected status</span><strong>${d.expected_status}</strong></div>
         <div class="svc-fact"><span>Extra retries</span><strong>${d.retries}</strong></div>
         <div class="svc-fact"><span>Version header</span><strong>${esc(d.version_header)}</strong></div>
+        <div class="svc-fact"><span>Health check routing</span><strong>${d.use_active_routing_profile ? 'Active routing profile' : 'Direct connection'}</strong></div>
         <div class="svc-fact"><span>Alert recipients</span><strong>${d.recipients.length ? esc(d.recipients.map(recipientLabel).join(', ')) : 'none'}</strong></div>
       </div>
       ${manualCheckState.name === d.name && manualCheckState.error ? `<div class="error-state svc-check-error" role="alert"><strong>Check failed</strong><span>${esc(manualCheckState.error)}</span></div>` : ''}
@@ -626,6 +631,7 @@
     recipientPicks = new Set((d?.recipients || []).map(String));
     renderRecipientPicker();
     $('service-enabled').checked = d?.enabled ?? true;
+    $('service-routing-profile').checked = d?.use_active_routing_profile ?? false;
     $('service-dialog').showModal();
     loadDirectory();
   }
@@ -674,6 +680,7 @@
       failure_threshold: Number($('service-threshold').value),
       version_header: $('service-version').value.trim(),
       recipients: [...recipientPicks],
+      use_active_routing_profile: $('service-routing-profile').checked,
       enabled: $('service-enabled').checked,
     };
     button.disabled = true;
