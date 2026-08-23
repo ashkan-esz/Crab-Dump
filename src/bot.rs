@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::config::DatabaseConfig;
 use crate::database_registry::DatabaseRegistry;
 use crate::database_state::DatabaseStateStore;
+use crate::resource_usage::ResourceCollector;
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_TELEGRAM};
 use crate::web::{self, ManualBackupRequest};
@@ -160,32 +161,237 @@ fn database_markup(
     })
 }
 
-pub fn command_status_message(status: &BotStatusHandle) -> String {
-    let snapshot = status_snapshot(status);
-    let state = match snapshot.state {
+pub fn command_status_message(status: &BotStatusHandle, resources: &ResourceCollector) -> String {
+    let snapshot = web::runtime_status_snapshot(status, resources);
+    let mut message = format!(
+        "🦀 <b>crab-dump status</b>\n\
+         {} <b>Overall:</b> {}\n\
+         🕒 <b>Updated:</b> {}\n\n\
+         <b>🤖 Telegram bot</b>\n\
+         • Bot: <code>{}</code>\n\
+         • State: <code>{}</code>\n\
+         • API: {} {}\n\
+         • Polling: {} {}\n\
+         • Updates processed: <code>{}</code>\n",
+        severity_emoji(snapshot.overall_code),
+        severity_label(snapshot.overall_code),
+        format_timestamp(&snapshot.updated),
+        snapshot
+            .bot
+            .username
+            .as_deref()
+            .map(|name| format!("@{}", safe_html(name)))
+            .unwrap_or_else(|| "unknown".into()),
+        bot_state_label(snapshot.bot.state),
+        severity_emoji(snapshot.telegram_code),
+        severity_label(snapshot.telegram_code).to_ascii_lowercase(),
+        if snapshot.bot.state == BotState::Running && snapshot.bot.last_error.is_none() {
+            "🟢"
+        } else {
+            "🟡"
+        },
+        if snapshot.bot.state == BotState::Running && snapshot.bot.last_error.is_none() {
+            "healthy"
+        } else {
+            "degraded"
+        },
+        snapshot.bot.update_count,
+    );
+    if let Some(last_success) = snapshot.bot.last_success_at.as_deref() {
+        message.push_str(&format!(
+            "• Last success: <code>{}</code>\n",
+            format_timestamp(last_success)
+        ));
+    }
+    if snapshot.overall_code > 0 {
+        if let Some(error) = snapshot.bot.last_error.as_deref() {
+            message.push_str(&format!("• Error: <code>{}</code>\n", safe_html(error)));
+        }
+    }
+
+    let schedule = if snapshot.schedule_label.is_empty() {
+        "one-shot".to_string()
+    } else {
+        "scheduled".to_string()
+    };
+    let schedule_label = if snapshot.schedule_label.is_empty() {
+        "one-shot".to_string()
+    } else {
+        safe_html(&snapshot.schedule_label)
+    };
+    message.push_str(&format!(
+        "\n<b>💾 Backups</b>\n\
+         • Mode: <code>{schedule}</code>\n\
+         • Schedule: <code>{}</code>\n\
+         • Databases: <code>{} enabled / {} disabled</code>\n",
+        schedule_label, snapshot.enabled_databases, snapshot.disabled_databases,
+    ));
+    if let Some(epoch) = snapshot
+        .next_backup_run_epoch
+        .filter(|_| !snapshot.cycle_running)
+    {
+        message.push_str(&format!(
+            "• Next run: <code>{}</code>\n",
+            format_epoch(epoch)
+        ));
+    }
+
+    message.push_str("\n<b>🗄 Databases</b>\n");
+    let database_start = message.len();
+    for (index, database) in snapshot.databases.iter().enumerate() {
+        let line = format_database_line(database);
+        if message.len() + line.len() > 3200 {
+            let remaining = snapshot.databases.len().saturating_sub(index);
+            message.push_str(&format!("• <i>{remaining} more databases</i>\n"));
+            break;
+        }
+        message.push_str(&line);
+    }
+    if message.len() == database_start {
+        message.push_str("⚪ <i>No databases configured</i>\n");
+    }
+
+    message.push_str("\n<b>🖥 Resources</b>\n");
+    message.push_str(&format_resource_line("CPU", &snapshot.resources.cpu));
+    message.push_str(&format_resource_line("Memory", &snapshot.resources.memory));
+    message.push_str(&format_resource_line("Disk", &snapshot.resources.disk));
+    message.push_str("\n<i>Use the buttons below to refresh or start a backup.</i>");
+    message
+}
+
+fn severity_emoji(code: u8) -> &'static str {
+    match code {
+        0 => "🟢",
+        1 => "🟡",
+        _ => "🔴",
+    }
+}
+
+fn severity_label(code: u8) -> &'static str {
+    match code {
+        0 => "HEALTHY",
+        1 => "DEGRADED",
+        _ => "DOWN",
+    }
+}
+
+fn bot_state_label(state: BotState) -> &'static str {
+    match state {
         BotState::Configured => "configured",
         BotState::Running => "running",
         BotState::Stopped => "stopped",
-    };
-    let bot = snapshot
-        .username
-        .as_deref()
-        .map(|name| format!("@{}", telegram::escape_html(name)))
-        .unwrap_or_else(|| "unknown".to_string());
-    let telegram_api = match web::get_telegram_status() {
-        0 => "up",
-        1 => "degraded",
-        _ => "down",
-    };
-    let backup_mode = if web::manual_backup_available() {
-        "scheduled"
+    }
+}
+
+fn stage_label(stage: &str) -> &'static str {
+    match stage {
+        "queued" => "queued",
+        "dump" => "dumping",
+        "compression" => "compressing",
+        "encryption" => "encrypting",
+        "upload" => "uploading",
+        "done" => "done",
+        "cancelled" => "cancelled",
+        "disabled" => "disabled",
+        _ => "unknown",
+    }
+}
+
+fn format_database_line(database: &web::DatabaseStatusSnapshot) -> String {
+    let emoji = if !database.enabled {
+        "⚪"
     } else {
-        "one-shot"
+        severity_emoji(database.code)
     };
+    let mut detail = format!(
+        "{} · {}",
+        stage_label(database.stage),
+        safe_html(&database.detail)
+    );
+    if database.stage == "upload" && database.bytes_total > 0 {
+        let percent = database.bytes_done.saturating_mul(100) / database.bytes_total;
+        detail = format!(
+            "{detail} · {}/{} chunks · {percent}% ({} / {})",
+            database.current_chunk,
+            database.chunk_count,
+            format_bytes(database.current_chunk_done),
+            format_bytes(database.current_chunk_total)
+        );
+    }
+    let updated = format_timestamp(&database.updated);
     format!(
-        "<b>crab-dump status</b>\n\nBot: <code>{bot}</code>\nState: <code>{state}</code>\nTelegram API: <code>{telegram_api}</code>\nBackup mode: <code>{backup_mode}</code>\nUpdates processed: <code>{}</code>",
-        snapshot.update_count,
+        "{emoji} <code>{}</code> — {detail} · <i>{updated}</i>\n",
+        safe_html(&database.name),
     )
+}
+
+fn format_resource_line(name: &str, metric: &crate::resource_usage::ResourceMetric) -> String {
+    let value = match (metric.used_bytes, metric.total_bytes, metric.percent) {
+        (Some(used), Some(total), Some(percent)) => {
+            format!(
+                "{} / {} · {:.0}%",
+                format_bytes(used),
+                format_bytes(total),
+                percent
+            )
+        }
+        (Some(used), Some(total), None) => {
+            format!("{} / {}", format_bytes(used), format_bytes(total))
+        }
+        (None, None, Some(percent)) => format!("{percent:.0}%"),
+        _ => "unavailable".into(),
+    };
+    format!("• {name}: <code>{value}</code>\n")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_timestamp(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|date| {
+            date.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+        })
+        .unwrap_or_else(|_| safe_html(value))
+}
+
+fn format_epoch(epoch: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(epoch as i64, 0)
+        .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn safe_html(value: &str) -> String {
+    let value = value
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://")
+                || word.contains("password=")
+                || word.contains("token=")
+                || word.contains("chat_id=")
+            {
+                "[REDACTED]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    telegram::escape_html(&value)
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +476,7 @@ impl BotRuntime {
         users: Arc<TelegramUserStore>,
         registry: Arc<DatabaseRegistry>,
         database_states: Arc<DatabaseStateStore>,
+        resources: Arc<ResourceCollector>,
     ) -> Arc<Self> {
         let status = new_status();
         let stop = Arc::new(AtomicBool::new(false));
@@ -285,6 +492,7 @@ impl BotRuntime {
                 users,
                 registry,
                 database_states,
+                resources,
                 thread_status,
                 stop,
             );
@@ -360,12 +568,14 @@ fn set_my_commands(client: &Client, token: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     client: ClientHandle,
     token: String,
     users: Arc<TelegramUserStore>,
     registry: Arc<DatabaseRegistry>,
     database_states: Arc<DatabaseStateStore>,
+    resources: Arc<ResourceCollector>,
     status: BotStatusHandle,
     stop: Arc<AtomicBool>,
 ) {
@@ -414,6 +624,7 @@ fn run(
                             &users,
                             &registry,
                             &database_states,
+                            &resources,
                             &status,
                             message,
                         );
@@ -425,6 +636,7 @@ fn run(
                             &users,
                             &registry,
                             &database_states,
+                            &resources,
                             &status,
                             callback,
                         );
@@ -482,12 +694,14 @@ fn get_updates(client: &Client, token: &str, offset: Option<i64>) -> Result<Vec<
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_message(
     client: &Client,
     token: &str,
     users: &TelegramUserStore,
     registry: &DatabaseRegistry,
     database_states: &DatabaseStateStore,
+    resources: &ResourceCollector,
     status: &BotStatusHandle,
     message: Message,
 ) {
@@ -535,7 +749,10 @@ fn handle_message(
     let (response, markup) = match command {
         Command::AddMe => unreachable!("handled before authorization"),
         Command::Help => (help_message().to_string(), Some(action_markup())),
-        Command::Status => (command_status_message(status), Some(action_markup())),
+        Command::Status => (
+            command_status_message(status, resources),
+            Some(action_markup()),
+        ),
         Command::Backup(database) => (
             queue_backup(&chat_id, &user.name, &database, registry, database_states),
             Some(action_markup()),
@@ -581,12 +798,14 @@ fn display_name(sender: Option<&MessageSender>, chat_id: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_callback(
     client: &Client,
     token: &str,
     users: &TelegramUserStore,
     registry: &DatabaseRegistry,
     database_states: &DatabaseStateStore,
+    resources: &ResourceCollector,
     status: &BotStatusHandle,
     callback: CallbackQuery,
 ) {
@@ -604,7 +823,10 @@ fn handle_callback(
     let _ = telegram::answer_callback_query(client, token, &callback.id);
     let data = callback.data.as_deref().unwrap_or_default();
     let (response, markup) = match data {
-        "bot:status" => (command_status_message(status), Some(action_markup())),
+        "bot:status" => (
+            command_status_message(status, resources),
+            Some(action_markup()),
+        ),
         "bot:backup" => {
             let response = if web::manual_backup_available() {
                 "Choose a database to back up:".to_string()
@@ -763,7 +985,50 @@ mod tests {
             safe_error("bad token secret", "secret"),
             "bad token [REDACTED]"
         );
-        assert!(command_status_message(&new_status()).contains("crab-dump status"));
+        let resources = ResourceCollector::new(std::env::temp_dir());
+        assert!(command_status_message(&new_status(), &resources).contains("crab-dump status"));
+    }
+
+    #[test]
+    fn database_status_formats_stages_progress_and_secrets_safely() {
+        let database = web::DatabaseStatusSnapshot {
+            name: "<production>".into(),
+            enabled: true,
+            code: 1,
+            stage: "upload",
+            detail: "uploading postgres://user:password@db.example/secret".into(),
+            bytes_done: 64 * 1024 * 1024,
+            bytes_total: 100 * 1024 * 1024,
+            current_chunk: 2,
+            current_chunk_done: 8 * 1024 * 1024,
+            current_chunk_total: 49 * 1024 * 1024,
+            chunk_count: 4,
+            updated: "2026-08-23T21:42:10Z".into(),
+        };
+        let line = format_database_line(&database);
+        assert!(line.contains("&lt;production&gt;"));
+        assert!(line.contains("uploading"));
+        assert!(line.contains("64%"));
+        assert!(line.contains("2/4 chunks"));
+        assert!(!line.contains("postgres://"));
+        assert!(!line.contains("password@"));
+    }
+
+    #[test]
+    fn resource_and_timestamp_formatting_handles_unavailable_values() {
+        let unavailable = crate::resource_usage::ResourceMetric {
+            percent: None,
+            used_bytes: None,
+            total_bytes: None,
+        };
+        assert!(format_resource_line("Disk", &unavailable).contains("unavailable"));
+        let cpu = crate::resource_usage::ResourceMetric {
+            percent: Some(18.0),
+            used_bytes: None,
+            total_bytes: None,
+        };
+        assert!(format_resource_line("CPU", &cpu).contains("18%"));
+        assert_eq!(format_epoch(0), "1970-01-01 00:00:00 UTC");
     }
 
     #[test]

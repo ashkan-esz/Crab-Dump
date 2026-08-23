@@ -47,6 +47,7 @@ use database_state::DatabaseStateStore;
 use encrypt::EncryptionMode;
 use health_monitor::HealthMonitor;
 use history::{HistoryRecord, HistoryStore};
+use resource_usage::ResourceCollector;
 use routing::{ProfileStore, RouteManager, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH};
 
 type ClientHandle = Arc<RwLock<Arc<Client>>>;
@@ -179,6 +180,7 @@ fn main() -> Result<()> {
     )
     .context("loading health monitor")?;
 
+    let resource_collector = Arc::new(ResourceCollector::new(shared_cfg.work_dir.clone()));
     let bot_runtime = if cli.dry_run {
         None
     } else {
@@ -188,6 +190,7 @@ fn main() -> Result<()> {
             Arc::clone(&telegram_users),
             Arc::clone(&registry),
             Arc::clone(&database_states),
+            Arc::clone(&resource_collector),
         ))
     };
 
@@ -214,7 +217,7 @@ fn main() -> Result<()> {
     let dashboard_history_dir = shared_cfg.history.directory_display();
     let dashboard_bot_token = shared_cfg.tg_bot_token.clone();
     let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
-    let dashboard_work_dir = shared_cfg.work_dir.clone();
+    let dashboard_resources = Arc::clone(&resource_collector);
     let dashboard_registry = Arc::clone(&registry);
     let dashboard_health_monitor = Arc::clone(&health_monitor);
     let dashboard_bot_status = bot_runtime
@@ -246,7 +249,7 @@ fn main() -> Result<()> {
                 client_drop_tx,
                 dashboard_bot_token,
                 dashboard_fallback_proxy,
-                dashboard_work_dir,
+                dashboard_resources,
                 dashboard_registry,
                 dashboard_health_monitor,
                 data_dir,

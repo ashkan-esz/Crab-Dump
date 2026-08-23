@@ -31,14 +31,14 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::bot::{self, BotStatusHandle};
+use crate::bot::{self, BotState, BotStatus, BotStatusHandle};
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
 use crate::database_registry::{redact_url, DatabaseMutation, DatabaseRegistry, DatabaseSource};
 use crate::database_state::DatabaseStateStore;
 use crate::health_monitor::{HealthMonitor, ServiceInput};
 use crate::history::HistoryStore;
 use crate::migration::MigrationContext;
-use crate::resource_usage::ResourceCollector;
+use crate::resource_usage::{ResourceCollector, ResourceUsage};
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_DASHBOARD};
@@ -183,6 +183,39 @@ pub struct ChunkProgress {
     pub count: usize,
     pub done: u64,
     pub total: u64,
+}
+
+/// Safe read-only view of one database's live backup state.
+#[derive(Clone)]
+pub struct DatabaseStatusSnapshot {
+    pub name: String,
+    pub enabled: bool,
+    pub code: u8,
+    pub stage: &'static str,
+    pub detail: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub current_chunk: usize,
+    pub current_chunk_done: u64,
+    pub current_chunk_total: u64,
+    pub chunk_count: usize,
+    pub updated: String,
+}
+
+/// Safe read-only view shared by the dashboard and Telegram status surfaces.
+#[derive(Clone)]
+pub struct RuntimeStatusSnapshot {
+    pub updated: String,
+    pub overall_code: u8,
+    pub telegram_code: u8,
+    pub bot: BotStatus,
+    pub schedule_label: String,
+    pub next_backup_run_epoch: Option<u64>,
+    pub cycle_running: bool,
+    pub enabled_databases: usize,
+    pub disabled_databases: usize,
+    pub databases: Vec<DatabaseStatusSnapshot>,
+    pub resources: ResourceUsage,
 }
 
 /// Per-database dump statuses keyed by display name.
@@ -687,6 +720,81 @@ pub fn set_next_history_run_in(wait: std::time::Duration) {
     );
 }
 
+fn database_enabled(name: &str) -> bool {
+    DATABASE_STATES
+        .read()
+        .expect("database state lock poisoned")
+        .as_ref()
+        .map(|store| store.is_enabled(name))
+        .unwrap_or(true)
+}
+
+/// Capture all status inputs without performing health checks or network I/O.
+pub fn runtime_status_snapshot(
+    bot_status: &BotStatusHandle,
+    resources: &ResourceCollector,
+) -> RuntimeStatusSnapshot {
+    let bot = bot::status_snapshot(bot_status);
+    let telegram_code = get_telegram_status();
+    let mut databases = DUMP_STATUSES
+        .read()
+        .expect("dump status lock poisoned")
+        .iter()
+        .map(|(name, status)| DatabaseStatusSnapshot {
+            name: name.clone(),
+            enabled: database_enabled(name),
+            code: status.code,
+            stage: status.stage,
+            detail: status.detail.clone(),
+            bytes_done: status.bytes_done,
+            bytes_total: status.bytes_total,
+            current_chunk: status.current_chunk,
+            current_chunk_done: status.current_chunk_done,
+            current_chunk_total: status.current_chunk_total,
+            chunk_count: status.chunk_count,
+            updated: status.updated.clone(),
+        })
+        .collect::<Vec<_>>();
+    databases.sort_by_key(|database| database.name.to_lowercase());
+
+    let enabled_databases = databases.iter().filter(|database| database.enabled).count();
+    let disabled_databases = databases.len().saturating_sub(enabled_databases);
+    let bot_code = match bot.state {
+        BotState::Running if bot.last_error.is_some() => 1,
+        BotState::Running => 0,
+        BotState::Configured => 1,
+        BotState::Stopped => 2,
+    };
+    let database_code = databases
+        .iter()
+        .map(|database| database.code)
+        .max()
+        .unwrap_or(0);
+    let overall_code = telegram_code.max(bot_code).max(database_code);
+    let schedule_label = SCHEDULE_LABEL
+        .read()
+        .expect("schedule lock poisoned")
+        .clone();
+    let next_backup_run_epoch = match BACKUP_NEXT_RUN_EPOCH_SECS.load(Ordering::SeqCst) {
+        0 => None,
+        value => Some(value),
+    };
+
+    RuntimeStatusSnapshot {
+        updated: chrono::Utc::now().to_rfc3339(),
+        overall_code,
+        telegram_code,
+        bot,
+        schedule_label,
+        next_backup_run_epoch,
+        cycle_running: CYCLE_RUNNING.load(Ordering::SeqCst),
+        enabled_databases,
+        disabled_databases,
+        databases,
+        resources: resources.collect(),
+    }
+}
+
 /// Publish the configured history-upload schedule for the dashboard.
 pub fn set_history_schedule_label(label: impl Into<String>) {
     *HISTORY_SCHEDULE_LABEL
@@ -1148,7 +1256,7 @@ async fn api_databases_list() -> impl Responder {
 }
 
 /// GET /api/status/resources — returns CPU, memory, and WORK_DIR disk usage.
-async fn api_resource_status(collector: web::Data<ResourceCollector>) -> impl Responder {
+async fn api_resource_status(collector: web::Data<Arc<ResourceCollector>>) -> impl Responder {
     HttpResponse::Ok().json(collector.collect())
 }
 
@@ -3144,7 +3252,7 @@ pub async fn start_server(
     client_drop_tx: Sender<Arc<Client>>,
     telegram_bot_token: String,
     fallback_proxy: Option<String>,
-    work_dir: std::path::PathBuf,
+    resource_collector: Arc<ResourceCollector>,
     database_registry: Arc<DatabaseRegistry>,
     health_monitor: Arc<HealthMonitor>,
     data_dir: std::path::PathBuf,
@@ -3166,7 +3274,7 @@ pub async fn start_server(
     let client_drop_data = web::Data::new(client_drop_tx);
     let bot_token_data = web::Data::new(telegram_bot_token);
     let fallback_proxy_data = web::Data::new(fallback_proxy);
-    let resource_data = web::Data::new(ResourceCollector::new(work_dir));
+    let resource_data = web::Data::new(resource_collector);
     let database_registry_data = web::Data::new(database_registry);
     let health_monitor_data = web::Data::new(health_monitor);
     let bot_status_data = web::Data::new(bot_status);
