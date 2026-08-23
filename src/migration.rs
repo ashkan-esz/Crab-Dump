@@ -15,7 +15,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
-use crate::database_registry::{DashboardDatabase, DatabaseMutation, DatabaseRegistry};
+use crate::config::DatabaseConfig;
+use crate::database_registry::{
+    DashboardDatabase, DatabaseMutation, DatabaseRegistry, DatabaseSource, RuntimeDatabase,
+};
 use crate::database_state::DatabaseStateStore;
 use crate::health_monitor::{HealthMonitor, Incident, ServiceDefinition, ServiceRuntime};
 use crate::history::HistoryRecord;
@@ -91,7 +94,8 @@ pub struct MigrationContext {
 impl MigrationContext {
     pub fn export(&self) -> Result<Vec<u8>> {
         let (settings, overridden) = self.compression.snapshot();
-        let (services, incidents, runtime) = self.health.snapshot();
+        let (services, mut incidents, mut runtime) = self.health.snapshot();
+        remove_unknown_health_references(&services, &mut incidents, &mut runtime);
         let snapshot = MigrationSnapshot {
             format_version: FORMAT_VERSION,
             exporter: ExporterMetadata {
@@ -136,8 +140,13 @@ impl MigrationContext {
                 MAX_SNAPSHOT_BYTES / 1024 / 1024
             );
         }
-        let snapshot: MigrationSnapshot =
+        let mut snapshot: MigrationSnapshot =
             serde_json::from_slice(bytes).context("parsing migration snapshot")?;
+        remove_unknown_health_references(
+            &snapshot.health.services,
+            &mut snapshot.health.incidents,
+            &mut snapshot.health.runtime,
+        );
         validate(&snapshot, self)?;
         let current = self.export()?;
         let backup = self.data_dir.join(format!(
@@ -362,21 +371,7 @@ fn validate(snapshot: &MigrationSnapshot, context: &MigrationContext) -> Result<
         if entry.id.trim().is_empty() || !ids.insert(entry.id.clone()) {
             bail!("duplicate or blank managed database ID");
         }
-        let name = entry
-            .name
-            .as_deref()
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                entry
-                    .url
-                    .split('?')
-                    .next()
-                    .unwrap_or(&entry.url)
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("unknown-db")
-                    .to_string()
-            });
+        let name = imported_database_name(entry);
         if !names.insert(name.to_ascii_lowercase()) {
             bail!("duplicate managed database name");
         }
@@ -395,32 +390,11 @@ fn validate(snapshot: &MigrationSnapshot, context: &MigrationContext) -> Result<
     {
         bail!("imported databases exceed the configured resource limit");
     }
-    let database_names = snapshot
-        .databases
-        .entries
-        .iter()
-        .map(|entry| {
-            entry.name.clone().unwrap_or_else(|| {
-                entry
-                    .url
-                    .split('?')
-                    .next()
-                    .unwrap_or(&entry.url)
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("unknown-db")
-                    .to_string()
-            })
-        })
-        .collect::<HashSet<_>>();
-    if snapshot
-        .databases
-        .enabled
-        .keys()
-        .any(|name| !database_names.contains(name))
-    {
-        bail!("database enablement references an unknown database");
-    }
+    validate_database_enablement_keys(
+        &snapshot.databases.enabled,
+        &snapshot.databases.entries,
+        &context.database_registry.snapshot(),
+    )?;
     let service_names = snapshot
         .health
         .services
@@ -486,6 +460,49 @@ fn validate(snapshot: &MigrationSnapshot, context: &MigrationContext) -> Result<
     Ok(())
 }
 
+fn remove_unknown_health_references(
+    services: &[ServiceDefinition],
+    incidents: &mut Vec<Incident>,
+    runtime: &mut HashMap<String, ServiceRuntime>,
+) {
+    let service_names = services
+        .iter()
+        .map(|service| service.name.as_str())
+        .collect::<HashSet<_>>();
+    incidents.retain(|incident| service_names.contains(incident.service.as_str()));
+    runtime.retain(|name, _| service_names.contains(name.as_str()));
+}
+
+fn imported_database_name(entry: &DashboardDatabase) -> String {
+    DatabaseConfig {
+        url: entry.url.clone(),
+        name: entry.name.clone(),
+        pg_dump_extra_args: entry.pg_dump_extra_args.clone(),
+    }
+    .display_name()
+}
+
+fn validate_database_enablement_keys(
+    enabled: &HashMap<String, bool>,
+    imported_entries: &[DashboardDatabase],
+    current_databases: &[RuntimeDatabase],
+) -> Result<()> {
+    let allowed_names = imported_entries
+        .iter()
+        .map(imported_database_name)
+        .chain(
+            current_databases
+                .iter()
+                .filter(|database| database.source == DatabaseSource::Env)
+                .map(|database| database.config.display_name()),
+        )
+        .collect::<HashSet<_>>();
+    if enabled.keys().any(|name| !allowed_names.contains(name)) {
+        bail!("database enablement references an unknown database");
+    }
+    Ok(())
+}
+
 fn read_history(directory: &Path) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
     let entries = match fs::read_dir(directory) {
@@ -508,4 +525,162 @@ fn read_history(directory: &Path) -> Result<Vec<HistoryRecord>> {
         bail!("history exceeds resource limits");
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dashboard_entry(name: Option<&str>, url: &str) -> DashboardDatabase {
+        DashboardDatabase {
+            id: "dashboard-1".into(),
+            url: url.into(),
+            name: name.map(str::to_string),
+            pg_dump_extra_args: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn environment_database(name: Option<&str>, url: &str) -> RuntimeDatabase {
+        RuntimeDatabase {
+            id: None,
+            source: DatabaseSource::Env,
+            config: DatabaseConfig {
+                url: url.into(),
+                name: name.map(str::to_string),
+                pg_dump_extra_args: None,
+            },
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn enablement_allows_imported_and_environment_databases() {
+        let imported = dashboard_entry(Some("dashboard"), "postgres://host/imported");
+        let environment = environment_database(None, "postgres://host/environment");
+        let enabled = HashMap::from([
+            ("dashboard".to_string(), true),
+            ("environment".to_string(), false),
+        ]);
+
+        assert!(validate_database_enablement_keys(&enabled, &[imported], &[environment],).is_ok());
+    }
+
+    #[test]
+    fn enablement_rejects_unknown_databases() {
+        let enabled = HashMap::from([("missing".to_string(), true)]);
+
+        let error = validate_database_enablement_keys(
+            &enabled,
+            &[dashboard_entry(
+                Some("dashboard"),
+                "postgres://host/imported",
+            )],
+            &[environment_database(None, "postgres://host/environment")],
+        )
+        .expect_err("unknown enablement key must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("database enablement references an unknown database"));
+    }
+
+    #[test]
+    fn imported_enablement_uses_database_config_display_name() {
+        let imported = dashboard_entry(None, "postgres://host/imported?sslmode=require");
+        let enabled = HashMap::from([("imported".to_string(), true)]);
+
+        assert!(validate_database_enablement_keys(&enabled, &[imported], &[]).is_ok());
+    }
+
+    #[test]
+    fn export_health_cleanup_removes_stale_references() {
+        let services = vec![ServiceDefinition {
+            name: "current".into(),
+            url: "https://example.test/health".into(),
+            expected_status: 200,
+            interval_secs: 60,
+            retries: 1,
+            failure_threshold: 1,
+            version_header: "X-Version".into(),
+            recipients: Vec::new(),
+            use_active_routing_profile: false,
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }];
+        let mut incidents = vec![
+            Incident {
+                id: 1,
+                service: "current".into(),
+                event: "recovery".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                reason: None,
+                status_code: Some(200),
+                version: None,
+                last_up_version: None,
+                consecutive_failures: 0,
+                acknowledged: false,
+            },
+            Incident {
+                id: 2,
+                service: "deleted".into(),
+                event: "outage".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                reason: Some("gone".into()),
+                status_code: None,
+                version: None,
+                last_up_version: None,
+                consecutive_failures: 1,
+                acknowledged: false,
+            },
+        ];
+        let mut runtime = HashMap::from([
+            (
+                "current".into(),
+                ServiceRuntime {
+                    name: "current".into(),
+                    status: Default::default(),
+                    consecutive_failures: 0,
+                    last_check: None,
+                    last_success: None,
+                    last_failure: None,
+                    current_version: None,
+                    last_observed_version: None,
+                    last_up_version: None,
+                    last_reason: None,
+                    last_status_code: None,
+                    latency_ms: None,
+                    last_error: None,
+                },
+            ),
+            (
+                "deleted".into(),
+                ServiceRuntime {
+                    name: "deleted".into(),
+                    status: Default::default(),
+                    consecutive_failures: 1,
+                    last_check: None,
+                    last_success: None,
+                    last_failure: None,
+                    current_version: None,
+                    last_observed_version: None,
+                    last_up_version: None,
+                    last_reason: None,
+                    last_status_code: None,
+                    latency_ms: None,
+                    last_error: None,
+                },
+            ),
+        ]);
+
+        remove_unknown_health_references(&services, &mut incidents, &mut runtime);
+
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].service, "current");
+        assert_eq!(runtime.len(), 1);
+        assert!(runtime.contains_key("current"));
+    }
 }

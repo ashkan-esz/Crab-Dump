@@ -41,7 +41,7 @@ use crate::migration::MigrationContext;
 use crate::resource_usage::ResourceCollector;
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
-use crate::telegram_users::{TelegramUser, TelegramUserStore};
+use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_DASHBOARD};
 
 // ===========================================================================
 // Global status atoms (Telegram service — single value)
@@ -2219,47 +2219,70 @@ async fn migration_import(
     };
     match context.validate_and_apply(&bytes) {
         Ok(()) => {
-            let routing_result = if let Some(url) = context.routing_profiles.active_url() {
-                let core = context.routing_profiles.selected_core();
-                route.apply(&url, core).and_then(|proxy| {
-                    Client::builder()
-                        .timeout(Duration::from_secs(300))
-                        .proxy(reqwest::Proxy::all(&proxy).context("building routed client")?)
-                        .build()
-                        .map(Arc::new)
-                        .context("building routed client")
-                })
-            } else {
-                route.stop();
-                (|| -> anyhow::Result<Arc<Client>> {
-                    let mut builder = Client::builder().timeout(Duration::from_secs(300));
-                    if let Some(proxy) = fallback_proxy.as_deref() {
-                        builder = builder
-                            .proxy(reqwest::Proxy::all(proxy).context("building fallback client")?);
-                    }
-                    builder
-                        .build()
-                        .map(Arc::new)
-                        .context("building fallback client")
-                })()
-            };
+            let active_url = context.routing_profiles.active_url();
+            let selected_core = context.routing_profiles.selected_core();
+            let route_for_apply = route.get_ref().clone();
+            let fallback = fallback_proxy.get_ref().clone();
+            let routing_result = tokio::task::spawn_blocking(move || {
+                let result = if let Some(url) = active_url {
+                    route_for_apply
+                        .apply(&url, selected_core)
+                        .and_then(|proxy| {
+                            Client::builder()
+                                .timeout(Duration::from_secs(300))
+                                .proxy(
+                                    reqwest::Proxy::all(&proxy)
+                                        .context("building routed client")?,
+                                )
+                                .build()
+                                .map(Arc::new)
+                                .context("building routed client")
+                        })
+                } else {
+                    route_for_apply.stop();
+                    (|| -> anyhow::Result<Arc<Client>> {
+                        let mut builder = Client::builder().timeout(Duration::from_secs(300));
+                        if let Some(proxy) = fallback.as_deref() {
+                            builder = builder.proxy(
+                                reqwest::Proxy::all(proxy).context("building fallback client")?,
+                            );
+                        }
+                        builder
+                            .build()
+                            .map(Arc::new)
+                            .context("building fallback client")
+                    })()
+                };
+                if result.is_ok() {
+                    route_for_apply.commit();
+                } else {
+                    route_for_apply.rollback();
+                }
+                result
+            })
+            .await;
             match routing_result {
-                Ok(new_client) => {
+                Ok(Ok(new_client)) => {
                     let old_client = {
                         let mut current = client.write().expect("Telegram client lock poisoned");
                         std::mem::replace(&mut *current, new_client)
                     };
                     let _ = client_drop_tx.send(old_client);
-                    route.commit();
                     HttpResponse::Ok().json(serde_json::json!({
                         "ok": true,
                         "environment_derived_values_unchanged": true,
                         "restart_required": false
                     }))
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(error = %error, "imported routing state could not be activated");
-                    route.rollback();
+                    HttpResponse::BadGateway().json(serde_json::json!({
+                        "error": "imported state was stored but its routing profile could not be activated",
+                        "restart_required": true
+                    }))
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "imported routing activation task failed");
                     HttpResponse::BadGateway().json(serde_json::json!({
                         "error": "imported state was stored but its routing profile could not be activated",
                         "restart_required": true
@@ -2333,6 +2356,7 @@ async fn create_telegram_user(
         name: payload.name.clone(),
         chat_id: payload.chat_id.clone(),
         enabled: payload.enabled,
+        source: SOURCE_DASHBOARD.into(),
     };
     match store.create(user.clone()) {
         Ok(()) => {
@@ -2364,11 +2388,17 @@ async fn update_telegram_user(
         name: payload.name.clone(),
         chat_id: payload.chat_id.clone(),
         enabled: payload.enabled,
+        source: String::new(),
     };
     match store.update(&chat_id, user.clone()) {
         Ok(true) => {
             audit_action(&req, "telegram_user_update", &chat_id, "ok");
-            HttpResponse::Ok().json(user)
+            let persisted = store
+                .list()
+                .into_iter()
+                .find(|candidate| candidate.chat_id == user.chat_id)
+                .unwrap_or(user);
+            HttpResponse::Ok().json(persisted)
         }
         Ok(false) => {
             HttpResponse::NotFound().json(serde_json::json!({"error": "Telegram user not found"}))
@@ -3907,6 +3937,7 @@ mod tests {
                 name: "Enabled".into(),
                 chat_id: "-enabled".into(),
                 enabled: true,
+                source: SOURCE_DASHBOARD.into(),
             })
             .unwrap();
         users
@@ -3914,6 +3945,7 @@ mod tests {
                 name: "Disabled".into(),
                 chat_id: "-disabled".into(),
                 enabled: false,
+                source: SOURCE_DASHBOARD.into(),
             })
             .unwrap();
         let history = Arc::new(HistoryStore::new(
