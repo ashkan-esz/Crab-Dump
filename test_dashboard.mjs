@@ -715,6 +715,7 @@ assert.match(servicesBody, /id="retry-directory"/);
 // Live refresh: interval control, persistence, pause when hidden, and a poll
 // failure that keeps the last good render instead of blanking the panels.
 assert.match(servicesHtml, /id="refreshInterval"/);
+assert.match(servicesHtml, /<option value="2000" selected>2s<\/option>/);
 assert.match(servicesHtml, /id="refresh-now"/);
 assert.match(servicesBody, /crab-dump\.services-refresh-ms/);
 assert.match(servicesBody, /function scheduleRefresh\(\)/);

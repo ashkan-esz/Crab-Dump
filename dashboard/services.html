@@ -48,8 +48,9 @@
         <span class="svc-updated" id="updated" role="status" aria-live="polite">Loading</span>
         <label class="svc-summary-item" for="refreshInterval"><span>Refresh</span>
           <select id="refreshInterval" aria-label="Automatic refresh interval">
+            <option value="2000" selected>2s</option>
             <option value="5000">5s</option>
-            <option value="10000" selected>10s</option>
+            <option value="10000">10s</option>
             <option value="30000">30s</option>
             <option value="60000">60s</option>
             <option value="0">Off</option>
@@ -145,7 +146,7 @@
   let selected = null;
   let editing = null;
   let dashboardRole = 'viewer';
-  let refreshMs = 10000;
+  let refreshMs = 2000;
   let refreshTimer = null;
   let latency = new Map();
   let incidentState = { name: null, page: 1, data: null, error: null, loading: false };

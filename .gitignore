@@ -22,6 +22,7 @@ config.toml
 .codex
 .gapcode
 .vexp
+skills-lock.json
 
 # Rust artifacts
 **/*.rs.bk
