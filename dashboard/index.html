@@ -116,8 +116,11 @@
             width: 100%;
             max-width: 920px;
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 1.25rem;
+        }
+        @media (max-width: 900px) {
+            .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 640px) {
             .grid { grid-template-columns: 1fr; }
@@ -241,7 +244,6 @@
             display: none;
         }
         .bot-status-card {
-            grid-column: 1 / -1;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -260,7 +262,9 @@
         }
         .bot-status-copy strong { color: var(--text); text-transform: capitalize; }
         .bot-status-copy .status-time { margin-top: 0; }
-        .bot-status-error { color: var(--err); overflow-wrap: anywhere; }
+        .bot-status-message { overflow-wrap: anywhere; }
+        .bot-status-message.success { color: var(--up); }
+        .bot-status-message.error { color: var(--err); }
         .bot-status-actions { flex: 0 0 auto; }
         .bot-status-card.checking { border-color: var(--warn-border); }
         .bot-status-card.up { border-color: var(--up-border); }
@@ -270,7 +274,7 @@
             .bot-status-actions { width: 100%; text-align: right; }
         }
 
-        .compression-card { grid-column: 1 / -1; }
+        .resource-card, .compression-card { grid-column: 1 / -1; }
         .compression-header {
             display: flex;
             align-items: center;
@@ -1414,8 +1418,14 @@
         }
         .info-chip .icon { display: none; }
         .grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: .85rem;
+        }
+        @media (max-width: 900px) {
+            .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 640px) {
+            .grid { grid-template-columns: 1fr; }
         }
         .card {
             gap: .75rem;
@@ -1626,17 +1636,17 @@
             <div class="bot-status-main">
                 <div class="card-header">
                     <span class="status-dot" id="botStatusDot"></span>
-                    <h2 class="card-title" id="botStatusTitle">Telegram bot</h2>
+                    <h2 class="card-title" id="botStatusTitle">Telegram Bot</h2>
                 </div>
                 <div class="bot-status-copy">
                     <strong id="botStatusState">Loading…</strong>
                     <span id="botStatusUsername">Bot username unavailable</span>
                     <span id="botStatusTime" class="status-time">No successful poll yet</span>
-                    <span id="botStatusError" class="bot-status-error" role="status" aria-live="polite"></span>
+                    <span id="botStatusError" class="bot-status-message" role="status" aria-live="polite"></span>
                 </div>
             </div>
             <div class="bot-status-actions">
-                <button class="btn primary" id="botCheckBtn" type="button" onclick="checkBot()">Check bot</button>
+                <button class="btn primary" id="botCheckBtn" type="button" onclick="checkBot()">Test</button>
             </div>
         </section>
 
@@ -1992,27 +2002,30 @@
     async function checkBot() {
         const button = document.getElementById('botCheckBtn');
         const card = document.getElementById('botStatusCard');
-        const error = document.getElementById('botStatusError');
+        const message = document.getElementById('botStatusError');
         button.disabled = true;
         button.setAttribute('aria-busy', 'true');
         button.textContent = 'Checking…';
         card.classList.add('checking');
-        error.textContent = '';
+        message.classList.remove('success', 'error');
+        message.textContent = '';
         try {
             const response = await apiFetch('/api/status/bot/check', { method: 'POST' });
             const result = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(result.error || 'Bot check failed');
             renderBotStatus(await fetchStatus('/api/status/bot'));
-            error.textContent = `Check succeeded${result.username ? `: @${result.username}` : ''}`;
+            message.classList.add('success');
+            message.textContent = `Check succeeded${result.username ? `: @${result.username}` : ''}`;
         } catch (checkError) {
-            error.textContent = checkError.message || 'Bot check failed. Try again.';
+            message.classList.add('error');
+            message.textContent = checkError.message || 'Bot check failed. Try again.';
             card.classList.remove('up', 'degraded');
             card.classList.add('down');
         } finally {
             card.classList.remove('checking');
             button.disabled = false;
             button.removeAttribute('aria-busy');
-            button.textContent = 'Check bot';
+            button.textContent = 'Test';
         }
     }
 

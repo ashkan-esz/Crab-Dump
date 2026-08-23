@@ -931,9 +931,9 @@ fn status_entry(code: u8, message: &str) -> StatusResponse {
 async fn api_service_status() -> impl Responder {
     let code = get_telegram_status();
     let msg = match code {
-        0 => "Telegram API is reachable and responding normally".to_string(),
-        1 => "Telegram API is slow or rate-limited".to_string(),
-        _ => "Unable to reach Telegram API".to_string(),
+        0 => "Reachable".to_string(),
+        1 => "Slow or rate-limited".to_string(),
+        _ => "Unreachable".to_string(),
     };
     let test_disabled_reason = telegram::test_disabled_reason();
     HttpResponse::Ok().json(ServiceStatusResponse {
@@ -1042,9 +1042,9 @@ async fn check_bot(
 async fn api_process_status() -> impl Responder {
     let code = get_aggregated_dump_status();
     let msg = match code {
-        0 => "No active dump process or dump completed successfully".to_string(),
-        1 => "Dump process is running or waiting for next backup".to_string(),
-        _ => "Dump process failed or is in error state".to_string(),
+        0 => "Idle or complete".to_string(),
+        1 => "Running or queued".to_string(),
+        _ => "Failed".to_string(),
     };
     HttpResponse::Ok().json(status_entry(code, &msg))
 }
