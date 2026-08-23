@@ -56,6 +56,25 @@ impl DatabaseStateStore {
         self.persist(&states)
     }
 
+    pub fn snapshot(&self) -> HashMap<String, bool> {
+        self.states
+            .lock()
+            .expect("database state lock poisoned")
+            .clone()
+    }
+
+    pub fn replace(
+        &self,
+        states: HashMap<String, bool>,
+        configured_names: &[String],
+    ) -> Result<()> {
+        let states = filter_known(states, configured_names);
+        let mut current = self.states.lock().expect("database state lock poisoned");
+        self.persist(&states)?;
+        *current = states;
+        Ok(())
+    }
+
     fn persist(&self, states: &HashMap<String, bool>) -> Result<()> {
         fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new("."))).with_context(
             || format!("creating database state directory {}", self.path.display()),

@@ -204,6 +204,87 @@ impl HealthMonitor {
             .clone()
     }
 
+    pub fn snapshot(
+        &self,
+    ) -> (
+        Vec<ServiceDefinition>,
+        Vec<Incident>,
+        HashMap<String, ServiceRuntime>,
+    ) {
+        (
+            self.store
+                .definitions
+                .lock()
+                .expect("health definitions lock poisoned")
+                .clone(),
+            self.store
+                .incidents
+                .lock()
+                .expect("health incidents lock poisoned")
+                .clone(),
+            self.store
+                .runtime
+                .lock()
+                .expect("health runtime lock poisoned")
+                .clone(),
+        )
+    }
+
+    pub fn replace_snapshot(
+        &self,
+        definitions: Vec<ServiceDefinition>,
+        incidents: Vec<Incident>,
+        runtime: HashMap<String, ServiceRuntime>,
+    ) -> Result<()> {
+        validate_definitions(&definitions)?;
+        let names = definitions
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<HashSet<_>>();
+        if incidents
+            .iter()
+            .any(|incident| !names.contains(incident.service.as_str()))
+            || runtime.keys().any(|name| !names.contains(name.as_str()))
+        {
+            anyhow::bail!("health snapshot contains an unknown service reference");
+        }
+        persist_json(
+            &self.store.definitions_path,
+            &DefinitionsFile {
+                services: definitions.clone(),
+            },
+        )?;
+        persist_json(
+            &self.store.incidents_path,
+            &IncidentsFile {
+                incidents: incidents.clone(),
+            },
+        )?;
+        persist_json(
+            &self.store.runtime_path,
+            &RuntimeFile {
+                runtimes: runtime.clone(),
+            },
+        )?;
+        *self
+            .store
+            .definitions
+            .lock()
+            .expect("health definitions lock poisoned") = definitions;
+        *self
+            .store
+            .incidents
+            .lock()
+            .expect("health incidents lock poisoned") = incidents;
+        *self
+            .store
+            .runtime
+            .lock()
+            .expect("health runtime lock poisoned") = runtime;
+        self.wake_now();
+        Ok(())
+    }
+
     pub fn get(&self, name: &str) -> Option<ServiceDefinition> {
         self.list().into_iter().find(|service| service.name == name)
     }

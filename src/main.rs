@@ -20,6 +20,7 @@ use chrono::NaiveDateTime;
 use clap::Parser;
 use reqwest::blocking::Client;
 
+mod bot;
 mod chunk;
 mod compress;
 mod compression_config;
@@ -31,6 +32,7 @@ mod dump;
 mod encrypt;
 mod health_monitor;
 mod history;
+mod migration;
 mod resource_usage;
 mod routing;
 mod telegram;
@@ -177,6 +179,18 @@ fn main() -> Result<()> {
     )
     .context("loading health monitor")?;
 
+    let bot_runtime = if cli.dry_run {
+        None
+    } else {
+        Some(bot::BotRuntime::spawn(
+            Arc::clone(&telegram_client),
+            shared_cfg.tg_bot_token.clone(),
+            Arc::clone(&telegram_users),
+            Arc::clone(&registry),
+            Arc::clone(&database_states),
+        ))
+    };
+
     // ── Spawn status dashboard (unchanged logic) ────────────────────────────
     // The dashboard runs in a dedicated thread with its own tokio runtime
     // because actix_web::HttpServer is not Send.
@@ -197,11 +211,16 @@ fn main() -> Result<()> {
     let dashboard_route = Arc::clone(&route_manager);
     let dashboard_client = Arc::clone(&telegram_client);
     let dashboard_history = std::sync::Arc::clone(&shared_cfg.history);
+    let dashboard_history_dir = shared_cfg.history.directory_display();
     let dashboard_bot_token = shared_cfg.tg_bot_token.clone();
     let dashboard_fallback_proxy = shared_cfg.socks_proxy.clone();
     let dashboard_work_dir = shared_cfg.work_dir.clone();
     let dashboard_registry = Arc::clone(&registry);
     let dashboard_health_monitor = Arc::clone(&health_monitor);
+    let dashboard_bot_status = bot_runtime
+        .as_ref()
+        .map(|runtime| runtime.status())
+        .unwrap_or_else(bot::new_status);
     web::set_manual_backup_available(shared_cfg.backup_schedule.is_some());
     web::set_max_parallel_databases(shared_cfg.max_parallel_databases);
     web::set_telegram_chat_count(shared_cfg.tg_chat_ids.len());
@@ -230,6 +249,9 @@ fn main() -> Result<()> {
                 dashboard_work_dir,
                 dashboard_registry,
                 dashboard_health_monitor,
+                data_dir,
+                dashboard_history_dir.into(),
+                dashboard_bot_status,
             )
             .await
             {
@@ -610,7 +632,7 @@ fn run_manual_requests(
             .collect::<std::collections::HashMap<_, _>>();
         let _operation_gate = web::acquire_backup_route_gate();
         web::set_cycle_running(true);
-        let _ = execute_database_indices(
+        let (_, failures) = execute_database_indices(
             &cycle_cfg,
             &databases,
             &indices,
@@ -619,6 +641,30 @@ fn run_manual_requests(
             true,
             &options,
         );
+        for failure in failures {
+            if let Some(request) = requests
+                .iter()
+                .find(|request| request.database_name == failure.db_name)
+            {
+                let message = format!(
+                    "❌ Backup for <code>{}</code> failed. Check the dashboard for details.",
+                    telegram::escape_html(&failure.db_name)
+                );
+                let client_guard = client.read().expect("Telegram client lock poisoned");
+                if let Err(error) = telegram::send_message(
+                    &client_guard,
+                    &cfg.tg_bot_token,
+                    &request.chat_id,
+                    &message,
+                ) {
+                    tracing::warn!(
+                        database = %failure.db_name,
+                        error = %error,
+                        "failed to send manual backup failure notice"
+                    );
+                }
+            }
+        }
         web::set_cycle_running(false);
     }
     for request in requests {

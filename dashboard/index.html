@@ -240,6 +240,35 @@
         .service-details-content .status-time:empty {
             display: none;
         }
+        .bot-status-card {
+            grid-column: 1 / -1;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+        .bot-status-main { min-width: 0; }
+        .bot-status-copy {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: .35rem .8rem;
+            margin: .45rem 0 0 1.35rem;
+            color: var(--text-muted);
+            font-size: .76rem;
+        }
+        .bot-status-copy strong { color: var(--text); text-transform: capitalize; }
+        .bot-status-copy .status-time { margin-top: 0; }
+        .bot-status-error { color: var(--err); overflow-wrap: anywhere; }
+        .bot-status-actions { flex: 0 0 auto; }
+        .bot-status-card.checking { border-color: var(--warn-border); }
+        .bot-status-card.up { border-color: var(--up-border); }
+        .bot-status-card.down { border-color: var(--err-border); }
+        @media (max-width: 640px) {
+            .bot-status-card { align-items: flex-start; flex-direction: column; }
+            .bot-status-actions { width: 100%; text-align: right; }
+        }
 
         .compression-card { grid-column: 1 / -1; }
         .compression-header {
@@ -1521,7 +1550,7 @@
         <span class="app-nav-label">System</span>
         <div class="app-nav-links">
             <a href="#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a>
-            <a href="#compressionCard"><span aria-hidden="true">⚙</span><span>Settings</span></a>
+            <a href="/settings"><span aria-hidden="true">⚙</span><span>Settings</span></a>
         </div>
         <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
     </nav>
@@ -1591,6 +1620,25 @@
                 <div class="status-time" id="tgTime"></div>
             </div>
         </details>
+
+        <!-- Telegram command bot status -->
+        <section class="card bot-status-card" id="botStatusCard" aria-labelledby="botStatusTitle">
+            <div class="bot-status-main">
+                <div class="card-header">
+                    <span class="status-dot" id="botStatusDot"></span>
+                    <h2 class="card-title" id="botStatusTitle">Telegram bot</h2>
+                </div>
+                <div class="bot-status-copy">
+                    <strong id="botStatusState">Loading…</strong>
+                    <span id="botStatusUsername">Bot username unavailable</span>
+                    <span id="botStatusTime" class="status-time">No successful poll yet</span>
+                    <span id="botStatusError" class="bot-status-error" role="status" aria-live="polite"></span>
+                </div>
+            </div>
+            <div class="bot-status-actions">
+                <button class="btn primary" id="botCheckBtn" type="button" onclick="checkBot()">Check bot</button>
+            </div>
+        </section>
 
         <!-- Dump status panel (aggregated across all databases) -->
         <details class="card service-card up" id="dumpCard">
@@ -1918,6 +1966,53 @@
             button.disabled = Boolean(data.test_disabled);
             button.title = reason;
             message.textContent = reason ? `Test unavailable: ${reason}` : '';
+        }
+    }
+
+    function botStatusClass(state) {
+        return state === 'running' ? 'up' : state === 'configured' ? 'degraded' : 'down';
+    }
+
+    function renderBotStatus(data) {
+        const card = document.getElementById('botStatusCard');
+        const state = String(data?.state || 'stopped').toLowerCase();
+        card.classList.remove('up', 'degraded', 'down', 'checking');
+        card.classList.add(botStatusClass(state));
+        document.getElementById('botStatusState').textContent = state;
+        document.getElementById('botStatusUsername').textContent = data?.username
+            ? `@${data.username}`
+            : 'Bot username unavailable';
+        const last = data?.last_success_at;
+        const time = document.getElementById('botStatusTime');
+        time.textContent = last ? `Last poll ${relTime(last)}` : 'No successful poll yet';
+        if (last) time.title = last;
+        document.getElementById('botStatusError').textContent = data?.last_error || '';
+    }
+
+    async function checkBot() {
+        const button = document.getElementById('botCheckBtn');
+        const card = document.getElementById('botStatusCard');
+        const error = document.getElementById('botStatusError');
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.textContent = 'Checking…';
+        card.classList.add('checking');
+        error.textContent = '';
+        try {
+            const response = await apiFetch('/api/status/bot/check', { method: 'POST' });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error || 'Bot check failed');
+            renderBotStatus(await fetchStatus('/api/status/bot'));
+            error.textContent = `Check succeeded${result.username ? `: @${result.username}` : ''}`;
+        } catch (checkError) {
+            error.textContent = checkError.message || 'Bot check failed. Try again.';
+            card.classList.remove('up', 'degraded');
+            card.classList.add('down');
+        } finally {
+            card.classList.remove('checking');
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.textContent = 'Check bot';
         }
     }
 
@@ -3108,6 +3203,9 @@
                     applyState(document.getElementById('tgCard'), document.getElementById('tgDot'), data.state);
                     setStatus(document.getElementById('tgMsg'), document.getElementById('tgTime'), data.state, data.message, data.timestamp);
                     renderTelegramTestState(data);
+                }),
+                fetchStatus('/api/status/bot').then(renderBotStatus).catch(error => {
+                    renderBotStatus({ state: 'stopped', last_error: 'Bot status unavailable' });
                 }),
                 fetchStatus('/api/status/process').then(data => {
                     applyState(document.getElementById('dumpCard'), document.getElementById('dumpDot'), data.state);

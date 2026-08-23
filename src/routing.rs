@@ -422,6 +422,42 @@ impl ProfileStore {
             .map(|profile| profile.compatible_cores.clone())
     }
 
+    pub fn snapshot_json(&self) -> Result<serde_json::Value> {
+        let state = self.state.lock().expect("profile store lock poisoned");
+        serde_json::to_value(&*state).context("serializing routing profile snapshot")
+    }
+
+    pub fn replace_json(&self, value: serde_json::Value) -> Result<()> {
+        let mut state: ProfileFile =
+            serde_json::from_value(value).context("validating routing profile snapshot")?;
+        if state
+            .profiles
+            .iter()
+            .any(|profile| profile.id.trim().is_empty())
+        {
+            anyhow::bail!("routing profile IDs must not be blank");
+        }
+        let mut ids = std::collections::HashSet::new();
+        for profile in &mut state.profiles {
+            if !ids.insert(profile.id.clone()) {
+                anyhow::bail!("duplicate routing profile ID");
+            }
+            if profile.compatible_cores.is_empty() {
+                profile.compatible_cores = derive_compatible_cores(&profile.url)?;
+            }
+            parse_share_url(&profile.url)?;
+        }
+        if let Some(active) = state.active_id.as_deref() {
+            if !state.profiles.iter().any(|profile| profile.id == active) {
+                anyhow::bail!("active routing profile does not exist");
+            }
+        }
+        let mut current = self.state.lock().expect("profile store lock poisoned");
+        self.persist(&state)?;
+        *current = state;
+        Ok(())
+    }
+
     fn persist(&self, state: &ProfileFile) -> Result<()> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).context("creating profile data directory")?;

@@ -10,13 +10,14 @@ import { readFileSync } from 'node:fs';
 
 const dashboardDir = './dashboard/';
 const html = readFileSync(new URL(`${dashboardDir}index.html`, import.meta.url), 'utf8');
-const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html', 'services.html'];
+const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html', 'services.html', 'settings.html'];
 const pageHtml = Object.fromEntries(dashboardPages.map(file => [
     file,
     readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8'),
 ]));
 const authJs = readFileSync(new URL(`${dashboardDir}dashboard-auth.js`, import.meta.url), 'utf8');
 const servicesPage = pageHtml['services.html'];
+const settingsHtml = pageHtml['settings.html'];
 const dashboardCss = readFileSync(new URL(`${dashboardDir}dashboard.css`, import.meta.url), 'utf8');
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
@@ -88,6 +89,15 @@ for (const [file, source] of Object.entries(pageHtml)) {
     assert.doesNotMatch(operations, />Backup history</, `${file} must omit the Backup history sidebar link`);
     assert.deepEqual(operationsLinks(source), expectedOperations, `${file} Operations navigation`);
 }
+assert.match(settingsHtml, /<title>crab-dump · Settings<\/title>/);
+assert.match(settingsHtml, /<main id="settings-main" class="page">/);
+assert.match(settingsHtml, /id="migrationCard"[^>]*hidden/);
+assert.match(settingsHtml, /id="migrationExport"/);
+assert.match(settingsHtml, /id="migrationImport"/);
+assert.match(settingsHtml, /api\/migration\/export/);
+assert.match(settingsHtml, /api\/migration\/import/);
+assert.match(settingsHtml, /Import will replace all dashboard-managed state/);
+assert.doesNotMatch(html, /id="migrationCard"/, 'migration controls must live on Settings');
 const routingStyles = pageHtml['routing.html'].split('<link rel="stylesheet" href="/dashboard.css">', 1)[0];
 assert.doesNotMatch(routingStyles, /\.app-nav\s*\{/, 'routing.html must use shared sidebar geometry');
 assert.doesNotMatch(routingStyles, /(?:^|[}])\s*main(?:\s*[,{]|\s*\{)/, 'routing.html must not override main layout');

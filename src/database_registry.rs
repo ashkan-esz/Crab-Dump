@@ -131,6 +131,20 @@ impl DatabaseRegistry {
             .clone()
     }
 
+    pub fn replace_dashboard_entries(&self, entries: Vec<DashboardDatabase>) -> Result<()> {
+        let mut candidate = self.env.clone();
+        candidate.extend(entries.iter().map(runtime_from_entry));
+        validate_runtime(&candidate, self.max_databases)?;
+        let mut dashboard = self
+            .dashboard
+            .lock()
+            .expect("dashboard database registry lock poisoned");
+        self.persist_locked(&entries)?;
+        *dashboard = entries;
+        drop(dashboard);
+        self.refresh_snapshot()
+    }
+
     pub fn refresh_snapshot(&self) -> Result<()> {
         let mut all = self.env.clone();
         all.extend(

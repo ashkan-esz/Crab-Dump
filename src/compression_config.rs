@@ -82,6 +82,7 @@ struct PersistedCompressionSettings {
 
 pub struct CompressionConfigStore {
     path: PathBuf,
+    fallback: CompressionSettings,
     settings: RwLock<CompressionSettings>,
     overridden: RwLock<bool>,
 }
@@ -120,6 +121,7 @@ impl CompressionConfigStore {
         };
         Ok(Arc::new(Self {
             path,
+            fallback: fallback.normalized(),
             settings: RwLock::new(settings),
             overridden: RwLock::new(overridden),
         }))
@@ -176,6 +178,63 @@ impl CompressionConfigStore {
             .write()
             .expect("compression source lock poisoned") = true;
         Ok(settings)
+    }
+
+    pub fn snapshot(&self) -> (CompressionSettings, bool) {
+        (self.current(), self.is_overridden())
+    }
+
+    pub fn replace(&self, settings: CompressionSettings, overridden: bool) -> Result<()> {
+        settings.validate()?;
+        let mut current = self
+            .settings
+            .write()
+            .expect("compression settings lock poisoned");
+        let mut source = self
+            .overridden
+            .write()
+            .expect("compression source lock poisoned");
+        if overridden {
+            let persisted = PersistedCompressionSettings {
+                codec: settings.codec_name().to_string(),
+                level: settings.level,
+                checksum: settings.checksum,
+            };
+            let content = serde_json::to_vec_pretty(&persisted)
+                .context("serializing dashboard compression override")?;
+            let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+            fs::create_dir_all(parent).with_context(|| {
+                format!("creating compression config directory {}", parent.display())
+            })?;
+            let temp = self.path.with_extension("json.tmp");
+            fs::write(&temp, content).with_context(|| format!("writing {}", temp.display()))?;
+            set_owner_only(&temp)?;
+            fs::rename(&temp, &self.path)
+                .with_context(|| format!("replacing {}", self.path.display()))?;
+            set_owner_only(&self.path)?;
+        } else if self.path.exists() {
+            fs::remove_file(&self.path)
+                .with_context(|| format!("removing {}", self.path.display()))?;
+        }
+        *current = settings.normalized();
+        *source = overridden;
+        Ok(())
+    }
+
+    pub fn clear_override(&self) -> Result<()> {
+        if self.path.exists() {
+            fs::remove_file(&self.path)
+                .with_context(|| format!("removing {}", self.path.display()))?;
+        }
+        *self
+            .settings
+            .write()
+            .expect("compression settings lock poisoned") = self.fallback;
+        *self
+            .overridden
+            .write()
+            .expect("compression source lock poisoned") = false;
+        Ok(())
     }
 }
 

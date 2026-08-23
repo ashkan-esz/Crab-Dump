@@ -105,6 +105,14 @@ impl TelegramUserStore {
         *users = next;
         Ok(true)
     }
+
+    pub fn replace(&self, users: Vec<TelegramUser>) -> Result<()> {
+        validate_users(&users)?;
+        let mut current = self.users.write().expect("Telegram users lock poisoned");
+        persist(&self.path, &users)?;
+        *current = users;
+        Ok(())
+    }
 }
 
 fn validate_user(user: &TelegramUser) -> Result<()> {

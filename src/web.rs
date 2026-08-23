@@ -19,6 +19,8 @@ use actix_web::{
     middleware::{from_fn, Next},
     web, App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder,
 };
+use anyhow::Context;
+use futures_util::StreamExt;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,11 +31,13 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::bot::{self, BotStatusHandle};
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
 use crate::database_registry::{redact_url, DatabaseMutation, DatabaseRegistry, DatabaseSource};
 use crate::database_state::DatabaseStateStore;
 use crate::health_monitor::{HealthMonitor, ServiceInput};
 use crate::history::HistoryStore;
+use crate::migration::MigrationContext;
 use crate::resource_usage::ResourceCollector;
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
@@ -58,6 +62,7 @@ static MAX_PARALLEL_DATABASES: AtomicU64 = AtomicU64::new(0);
 
 /// Number of configured Telegram destinations, published to the dashboard.
 static TELEGRAM_CHAT_COUNT: AtomicU64 = AtomicU64::new(0);
+static BOT_CHECK_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Whether a backup cycle is executing right now. Distinguishes "working" from
 /// "sleeping until the next slot", which the per-database cards alone cannot
@@ -969,6 +974,65 @@ async fn test_telegram_api(
             "error": "Telegram API test failed"
         })),
     }
+}
+
+async fn api_bot_status(status: web::Data<BotStatusHandle>) -> impl Responder {
+    HttpResponse::Ok().json(bot::status_snapshot(status.get_ref()))
+}
+
+async fn check_bot(
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    bot_token: web::Data<String>,
+    status: web::Data<BotStatusHandle>,
+) -> impl Responder {
+    if BOT_CHECK_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "ok": false,
+            "disabled": true,
+            "disabled_reason": "Waiting for the previous bot check to finish"
+        }));
+    }
+    let client = client
+        .read()
+        .expect("Telegram client lock poisoned")
+        .clone();
+    let token = bot_token.get_ref().clone();
+    let check_token = token.clone();
+    let status_handle = status.get_ref().clone();
+    let response =
+        match tokio::task::spawn_blocking(move || bot::check(&client, &check_token)).await {
+            Ok(Ok(username)) => {
+                let mut current = status_handle.lock().expect("bot status lock poisoned");
+                current.username = Some(username.clone());
+                current.last_success_at = Some(chrono::Utc::now().to_rfc3339());
+                current.last_error = None;
+                HttpResponse::Ok().json(serde_json::json!({
+                    "ok": true,
+                    "username": username,
+                    "message": "Telegram bot check succeeded"
+                }))
+            }
+            Ok(Err(error)) => {
+                let safe = bot::safe_error(&error.to_string(), &token);
+                status_handle
+                    .lock()
+                    .expect("bot status lock poisoned")
+                    .last_error = Some(safe.clone());
+                HttpResponse::BadGateway().json(serde_json::json!({
+                    "ok": false,
+                    "error": safe
+                }))
+            }
+            _ => HttpResponse::BadGateway().json(serde_json::json!({
+                "ok": false,
+                "error": "Telegram bot check failed"
+            })),
+        };
+    BOT_CHECK_BUSY.store(false, Ordering::SeqCst);
+    response
 }
 
 /// GET /api/status/process — returns aggregated dump process status.
@@ -1989,7 +2053,8 @@ async fn logout(req: HttpRequest, auth: web::Data<DashboardAuth>) -> impl Respon
 
 fn minimum_role(req: &ServiceRequest) -> DashboardRole {
     let path = req.path();
-    if path.starts_with("/api/telegram-users")
+    if path.starts_with("/api/migration")
+        || path.starts_with("/api/telegram-users")
         || (path.starts_with("/api/services/") && path.ends_with("/check"))
         || (path.starts_with("/api/services")
             && matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE))
@@ -2034,6 +2099,7 @@ async fn dashboard_auth(
             | "/routing"
             | "/databases"
             | "/services"
+            | "/settings"
             | "/dashboard.css"
             | "/dashboard-auth.js"
             | "/healthz"
@@ -2108,6 +2174,113 @@ async fn healthz(route: web::Data<Arc<RouteManager>>) -> impl Responder {
         HttpResponse::Ok().body("ok")
     } else {
         HttpResponse::ServiceUnavailable().body("routing core unavailable")
+    }
+}
+
+async fn migration_export(context: web::Data<MigrationContext>) -> impl Responder {
+    match context.export() {
+        Ok(bytes) => HttpResponse::Ok()
+            .insert_header((header::CONTENT_TYPE, "application/json"))
+            .insert_header((
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"crab-dump-migration.json\"",
+            ))
+            .body(bytes),
+        Err(error) => {
+            tracing::error!(error = %error, "migration export failed");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "migration export failed"}))
+        }
+    }
+}
+
+async fn migration_import(
+    mut payload: web::Payload,
+    context: web::Data<MigrationContext>,
+    route: web::Data<Arc<RouteManager>>,
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    client_drop_tx: web::Data<Sender<Arc<Client>>>,
+    fallback_proxy: web::Data<Option<String>>,
+) -> impl Responder {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = payload.next().await {
+        let Ok(chunk) = chunk else {
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "invalid upload"}));
+        };
+        if bytes.len().saturating_add(chunk.len()) > 25 * 1024 * 1024 {
+            return HttpResponse::PayloadTooLarge()
+                .json(serde_json::json!({"error": "migration snapshot is too large"}));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let Some(_gate) = try_acquire_route_gate() else {
+        return HttpResponse::Conflict()
+            .json(serde_json::json!({"error": "backup or routing operation is active"}));
+    };
+    match context.validate_and_apply(&bytes) {
+        Ok(()) => {
+            let routing_result = if let Some(url) = context.routing_profiles.active_url() {
+                let core = context.routing_profiles.selected_core();
+                route.apply(&url, core).and_then(|proxy| {
+                    Client::builder()
+                        .timeout(Duration::from_secs(300))
+                        .proxy(reqwest::Proxy::all(&proxy).context("building routed client")?)
+                        .build()
+                        .map(Arc::new)
+                        .context("building routed client")
+                })
+            } else {
+                route.stop();
+                (|| -> anyhow::Result<Arc<Client>> {
+                    let mut builder = Client::builder().timeout(Duration::from_secs(300));
+                    if let Some(proxy) = fallback_proxy.as_deref() {
+                        builder = builder
+                            .proxy(reqwest::Proxy::all(proxy).context("building fallback client")?);
+                    }
+                    builder
+                        .build()
+                        .map(Arc::new)
+                        .context("building fallback client")
+                })()
+            };
+            match routing_result {
+                Ok(new_client) => {
+                    let old_client = {
+                        let mut current = client.write().expect("Telegram client lock poisoned");
+                        std::mem::replace(&mut *current, new_client)
+                    };
+                    let _ = client_drop_tx.send(old_client);
+                    route.commit();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "ok": true,
+                        "environment_derived_values_unchanged": true,
+                        "restart_required": false
+                    }))
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "imported routing state could not be activated");
+                    route.rollback();
+                    HttpResponse::BadGateway().json(serde_json::json!({
+                        "error": "imported state was stored but its routing profile could not be activated",
+                        "restart_required": true
+                    }))
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!("migration import rejected or rolled back");
+            HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": sanitize_migration_error(&error)}))
+        }
+    }
+}
+
+fn sanitize_migration_error(error: &anyhow::Error) -> String {
+    let text = error.to_string();
+    if text.contains("postgres") || text.contains("token") || text.contains("credential") {
+        "migration snapshot validation failed".into()
+    } else {
+        text
     }
 }
 
@@ -2749,6 +2922,12 @@ async fn serve_services() -> impl Responder {
         .body(include_str!("../dashboard/services.html"))
 }
 
+async fn serve_settings() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../dashboard/settings.html"))
+}
+
 async fn api_services(monitor: web::Data<Arc<HealthMonitor>>) -> impl Responder {
     let services = monitor
         .list()
@@ -2938,6 +3117,9 @@ pub async fn start_server(
     work_dir: std::path::PathBuf,
     database_registry: Arc<DatabaseRegistry>,
     health_monitor: Arc<HealthMonitor>,
+    data_dir: std::path::PathBuf,
+    history_dir: std::path::PathBuf,
+    bot_status: BotStatusHandle,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -2957,6 +3139,17 @@ pub async fn start_server(
     let resource_data = web::Data::new(ResourceCollector::new(work_dir));
     let database_registry_data = web::Data::new(database_registry);
     let health_monitor_data = web::Data::new(health_monitor);
+    let bot_status_data = web::Data::new(bot_status);
+    let migration_data = web::Data::new(MigrationContext {
+        data_dir,
+        history_dir,
+        database_registry: database_registry_data.get_ref().clone(),
+        database_states: database_state_store(),
+        telegram_users: users_data.get_ref().clone(),
+        routing_profiles: profiles_data.get_ref().clone(),
+        compression: compression_config(),
+        health: health_monitor_data.get_ref().clone(),
+    });
 
     HttpServer::new(move || {
         App::new()
@@ -2973,9 +3166,13 @@ pub async fn start_server(
             .app_data(resource_data.clone())
             .app_data(database_registry_data.clone())
             .app_data(health_monitor_data.clone())
+            .app_data(bot_status_data.clone())
+            .app_data(migration_data.clone())
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
             .route("/api/auth/logout", web::post().to(logout))
+            .route("/api/migration/export", web::get().to(migration_export))
+            .route("/api/migration/import", web::post().to(migration_import))
             .route("/api/config", web::get().to(api_config))
             .route(
                 "/api/compression-config",
@@ -2990,6 +3187,8 @@ pub async fn start_server(
                 "/api/status/service/test",
                 web::post().to(test_telegram_api),
             )
+            .route("/api/status/bot", web::get().to(api_bot_status))
+            .route("/api/status/bot/check", web::post().to(check_bot))
             .route("/api/status/process", web::get().to(api_process_status))
             .route("/api/status/database/{name}", web::get().to(api_db_status))
             .route("/api/status/databases", web::get().to(api_databases_list))
@@ -3087,6 +3286,7 @@ pub async fn start_server(
             .route("/routing", web::get().to(serve_routing))
             .route("/databases", web::get().to(serve_databases))
             .route("/services", web::get().to(serve_services))
+            .route("/settings", web::get().to(serve_settings))
             .route("/dashboard.css", web::get().to(serve_dashboard_styles))
             .route("/dashboard-auth.js", web::get().to(serve_dashboard_auth))
             .wrap(from_fn(dashboard_auth))

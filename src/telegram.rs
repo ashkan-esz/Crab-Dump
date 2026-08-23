@@ -204,7 +204,7 @@ fn format_backup_completion_with_label(
     )
 }
 
-fn escape_html(value: &str) -> String {
+pub(crate) fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -389,7 +389,41 @@ fn interruptible_sleep(
 /// document uploads. Callers intentionally decide whether a notice failure is
 /// fatal; dashboard notices are best-effort.
 pub fn send_message(client: &Client, bot_token: &str, chat_id: &str, text: &str) -> Result<()> {
-    send_message_with_cancel(client, bot_token, chat_id, text, None)
+    send_message_with_markup(client, bot_token, chat_id, text, None, None)
+}
+
+pub fn send_message_with_markup(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+    reply_markup: Option<&str>,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<()> {
+    send_message_inner(client, bot_token, chat_id, text, reply_markup, cancellation)
+}
+
+pub fn answer_callback_query(
+    client: &Client,
+    bot_token: &str,
+    callback_query_id: &str,
+) -> Result<()> {
+    let url = format!("{API_BASE}/bot{bot_token}/answerCallbackQuery");
+    let response: ApiResponse = client
+        .post(url)
+        .form(&[("callback_query_id", callback_query_id)])
+        .send()
+        .context("answering Telegram callback query")?
+        .json()
+        .context("parsing Telegram callback response")?;
+    if response.ok {
+        Ok(())
+    } else {
+        bail!(
+            "answerCallbackQuery failed (http status unavailable, tg_code={:?})",
+            response.error_code
+        )
+    }
 }
 
 pub fn send_message_with_cancel(
@@ -397,6 +431,17 @@ pub fn send_message_with_cancel(
     bot_token: &str,
     chat_id: &str,
     text: &str,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<()> {
+    send_message_inner(client, bot_token, chat_id, text, None, cancellation)
+}
+
+fn send_message_inner(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+    reply_markup: Option<&str>,
     cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
     let _operation_guard = acquire_operation(Operation::Message);
@@ -408,9 +453,13 @@ pub fn send_message_with_cancel(
             return Err(anyhow::Error::new(web::CancellationError));
         }
         attempt += 1;
+        let mut form = vec![("chat_id", chat_id), ("text", text), ("parse_mode", "HTML")];
+        if let Some(reply_markup) = reply_markup {
+            form.push(("reply_markup", reply_markup));
+        }
         let send_result = client
             .post(&url)
-            .form(&[("chat_id", chat_id), ("text", text), ("parse_mode", "HTML")])
+            .form(&form)
             .send()
             .context("sending Telegram message");
 

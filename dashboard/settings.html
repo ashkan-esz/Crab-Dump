@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>crab-dump · Settings</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard-auth.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --settings-bg: #080c14;
+      --settings-card: #111827;
+      --settings-surface: #0d141f;
+      --settings-border: #263348;
+      --settings-text: #e2e8f0;
+      --settings-muted: #8a98ad;
+      --settings-accent: #60a5fa;
+      --settings-warning: #fbbf24;
+      --settings-ok: #4ade80;
+      --settings-danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-width: 0;
+      margin: 0;
+      color: var(--settings-text);
+      background: var(--settings-bg);
+      font: 15px/1.5 system-ui, sans-serif;
+    }
+    .settings-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 1.5rem;
+      padding: 1.35rem 0 1.1rem;
+      border-bottom: 1px solid var(--settings-border);
+    }
+    .eyebrow {
+      margin: 0 0 5px;
+      color: var(--settings-accent);
+      font: 700 11px/1.2 ui-monospace, monospace;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(1.45rem, 2vw, 1.85rem); letter-spacing: -.025em; }
+    .lede { max-width: 700px; margin: 8px 0 0; color: var(--settings-muted); }
+    .settings-stack { display: grid; gap: 1rem; width: min(860px, 100%); }
+    .settings-section {
+      padding: 1.2rem 1.3rem;
+      background: var(--settings-card);
+      border: 1px solid var(--settings-border);
+      border-radius: 10px;
+    }
+    .settings-section h2 { margin: 0; font-size: 1rem; }
+    .settings-section p { color: var(--settings-muted); }
+    .migration-warning {
+      padding: .8rem .9rem;
+      color: var(--settings-warning);
+      background: rgba(251,191,36,.08);
+      border: 1px solid rgba(251,191,36,.25);
+      border-radius: 8px;
+      font-size: .82rem;
+    }
+    .migration-actions { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin-top: 1rem; }
+    .button {
+      min-height: 38px;
+      padding: .5rem .8rem;
+      color: var(--settings-text);
+      background: var(--settings-surface);
+      border: 1px solid var(--settings-border);
+      border-radius: 7px;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .button:hover { background: #172033; border-color: #40516d; }
+    .button.primary { color: #fff; background: #2563eb; border-color: #3b82f6; }
+    .button:disabled { cursor: default; opacity: .55; }
+    .migration-status { min-height: 1.3rem; margin: .8rem 0 0; color: var(--settings-muted); font-size: .8rem; }
+    .migration-status.success { color: var(--settings-ok); }
+    .migration-status.error { color: var(--settings-danger); }
+    .permission-notice { color: var(--settings-muted); }
+    button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--settings-accent); outline-offset: 2px; }
+    @media (max-width: 900px) {
+      body { display: block; }
+      main { width: 100%; padding-inline: 1rem; }
+      .settings-head { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<a class="skip-link" href="#settings-main">Skip to main content</a>
+<nav class="app-nav" aria-label="Primary navigation">
+  <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
+  <div class="app-role" aria-label="Current dashboard role"><span>Current role</span><strong id="sidebarRole">Loading...</strong></div>
+  <span class="app-nav-label">Operations</span>
+  <div class="app-nav-links">
+    <a href="/"><span aria-hidden="true">◈</span><span>Overview</span></a>
+    <a href="/databases"><span aria-hidden="true">▤</span><span>Databases</span></a>
+    <a href="/services"><span aria-hidden="true">◌</span><span>Services</span></a>
+    <a href="/users"><span aria-hidden="true">◎</span><span>Telegram users</span></a>
+    <a href="/routing"><span aria-hidden="true">⇄</span><span>Routing</span></a>
+  </div>
+  <span class="app-nav-label">System</span>
+  <div class="app-nav-links">
+    <a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a>
+    <a href="/settings" aria-current="page"><span aria-hidden="true">⚙</span><span>Settings</span></a>
+  </div>
+  <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
+</nav>
+
+<main id="settings-main" class="page">
+  <header class="settings-head">
+    <div>
+      <p class="eyebrow"><a href="/">Overview</a> / System</p>
+      <h1>Settings</h1>
+      <p class="lede">Manage dashboard-level controls and move panel-managed state between servers.</p>
+    </div>
+  </header>
+
+  <div class="settings-stack">
+    <section class="settings-section" id="migrationCard" aria-labelledby="migrationTitle" hidden>
+      <h2 id="migrationTitle">Dashboard migration</h2>
+      <p>Export or replace panel-managed databases, users, routing profiles, health state, audit history, and backup history.</p>
+      <div class="migration-warning">Exports include panel-managed credentials. Import replaces panel-managed state; environment configuration, dashboard credentials, proxy settings, paths, ports, and schedules remain unchanged.</div>
+      <div class="migration-actions">
+        <button class="button primary" id="migrationExport" type="button">Export state</button>
+        <label class="button" for="migrationFile">Choose import file</label>
+        <input id="migrationFile" type="file" accept="application/json,.json" hidden>
+        <button class="button" id="migrationImport" type="button" disabled>Import selected file</button>
+      </div>
+      <div class="migration-status" id="migrationStatus" role="status" aria-live="polite"></div>
+    </section>
+    <section class="settings-section permission-notice" id="permissionNotice" hidden>
+      <h2>Administrator access required</h2>
+      <p>Migration changes panel-managed state and is available only to administrators.</p>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const setStatus = (message, kind = '') => {
+    $('migrationStatus').textContent = message;
+    $('migrationStatus').className = `migration-status${kind ? ` ${kind}` : ''}`;
+  };
+  const call = (url, options = {}) => window.dashboardAuth.request(url, {
+    credentials: 'same-origin',
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+  });
+
+  async function exportState() {
+    const button = $('migrationExport');
+    button.disabled = true;
+    setStatus('Preparing export…');
+    try {
+      const response = await call('/api/migration/export');
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'crab-dump-migration.json';
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatus('Export downloaded.', 'success');
+    } catch {
+      setStatus('Export failed. No state was changed.', 'error');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function importState() {
+    const file = $('migrationFile').files?.[0];
+    if (!file) return;
+    if (!window.confirm('Import will replace all dashboard-managed state. Environment configuration remains unchanged. Continue?')) return;
+    const button = $('migrationImport');
+    button.disabled = true;
+    setStatus('Validating and applying import…');
+    try {
+      const response = await call('/api/migration/import', {
+        method: 'POST',
+        body: await file.text(),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+      setStatus('Import complete. Environment-derived values were left unchanged.', 'success');
+    } catch (error) {
+      setStatus(error.message || 'Import failed. No state was changed.', 'error');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function init() {
+    try {
+      const configResponse = await call('/api/config');
+      if (!configResponse.ok) throw new Error('Permission denied');
+      const config = await configResponse.json();
+      const admin = config.dashboard_role === 'admin';
+      $('sidebarRole').textContent = config.dashboard_role || 'viewer';
+      $('migrationCard').hidden = !admin;
+      $('permissionNotice').hidden = admin;
+      if (!admin) return;
+      $('migrationExport').onclick = exportState;
+      $('migrationImport').onclick = importState;
+      $('migrationFile').onchange = () => {
+        const file = $('migrationFile').files?.[0];
+        $('migrationImport').disabled = !file;
+        setStatus(file ? `Selected ${file.name}. Validate it before importing.` : '');
+      };
+    } catch {
+      $('sidebarRole').textContent = 'unknown';
+      $('migrationCard').hidden = true;
+      $('permissionNotice').hidden = false;
+      setStatus('Settings could not be loaded.', 'error');
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

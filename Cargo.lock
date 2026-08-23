@@ -664,6 +664,7 @@ dependencies = [
  "clap",
  "dotenv",
  "flate2",
+ "futures-util",
  "hex",
  "libc",
  "reqwest",
