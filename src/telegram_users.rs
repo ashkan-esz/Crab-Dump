@@ -13,6 +13,16 @@ pub struct TelegramUser {
     pub name: String,
     pub chat_id: String,
     pub enabled: bool,
+    #[serde(default = "legacy_source")]
+    pub source: String,
+}
+
+pub const SOURCE_TELEGRAM: &str = "telegram";
+pub const SOURCE_DASHBOARD: &str = "dashboard";
+pub const SOURCE_LEGACY: &str = "legacy";
+
+fn legacy_source() -> String {
+    SOURCE_LEGACY.to_string()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -84,6 +94,8 @@ impl TelegramUserStore {
             anyhow::bail!("chat ID already exists");
         }
         let mut next = users.clone();
+        let mut replacement = replacement;
+        replacement.source = next[index].source.clone();
         next[index] = replacement;
         persist(&self.path, &next)?;
         *users = next;
@@ -184,6 +196,7 @@ mod tests {
             name: "Alice".into(),
             chat_id: id.into(),
             enabled: true,
+            source: SOURCE_LEGACY.into(),
         }
     }
 
@@ -254,5 +267,46 @@ mod tests {
         assert!(bad_store.list().is_empty());
         assert_eq!(store.list().len(), 1);
         let _ = fs::remove_file(bad_parent);
+    }
+
+    #[test]
+    fn old_records_default_to_legacy_source() {
+        let dir = std::env::temp_dir().join(format!("crab-users-{}-legacy", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("users.toml");
+        fs::write(
+            &path,
+            "[[users]]\nname = \"Old\"\nchat_id = \"-1\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let store = TelegramUserStore::load(&path).unwrap();
+
+        assert_eq!(store.list()[0].source, SOURCE_LEGACY);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_preserves_source() {
+        let dir = std::env::temp_dir().join(format!("crab-users-{}-source", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("users.toml");
+        let store = TelegramUserStore::load(&path).unwrap();
+        let mut created = user("-1");
+        created.source = SOURCE_TELEGRAM.into();
+        store.create(created).unwrap();
+
+        let replacement = TelegramUser {
+            name: "Updated".into(),
+            chat_id: "-1".into(),
+            enabled: false,
+            source: SOURCE_DASHBOARD.into(),
+        };
+        store.update("-1", replacement).unwrap();
+
+        assert_eq!(store.list()[0].name, "Updated");
+        assert!(!store.list()[0].enabled);
+        assert_eq!(store.list()[0].source, SOURCE_TELEGRAM);
+        let _ = fs::remove_dir_all(dir);
     }
 }

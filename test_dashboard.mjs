@@ -458,6 +458,11 @@ assert.match(usersBody, /This removes the directory record and cannot be undone/
 assert.match(usersBody, /catch \(error\) \{ setText\('form-summary', error\.message\)/);
 assert.doesNotMatch(usersBody, /catch \(error\)[\s\S]{0,180}user-form'\)\.reset/);
 assert.match(usersBody, /window\.escapeHtml = escapeHtml/);
+assert.match(usersHtml, /<th scope="col">Source<\/th>/);
+assert.match(usersBody, /function sourceLabel\(source\)/);
+assert.match(usersBody, /telegram: 'Telegram'/);
+assert.match(usersBody, /dashboard: 'Dashboard'/);
+assert.match(usersBody, /legacy: 'Legacy'/);
 
 const escapeSource = usersBody.match(/function escapeHtml\(value\) \{[\s\S]*?\n  \}/)[0];
 const escapeHtml = new Function(`${escapeSource}; return escapeHtml;`)();

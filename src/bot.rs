@@ -12,7 +12,7 @@ use crate::config::DatabaseConfig;
 use crate::database_registry::DatabaseRegistry;
 use crate::database_state::DatabaseStateStore;
 use crate::telegram;
-use crate::telegram_users::TelegramUserStore;
+use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_TELEGRAM};
 use crate::web::{self, ManualBackupRequest};
 
 const MAX_ATTEMPTS: u32 = 5;
@@ -79,6 +79,7 @@ pub fn safe_error(error: &str, token: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    AddMe,
     Help,
     Status,
     Backup(String),
@@ -87,8 +88,14 @@ pub enum Command {
 pub fn parse_command(text: &str) -> Option<Command> {
     let mut words = text.split_whitespace();
     let command = words.next()?.strip_prefix('/')?;
-    let command = command.split('@').next()?.to_ascii_lowercase();
+    let mut command_parts = command.split('@');
+    let command = command_parts.next()?;
+    if command_parts.next().is_some_and(|bot| bot.is_empty()) || command_parts.next().is_some() {
+        return None;
+    }
+    let command = command.to_ascii_lowercase();
     match command.as_str() {
+        "add-me" if words.next().is_none() => Some(Command::AddMe),
         "help" if words.next().is_none() => Some(Command::Help),
         "status" if words.next().is_none() => Some(Command::Status),
         "backup" => {
@@ -100,7 +107,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
 }
 
 pub fn help_message() -> &'static str {
-    "<b>crab-dump commands</b>\n\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup"
+    "<b>crab-dump commands</b>\n\n/add-me — register this Telegram account\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,12 +217,20 @@ struct Update {
 #[derive(Debug, Deserialize)]
 struct Message {
     chat: Chat,
+    from: Option<MessageSender>,
     text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Chat {
     id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageSender {
+    first_name: Option<String>,
+    last_name: Option<String>,
+    username: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -425,6 +440,39 @@ fn handle_message(
     message: Message,
 ) {
     let chat_id = message.chat.id.to_string();
+    let Some(command) = message.text.as_deref().and_then(parse_command) else {
+        return;
+    };
+    if command == Command::AddMe {
+        let response = if users.list().iter().any(|user| user.chat_id == chat_id) {
+            "You are already registered.".to_string()
+        } else {
+            let user = TelegramUser {
+                name: display_name(message.from.as_ref(), &chat_id),
+                chat_id: chat_id.clone(),
+                enabled: false,
+                source: SOURCE_TELEGRAM.into(),
+            };
+            match users.create(user) {
+                Ok(()) => {
+                    "✅ You are registered. An administrator must enable your account before you can use bot commands.".to_string()
+                }
+                Err(error) if error.to_string().contains("already exists") => {
+                    "You are already registered.".to_string()
+                }
+                Err(error) => {
+                    set_error(status, &safe_error(&error.to_string(), token));
+                    "Registration failed. Please try again later.".to_string()
+                }
+            }
+        };
+        if let Err(error) =
+            telegram::send_message_with_markup(client, token, &chat_id, &response, None, None)
+        {
+            set_error(status, &safe_error(&error.to_string(), token));
+        }
+        return;
+    }
     let Some(user) = users
         .list()
         .into_iter()
@@ -432,10 +480,8 @@ fn handle_message(
     else {
         return;
     };
-    let Some(command) = message.text.as_deref().and_then(parse_command) else {
-        return;
-    };
     let (response, markup) = match command {
+        Command::AddMe => unreachable!("handled before authorization"),
         Command::Help => (help_message().to_string(), Some(action_markup())),
         Command::Status => (command_status_message(status), Some(action_markup())),
         Command::Backup(database) => (
@@ -452,6 +498,34 @@ fn handle_message(
         None,
     ) {
         set_error(status, &safe_error(&error.to_string(), token));
+    }
+}
+
+fn display_name(sender: Option<&MessageSender>, chat_id: &str) -> String {
+    let Some(sender) = sender else {
+        return chat_id.to_string();
+    };
+    let first = sender
+        .first_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let last = sender
+        .last_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (first, last) {
+        (Some(first), Some(last)) => format!("{first} {last}"),
+        (Some(first), None) => first.to_string(),
+        (None, Some(last)) => last.to_string(),
+        (None, None) => sender
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| chat_id.to_string()),
     }
 }
 
@@ -590,6 +664,12 @@ mod tests {
 
     #[test]
     fn parses_supported_commands_and_rejects_bad_arguments() {
+        assert_eq!(parse_command("/add-me"), Some(Command::AddMe));
+        assert_eq!(parse_command("/add-me@crab_dump"), Some(Command::AddMe));
+        assert_eq!(parse_command("/add-me@"), None);
+        assert_eq!(parse_command("/add-me@a@b"), None);
+        assert_eq!(parse_command("/add-me now"), None);
+        assert_eq!(parse_command("/add_me"), None);
         assert_eq!(parse_command("/help"), Some(Command::Help));
         assert_eq!(parse_command("/status@crab_dump"), Some(Command::Status));
         assert_eq!(
@@ -642,5 +722,23 @@ mod tests {
             .expect("keyboard row");
         assert_eq!(buttons[0]["callback_data"], "bot:status");
         assert_eq!(buttons[1]["callback_data"], "bot:backup");
+    }
+
+    #[test]
+    fn derives_sender_display_name_in_priority_order() {
+        let sender = MessageSender {
+            first_name: Some("Ada".into()),
+            last_name: Some("Lovelace".into()),
+            username: Some("ada".into()),
+        };
+        assert_eq!(display_name(Some(&sender), "99"), "Ada Lovelace");
+
+        let sender = MessageSender {
+            first_name: None,
+            last_name: None,
+            username: Some("ada".into()),
+        };
+        assert_eq!(display_name(Some(&sender), "99"), "ada");
+        assert_eq!(display_name(None, "99"), "99");
     }
 }

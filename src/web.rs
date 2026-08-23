@@ -3834,6 +3834,7 @@ mod tests {
     #[actix_web::test]
     async fn telegram_users_require_auth_and_support_crud() {
         let store = users_test_store();
+        let store_snapshot = Arc::clone(&store);
         let app = aw_test::init_service(
             App::new()
                 .app_data(web::Data::new(DashboardAuth::new(
@@ -3875,12 +3876,13 @@ mod tests {
                 "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
             ))
             .set_json(serde_json::json!({
-                "name": "Alice",
-                "chat_id": "-1",
-                "enabled": true
+                    "name": "Alice",
+                    "chat_id": "-1",
+                    "enabled": true
             }))
             .to_request();
         assert_eq!(aw_test::call_service(&app, create).await.status(), 201);
+        assert_eq!(store_snapshot.list()[0].source, SOURCE_DASHBOARD);
 
         let update = aw_test::TestRequest::put()
             .uri("/api/telegram-users/-1")
@@ -3889,12 +3891,13 @@ mod tests {
                 "Basic YWRtaW46YS1zdHJvbmctdGVzdC1wYXNzd29yZA==",
             ))
             .set_json(serde_json::json!({
-                "name": "Alice updated",
-                "chat_id": "-1",
-                "enabled": false
+                    "name": "Alice updated",
+                    "chat_id": "-1",
+                    "enabled": false
             }))
             .to_request();
         assert_eq!(aw_test::call_service(&app, update).await.status(), 200);
+        assert_eq!(store_snapshot.list()[0].source, SOURCE_DASHBOARD);
 
         let delete = aw_test::TestRequest::delete()
             .uri("/api/telegram-users/-1")

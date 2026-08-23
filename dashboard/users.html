@@ -117,6 +117,7 @@
     tbody tr:hover { background: var(--surface-hover); }
     .name-cell { min-width: 220px; font-weight: 650; overflow-wrap: anywhere; }
     .chat-cell { min-width: 210px; color: var(--muted); overflow-wrap: anywhere; }
+    .source-cell { min-width: 120px; color: var(--muted); white-space: nowrap; }
     .status-cell { white-space: nowrap; }
     .status { display: inline-flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .status.enabled { color: var(--success); background: var(--success-bg); }
@@ -289,7 +290,7 @@
         <div class="table-scroll" id="table-scroll" aria-busy="false">
           <table>
             <caption>Telegram user directory</caption>
-            <thead><tr><th scope="col">Name</th><th scope="col">Chat ID</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+            <thead><tr><th scope="col">Name</th><th scope="col">Chat ID</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
             <tbody id="users"></tbody>
           </table>
         </div>
@@ -357,6 +358,9 @@
     return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
   }
   function pluralize(count, singular, plural = singular + 's') { return `${count} ${count === 1 ? singular : plural}`; }
+  function sourceLabel(source) {
+    return ({ telegram: 'Telegram', dashboard: 'Dashboard', legacy: 'Legacy' })[source] || 'Legacy';
+  }
   function sortedUsers(list) {
     return list.map((user, index) => ({ user, index })).sort((a, b) => {
       const nameOrder = String(a.user.name).localeCompare(String(b.user.name), undefined, { sensitivity: 'base', numeric: true });
@@ -392,19 +396,20 @@
       return;
     }
     if (loadError && !users.length) {
-      body.innerHTML = `<tr><td colspan="4"><div class="error-state"><h2>Users could not be loaded</h2><p>${escapeHtml(loadError)}</p><button class="button" type="button" data-action="retry">Try again</button></div></td></tr>`;
+      body.innerHTML = `<tr><td colspan="5"><div class="error-state"><h2>Users could not be loaded</h2><p>${escapeHtml(loadError)}</p><button class="button" type="button" data-action="retry">Try again</button></div></td></tr>`;
       return;
     }
     const filtered = visibleUsers();
     if (!filtered.length) {
       const filteredState = users.length > 0 && (state.query.trim() || state.status !== 'all');
-      body.innerHTML = `<tr><td colspan="4"><div class="empty"><h2>${filteredState ? 'No matching users' : 'No users yet'}</h2><p>${filteredState ? 'Try a different search or clear the active filters.' : 'Add a user to keep an easy-to-scan directory for operators.'}</p><button class="button ${filteredState ? '' : 'primary'}" type="button" data-action="${filteredState ? 'clear-filters' : 'add'}">${filteredState ? 'Clear filters' : 'Add your first user'}</button></div></td></tr>`;
+      body.innerHTML = `<tr><td colspan="5"><div class="empty"><h2>${filteredState ? 'No matching users' : 'No users yet'}</h2><p>${filteredState ? 'Try a different search or clear the active filters.' : 'Add a user to keep an easy-to-scan directory for operators.'}</p><button class="button ${filteredState ? '' : 'primary'}" type="button" data-action="${filteredState ? 'clear-filters' : 'add'}">${filteredState ? 'Clear filters' : 'Add your first user'}</button></div></td></tr>`;
       return;
     }
     body.innerHTML = filtered.map(user => {
       return `<tr>
         <td class="name-cell">${escapeHtml(user.name)}</td>
         <td class="chat-cell mono">${escapeHtml(user.chat_id)}</td>
+        <td class="source-cell">${sourceLabel(user.source)}</td>
         <td class="status-cell"><span class="status ${user.enabled ? 'enabled' : 'disabled'}"><span class="dot" aria-hidden="true"></span>${user.enabled ? 'Enabled' : 'Disabled'}</span></td>
         <td><div class="actions">
           ${admin ? `
@@ -560,6 +565,7 @@
     if ($('inspector').classList.contains('open')) { if (event.key === 'Escape') closeEditor(); else trapFocus(event, $('inspector')); }
   });
   window.escapeHtml = escapeHtml;
+  window.sourceLabel = sourceLabel;
   window.sortedUsers = sortedUsers;
   window.visibleUsers = visibleUsers;
   window.renderRows = renderRows;
