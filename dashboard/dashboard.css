@@ -2838,3 +2838,339 @@ td:nth-last-child(-n + 2) {
     flex: 1 1 100%;
   }
 }
+
+/* Overview service health summary */
+.service-health-card {
+  width: min(1180px, calc(100% - 3rem));
+  max-width: none;
+  margin: 1.25rem auto 0;
+  padding: .75rem 1rem .75rem;
+  gap: .9rem;
+}
+
+.service-health-card:hover {
+  transform: none;
+}
+
+.service-health-card::before {
+  display: none;
+}
+
+.service-health-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.service-health-toggle {
+  display: grid;
+  grid-template-columns: minmax(11rem, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: .35rem 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.service-health-toggle:focus-visible {
+  outline: 2px solid var(--dash-accent);
+  outline-offset: 4px;
+  border-radius: var(--dash-radius-sm);
+}
+
+.service-health-toggle:hover .card-title {
+  color: var(--dash-accent);
+}
+
+.service-health-heading {
+  display: grid;
+  gap: .25rem;
+  min-width: 0;
+}
+
+.service-health-kicker {
+  display: block;
+  color: var(--dash-subtle);
+  font: .62rem var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.service-health-link {
+  flex: 0 0 auto;
+  padding: .25rem 0;
+  color: var(--dash-accent);
+  font-size: .72rem;
+  text-decoration: none;
+}
+
+.service-health-link:hover {
+  color: var(--dash-text);
+  text-decoration: underline;
+}
+
+.service-health-chevron {
+  flex: 0 0 auto;
+  color: var(--dash-subtle);
+  font-size: 1rem;
+  transition: transform .15s;
+}
+
+.service-health-card.expanded .service-health-chevron {
+  transform: rotate(90deg);
+}
+
+.service-health-details[hidden] {
+  display: none;
+}
+
+.service-health-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.service-health-count {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  min-height: 1.75rem;
+  padding: .25rem .6rem;
+  color: var(--dash-muted);
+  background: rgba(255, 255, 255, .025);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  font: .68rem var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.service-health-count.total strong {
+  color: var(--dash-text);
+}
+
+.service-health-count.up { color: var(--dash-success); border-color: rgba(88, 214, 141, .3); background: var(--dash-success-soft); }
+.service-health-count.down { color: var(--dash-danger); border-color: rgba(255, 125, 134, .3); background: var(--dash-danger-soft); }
+.service-health-count.unknown { color: var(--dash-warning); border-color: rgba(246, 200, 95, .3); background: var(--dash-warning-soft); }
+
+.service-health-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--dash-subtle);
+}
+
+.service-health-dot.up {
+  background: var(--dash-success);
+  box-shadow: 0 0 0 3px var(--dash-success-soft);
+}
+
+.service-health-dot.down {
+  background: var(--dash-danger);
+  box-shadow: 0 0 0 3px var(--dash-danger-soft);
+}
+
+.service-health-dot.unknown {
+  background: var(--dash-warning);
+  box-shadow: 0 0 0 3px var(--dash-warning-soft);
+}
+
+.service-health-dot.disabled {
+  background: transparent;
+  border: 2px solid var(--dash-subtle);
+}
+
+.service-health-error {
+  padding: .55rem .7rem;
+  color: var(--dash-danger);
+  background: var(--dash-danger-soft);
+  border: 1px solid rgba(255, 125, 134, .3);
+  border-radius: var(--dash-radius-sm);
+  font-size: .72rem;
+}
+
+.service-health-error[hidden] {
+  display: none;
+}
+
+.service-health-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--dash-border);
+}
+
+.service-health-row,
+.service-health-skeleton-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) minmax(4rem, auto) minmax(5.5rem, auto) auto auto;
+  align-items: center;
+  gap: .75rem;
+  min-height: 2.65rem;
+  padding: .45rem .15rem;
+  border-bottom: 1px solid rgba(41, 56, 79, .65);
+}
+
+.service-health-row:last-child {
+  border-bottom: 0;
+}
+
+.service-health-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dash-text);
+  font-size: .8rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-health-latency,
+.service-health-check,
+.service-health-status {
+  color: var(--dash-muted);
+  font: .66rem var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.service-health-status {
+  min-width: 4.5rem;
+  color: var(--dash-subtle);
+  font-size: .58rem;
+  letter-spacing: .04em;
+}
+
+.service-health-check-button {
+  min-height: 28px;
+  padding: .25rem .5rem;
+  color: var(--dash-accent);
+  background: transparent;
+  border: 1px solid var(--dash-border-strong);
+  border-radius: var(--dash-radius-sm);
+  font-family: inherit;
+  font-size: .62rem;
+  white-space: nowrap;
+}
+
+.service-health-check-button:hover {
+  background: var(--dash-accent-soft);
+  border-color: var(--dash-accent);
+}
+
+.service-health-check-button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.service-health-row.up .service-health-status { color: var(--dash-success); }
+.service-health-row.down .service-health-status { color: var(--dash-danger); }
+.service-health-row.unknown .service-health-status { color: var(--dash-warning); }
+
+.service-health-empty {
+  display: grid;
+  gap: .25rem;
+  padding: 1rem .15rem .2rem;
+  color: var(--dash-muted);
+  font-size: .75rem;
+}
+
+.service-health-empty strong {
+  color: var(--dash-text);
+  font-size: .8rem;
+}
+
+.service-health-empty a {
+  width: fit-content;
+  margin-top: .2rem;
+  font-size: .72rem;
+}
+
+.service-health-skeleton-row .skeleton-line {
+  grid-column: 1 / span 2;
+  width: 48%;
+}
+
+.service-health-skeleton-row .skeleton-line.short {
+  grid-column: 4 / -1;
+  justify-self: end;
+  width: 4.5rem;
+}
+
+@media (max-width: 560px) {
+  .service-health-card {
+    width: calc(100% - 1.5rem);
+    padding: .7rem .85rem .7rem;
+  }
+
+  .service-health-header {
+    flex-direction: column;
+    gap: .5rem;
+  }
+
+  .service-health-toggle {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .65rem;
+    width: 100%;
+  }
+
+  .service-health-counts {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .service-health-chevron {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .service-health-link {
+    padding: 0;
+  }
+
+  .service-health-row,
+  .service-health-skeleton-row {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    gap: .6rem;
+  }
+
+  .service-health-latency {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
+  }
+
+  .service-health-check {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  .service-health-status {
+    display: none;
+  }
+
+  .service-health-check-button {
+    grid-column: 2 / -1;
+    grid-row: 3;
+    justify-self: start;
+  }
+
+  .service-health-skeleton-row .skeleton-line {
+    grid-column: 1 / span 2;
+  }
+
+  .service-health-skeleton-row .skeleton-line.short {
+    grid-column: 3;
+  }
+}

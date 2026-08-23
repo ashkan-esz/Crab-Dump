@@ -1687,6 +1687,36 @@
 
     </div>
 
+    <!-- Monitored service summary -->
+    <section class="service-health-card card" id="serviceHealthCard" aria-labelledby="serviceHealthTitle">
+        <div class="service-health-header">
+            <button class="service-health-toggle" id="serviceHealthToggle" type="button"
+                    aria-expanded="false" aria-controls="serviceHealthDetails">
+                <span class="service-health-heading">
+                    <span class="service-health-kicker">External checks</span>
+                    <span class="card-title" id="serviceHealthTitle">Service health</span>
+                </span>
+                <span class="service-health-counts" aria-label="Service health counts">
+                    <span class="service-health-count total"><strong id="serviceHealthTotal">0</strong> <span id="serviceHealthTotalLabel">services</span></span>
+                    <span class="service-health-count up"><span class="service-health-dot up" aria-hidden="true"></span><span id="serviceHealthUp">0 up</span></span>
+                    <span class="service-health-count down"><span class="service-health-dot down" aria-hidden="true"></span><span id="serviceHealthDown">0 down</span></span>
+                    <span class="service-health-count unknown"><span class="service-health-dot unknown" aria-hidden="true"></span><span id="serviceHealthUnknown">0 unknown</span></span>
+                    <span class="service-health-count disabled"><span class="service-health-dot disabled" aria-hidden="true"></span><span id="serviceHealthDisabled">0 disabled</span></span>
+                </span>
+                <span class="service-health-chevron" aria-hidden="true">›</span>
+            </button>
+            <a class="service-health-link" href="/services">View all services <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="service-health-details" id="serviceHealthDetails" hidden>
+            <div class="service-health-error" id="serviceHealthError" role="status" aria-live="polite" hidden></div>
+            <ul class="service-health-list" id="serviceHealthList" aria-label="Monitored service status" aria-busy="true">
+                <li class="service-health-skeleton-row" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+                <li class="service-health-skeleton-row" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+                <li class="service-health-skeleton-row" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short"></span></li>
+            </ul>
+        </div>
+    </section>
+
     <!-- Database-level overview (rendered dynamically) -->
     <section id="dbSection" style="display:none;" aria-labelledby="dbSectionTitle">
         <div class="db-head">
@@ -1768,6 +1798,10 @@
     let compressionExpanded = false;
     let refreshIntervalMs = 2000;
     let refreshTimer = null;
+    let serviceHealthLoaded = false;
+    let serviceHealthEntries = [];
+    let serviceHealthExpanded = false;
+    const serviceHealthChecking = new Set();
 
     // ── Helpers ────────────────────────────────────────────────────
     function formatUptime(seconds) {
@@ -1884,6 +1918,131 @@
             button.disabled = Boolean(data.test_disabled);
             button.title = reason;
             message.textContent = reason ? `Test unavailable: ${reason}` : '';
+        }
+    }
+
+    // ── Service health summary ─────────────────────────────────────
+    function serviceHealthState(entry) {
+        if (!entry?.definition?.enabled) return 'disabled';
+        const status = String(entry?.runtime?.status || 'unknown').toLowerCase();
+        return ['down', 'unknown', 'up'].includes(status) ? status : 'unknown';
+    }
+
+    function serviceHealthRelativeTime(value) {
+        if (!value) return 'Never checked';
+        const timestamp = Date.parse(value);
+        if (Number.isNaN(timestamp)) return 'Unknown';
+        const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+        if (seconds < 60) return seconds === 0 ? 'Just now' : `${seconds}s ago`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+        return `${Math.floor(seconds / 86400)}d ago`;
+    }
+
+    function setServiceHealthExpanded(expanded) {
+        const card = document.getElementById('serviceHealthCard');
+        const toggle = document.getElementById('serviceHealthToggle');
+        const details = document.getElementById('serviceHealthDetails');
+        serviceHealthExpanded = expanded === true;
+        card.classList.toggle('expanded', serviceHealthExpanded);
+        toggle.setAttribute('aria-expanded', String(serviceHealthExpanded));
+        details.hidden = !serviceHealthExpanded;
+    }
+
+    function toggleServiceHealth() {
+        setServiceHealthExpanded(!serviceHealthExpanded);
+    }
+
+    function renderServiceHealth(entries) {
+        const list = document.getElementById('serviceHealthList');
+        const error = document.getElementById('serviceHealthError');
+        const services = Array.isArray(entries) ? entries : [];
+        serviceHealthEntries = services;
+        const priority = { down: 0, unknown: 1, up: 2, disabled: 3 };
+        const counts = { down: 0, unknown: 0, up: 0, disabled: 0 };
+
+        services.forEach(entry => { counts[serviceHealthState(entry)] += 1; });
+        document.getElementById('serviceHealthTotal').textContent = services.length;
+        document.getElementById('serviceHealthTotalLabel').textContent =
+            services.length === 1 ? 'service' : 'services';
+        document.getElementById('serviceHealthUp').textContent = `${counts.up} up`;
+        document.getElementById('serviceHealthDown').textContent = `${counts.down} down`;
+        document.getElementById('serviceHealthUnknown').textContent = `${counts.unknown} unknown`;
+        document.getElementById('serviceHealthDisabled').textContent = `${counts.disabled} disabled`;
+        error.hidden = true;
+        serviceHealthLoaded = true;
+        list.setAttribute('aria-busy', 'false');
+
+        if (!services.length) {
+            list.innerHTML = '<li><div class="service-health-empty"><strong>No services monitored</strong><span>Add a service to start health checks.</span><a href="/services">Manage monitored services</a></div></li>';
+            return;
+        }
+
+        const sorted = [...services].sort((left, right) => {
+            const leftState = serviceHealthState(left);
+            const rightState = serviceHealthState(right);
+            return priority[leftState] - priority[rightState]
+                || String(left?.definition?.name || '').localeCompare(String(right?.definition?.name || ''));
+        });
+
+        list.innerHTML = sorted.slice(0, 5).map(entry => {
+            const state = serviceHealthState(entry);
+            const name = entry?.definition?.name || 'Unnamed service';
+            const latency = entry?.runtime?.latency_ms == null
+                ? '—'
+                : `${entry.runtime.latency_ms} ms`;
+            const lastCheck = entry?.runtime?.last_check;
+            const relative = serviceHealthRelativeTime(lastCheck);
+            const title = lastCheck ? `Last checked ${lastCheck}` : 'No health check recorded';
+            const canCheck = ['admin', 'operator'].includes(config?.dashboard_role);
+            const checking = serviceHealthChecking.has(name);
+            return `<li class="service-health-row ${state}">
+                <span class="service-health-dot ${state}" aria-hidden="true"></span>
+                <span class="service-health-name">${escapeHtml(name)}</span>
+                <span class="service-health-latency">${escapeHtml(latency)}</span>
+                <span class="service-health-check" title="${escapeHtml(title)}">${escapeHtml(relative)}</span>
+                <span class="service-health-status">${state.toUpperCase()}</span>
+                ${canCheck ? `<button class="service-health-check-button" type="button" data-service-check="${escapeHtml(name)}" ${checking ? 'disabled aria-busy="true"' : ''}>${checking ? 'Checking…' : 'Check now'}</button>` : ''}
+            </li>`;
+        }).join('');
+        list.querySelectorAll('[data-service-check]').forEach(button => {
+            button.addEventListener('click', () => checkServiceHealth(button.dataset.serviceCheck));
+        });
+    }
+
+    function renderServiceHealthError(error) {
+        const message = document.getElementById('serviceHealthError');
+        message.textContent = `Service health unavailable: ${error?.message || 'request failed'}`;
+        message.hidden = false;
+        if (!serviceHealthLoaded) {
+            document.getElementById('serviceHealthList').setAttribute('aria-busy', 'false');
+        }
+    }
+
+    async function checkServiceHealth(name) {
+        if (!name || serviceHealthChecking.has(name)) return;
+        serviceHealthChecking.add(name);
+        renderServiceHealth(serviceHealthEntries);
+        let checkError = null;
+        try {
+            const updated = await fetchStatus(
+                `/api/services/${encodeURIComponent(name)}/check`,
+                { method: 'POST' },
+            );
+            const index = serviceHealthEntries.findIndex(
+                entry => entry?.definition?.name === name,
+            );
+            if (index >= 0) serviceHealthEntries[index] = updated;
+        } catch (error) {
+            checkError = `Check failed for ${name}: ${error?.message || 'request failed'}`;
+        } finally {
+            serviceHealthChecking.delete(name);
+            renderServiceHealth(serviceHealthEntries);
+            if (checkError) {
+                const message = document.getElementById('serviceHealthError');
+                message.textContent = checkError;
+                message.hidden = false;
+            }
         }
     }
 
@@ -2964,6 +3123,7 @@
                     latestDatabases = data;
                     renderDatabases(data);
                 }),
+                fetchStatus('/api/services').then(renderServiceHealth).catch(renderServiceHealthError),
                 fetchStatus('/api/telegram-users').then(data => {
                     telegramUsers = data;
                     renderDatabases(latestDatabases);
@@ -3028,6 +3188,8 @@
     async function init() {
         setupManualBackupModal();
         document.getElementById('compressionToggle').addEventListener('click', toggleCompressionEditor);
+        document.getElementById('serviceHealthToggle').addEventListener('click', toggleServiceHealth);
+        setServiceHealthExpanded(false);
         document.getElementById('compressionForm').addEventListener('submit', saveCompressionConfig);
         document.getElementById('compressionCodec').addEventListener('change', () => {
             compressionDirty = true;

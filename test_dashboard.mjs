@@ -17,19 +17,57 @@ const pageHtml = Object.fromEntries(dashboardPages.map(file => [
 ]));
 const authJs = readFileSync(new URL(`${dashboardDir}dashboard-auth.js`, import.meta.url), 'utf8');
 const servicesPage = pageHtml['services.html'];
+const dashboardCss = readFileSync(new URL(`${dashboardDir}dashboard.css`, import.meta.url), 'utf8');
 const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 const noop = () => {};
-const element = () => ({ classList: { add: noop, remove: noop }, textContent: '' });
+const elements = new Map();
+const element = id => elements.get(id) ?? (() => {
+    const value = {
+        classList: { add: noop, remove: noop, toggle: noop },
+        attributes: {},
+        hidden: false,
+        textContent: '',
+        setAttribute(name, content) { this.attributes[name] = content; },
+        addEventListener: noop,
+    };
+    elements.set(id, value);
+    return value;
+})();
 const stubs = {
     document: { addEventListener: noop, getElementById: element },
     window: { addEventListener: noop },
 };
 const load = new Function(
     ...Object.keys(stubs),
-    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel };`,
+    `${body}\nreturn { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel, setServiceHealthExpanded, toggleServiceHealth, get serviceHealthExpanded() { return serviceHealthExpanded; } };`,
 );
-const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel } = load(...Object.values(stubs));
+const { dbView, timelineClasses, sizeLine, fmtBytes, fmtSpeed, telegramDestinationText, historyValue, historyMarkup, expandedDatabases, databaseOrder, STAGES, renderPhase, renderSchedule, scheduleSecs, formatSchedule, uploadPercent, uploadDetailsVisible, progressLabel, setServiceHealthExpanded, toggleServiceHealth } = load(...Object.values(stubs));
+
+const serviceHealthToggle = element('serviceHealthToggle');
+const serviceHealthDetails = element('serviceHealthDetails');
+element('serviceHealthCard');
+assert.match(html, /id="serviceHealthToggle"[^>]*aria-expanded="false"[^>]*aria-controls="serviceHealthDetails"/);
+assert.match(html, /id="serviceHealthDetails"[^>]*hidden/);
+assert.match(html, /id="serviceHealthError"[^>]*hidden/);
+assert.match(html, /id="serviceHealthList"[^>]*aria-busy="true"/);
+setServiceHealthExpanded(false);
+assert.equal(serviceHealthToggle.attributes['aria-expanded'], 'false');
+assert.equal(serviceHealthDetails.hidden, true);
+setServiceHealthExpanded(true);
+assert.equal(serviceHealthToggle.attributes['aria-expanded'], 'true');
+assert.equal(serviceHealthDetails.hidden, false);
+toggleServiceHealth();
+assert.equal(serviceHealthToggle.attributes['aria-expanded'], 'false');
+assert.equal(serviceHealthDetails.hidden, true);
+assert.match(html, /class="service-health-chevron"/);
+assert.match(dashboardCss, /\.service-health-toggle:focus-visible/);
+assert.match(dashboardCss, /\.service-health-card\.expanded \.service-health-chevron/);
+assert.match(dashboardCss, /\.service-health-card \{[\s\S]*margin: 1\.25rem auto 0/);
+assert.match(dashboardCss, /\.service-health-card \{[\s\S]*padding: \.75rem 1rem .75rem/);
+assert.match(html, /serviceHealthCard/);
+assert.match(body, /api\/services\/\$\{encodeURIComponent\(name\)\}\/check/);
+assert.match(body, /serviceHealthToggle[\s\S]*toggleServiceHealth|toggleServiceHealth[\s\S]*serviceHealthToggle/);
 
 function operationsLinks(source) {
     const nav = source.match(/<span class="app-nav-label">Operations<\/span>\s*<div class="app-nav-links">([\s\S]*?)<\/div>/);
@@ -508,7 +546,6 @@ assert.match(authJs, /dashboard-auth-error/);
 assert.match(authJs, /disabled = true/);
 assert.match(authJs, /Sign in/);
 assert.match(authJs, /try again/);
-const dashboardCss = readFileSync(new URL(`${dashboardDir}dashboard.css`, import.meta.url), 'utf8');
 assert.match(dashboardCss, /\.routing-status \{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word/);
 assert.match(dashboardCss, /\.routing-status button \{[\s\S]*max-width: 100%;[\s\S]*overflow-wrap: anywhere/);
 assert.match(dashboardCss, /body \{[\s\S]*overflow-x: hidden/);
