@@ -21,21 +21,21 @@ use actix_web::{
 };
 use anyhow::Context;
 use futures_util::StreamExt;
+use getrandom::fill as fill_random;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use crate::bot::{self, BotState, BotStatus, BotStatusHandle};
 use crate::compression_config::{CompressionConfigStore, CompressionSettings};
 use crate::database_registry::{redact_url, DatabaseMutation, DatabaseRegistry, DatabaseSource};
 use crate::database_state::DatabaseStateStore;
-use crate::health_monitor::{HealthMonitor, ServiceInput};
+use crate::health_monitor::{HealthMonitor, ServiceDefinition, ServiceInput};
 use crate::history::HistoryStore;
 use crate::migration::MigrationContext;
 use crate::resource_usage::{ResourceCollector, ResourceUsage};
@@ -2068,17 +2068,11 @@ struct LoginPayload {
     password: String,
 }
 
-fn token() -> String {
-    static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut hasher = Sha256::new();
-    hasher.update(now.to_le_bytes());
-    hasher.update(counter.to_le_bytes());
-    hex::encode(hasher.finalize())
+fn token() -> anyhow::Result<String> {
+    let mut bytes = [0_u8; 32];
+    fill_random(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("generating dashboard token: {error}"))?;
+    Ok(hex::encode(bytes))
 }
 
 async fn login(
@@ -2103,8 +2097,22 @@ async fn login(
             .json(serde_json::json!({"error": "invalid credentials"}));
     };
     auth.clear_failures(&source);
-    let session_token = token();
-    let csrf_token = token();
+    let session_token = match token() {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(error = %error, "dashboard session token generation failed");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "login unavailable"}));
+        }
+    };
+    let csrf_token = match token() {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(error = %error, "dashboard CSRF token generation failed");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "login unavailable"}));
+        }
+    };
     auth.sessions
         .lock()
         .expect("dashboard session lock poisoned")
@@ -3066,25 +3074,49 @@ async fn serve_settings() -> impl Responder {
         .body(include_str!("../dashboard/settings.html"))
 }
 
-async fn api_services(monitor: web::Data<Arc<HealthMonitor>>) -> impl Responder {
+fn service_definition_for_role(
+    mut definition: ServiceDefinition,
+    role: DashboardRole,
+) -> ServiceDefinition {
+    if role == DashboardRole::Viewer {
+        definition.recipients.clear();
+    }
+    definition
+}
+
+fn authenticated_role(req: &HttpRequest) -> DashboardRole {
+    req.extensions()
+        .get::<AuthenticatedUser>()
+        .map_or(DashboardRole::Admin, |user| user.role)
+}
+
+async fn api_services(req: HttpRequest, monitor: web::Data<Arc<HealthMonitor>>) -> impl Responder {
+    let role = authenticated_role(&req);
     let services = monitor
         .list()
         .into_iter()
         .map(|service| {
             let runtime = monitor.runtime(&service.name);
-            serde_json::json!({"definition": service, "runtime": runtime})
+            serde_json::json!({
+                "definition": service_definition_for_role(service, role),
+                "runtime": runtime
+            })
         })
         .collect::<Vec<_>>();
     HttpResponse::Ok().json(services)
 }
 
 async fn api_service_detail(
+    req: HttpRequest,
     path: web::Path<String>,
     monitor: web::Data<Arc<HealthMonitor>>,
 ) -> impl Responder {
+    let role = authenticated_role(&req);
     match monitor.details(&path.into_inner()) {
-        Some((definition, runtime)) => HttpResponse::Ok()
-            .json(serde_json::json!({"definition": definition, "runtime": runtime})),
+        Some((definition, runtime)) => HttpResponse::Ok().json(serde_json::json!({
+            "definition": service_definition_for_role(definition, role),
+            "runtime": runtime
+        })),
         None => HttpResponse::NotFound().json(serde_json::json!({"error": "service not found"})),
     }
 }
@@ -3619,6 +3651,51 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_tokens_are_unique_and_hex_encoded() {
+        let first = token().expect("first token generation");
+        let second = token().expect("second token generation");
+
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn service_recipients_are_visible_only_to_operator_and_admin() {
+        let mut service = ServiceDefinition {
+            name: "status".into(),
+            url: "https://example.test/health".into(),
+            expected_status: 200,
+            interval_secs: 60,
+            retries: 1,
+            failure_threshold: 2,
+            version_header: String::new(),
+            recipients: vec!["-1001234567890".into()],
+            use_active_routing_profile: false,
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let viewer = service_definition_for_role(service.clone(), DashboardRole::Viewer);
+        assert!(viewer.recipients.is_empty());
+
+        for role in [DashboardRole::Operator, DashboardRole::Admin] {
+            assert_eq!(
+                service_definition_for_role(service.clone(), role).recipients,
+                vec!["-1001234567890"]
+            );
+        }
+
+        service.recipients.clear();
+        assert!(service_definition_for_role(service, DashboardRole::Viewer)
+            .recipients
+            .is_empty());
+    }
+
+    #[test]
     fn manual_controller_preserves_independent_database_options() {
         let controller = ManualBackupController::default();
         assert!(controller.request(ManualBackupRequest {
@@ -3689,6 +3766,114 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         Arc::new(TelegramUserStore::load(path).unwrap())
+    }
+
+    fn services_test_monitor() -> (Arc<HealthMonitor>, std::path::PathBuf) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "crab-dashboard-services-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("health-services.json"),
+            serde_json::json!({
+                "services": [{
+                    "name": "status",
+                    "url": "https://example.test/health",
+                    "expected_status": 200,
+                    "interval_secs": 60,
+                    "retries": 1,
+                    "failure_threshold": 2,
+                    "version_header": "",
+                    "recipients": ["-1001234567890"],
+                    "use_active_routing_profile": false,
+                    "enabled": true,
+                    "created_at": "",
+                    "updated_at": ""
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let users =
+            Arc::new(TelegramUserStore::load(data_dir.join("telegram-users.toml")).unwrap());
+        let client = Arc::new(RwLock::new(Arc::new(Client::new())));
+        let monitor = HealthMonitor::load(
+            data_dir.clone(),
+            client,
+            Arc::new(Client::new()),
+            "test-token".into(),
+            users,
+        )
+        .unwrap();
+        (monitor, data_dir)
+    }
+
+    #[test]
+    fn service_endpoints_hide_recipients_from_viewers() {
+        let (monitor, data_dir) = services_test_monitor();
+        actix_web::rt::System::new().block_on(async {
+            service_endpoints_hide_recipients_from_viewers_inner(monitor.clone(), data_dir.clone())
+                .await;
+        });
+        drop(monitor);
+    }
+
+    async fn service_endpoints_hide_recipients_from_viewers_inner(
+        monitor: Arc<HealthMonitor>,
+        data_dir: std::path::PathBuf,
+    ) {
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(monitor))
+                .route("/api/services", web::get().to(api_services))
+                .route("/api/services/{name}", web::get().to(api_service_detail)),
+        )
+        .await;
+
+        for role in [
+            DashboardRole::Viewer,
+            DashboardRole::Operator,
+            DashboardRole::Admin,
+        ] {
+            let list_request = aw_test::TestRequest::get()
+                .uri("/api/services")
+                .to_request();
+            list_request.extensions_mut().insert(AuthenticatedUser {
+                username: role.as_str().into(),
+                role,
+            });
+            let list_response = aw_test::call_service(&app, list_request).await;
+            assert_eq!(list_response.status(), 200);
+            let list_body: serde_json::Value = aw_test::read_body_json(list_response).await;
+            let list_recipients = &list_body[0]["definition"]["recipients"];
+
+            let detail_request = aw_test::TestRequest::get()
+                .uri("/api/services/status")
+                .to_request();
+            detail_request.extensions_mut().insert(AuthenticatedUser {
+                username: role.as_str().into(),
+                role,
+            });
+            let detail_response = aw_test::call_service(&app, detail_request).await;
+            assert_eq!(detail_response.status(), 200);
+            let detail_body: serde_json::Value = aw_test::read_body_json(detail_response).await;
+            let detail_recipients = &detail_body["definition"]["recipients"];
+
+            if role == DashboardRole::Viewer {
+                assert!(list_recipients.as_array().unwrap().is_empty());
+                assert!(detail_recipients.as_array().unwrap().is_empty());
+            } else {
+                assert_eq!(list_recipients, &serde_json::json!(["-1001234567890"]));
+                assert_eq!(detail_recipients, &serde_json::json!(["-1001234567890"]));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[actix_web::test]
