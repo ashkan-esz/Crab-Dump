@@ -95,7 +95,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
     }
     let command = command.to_ascii_lowercase();
     match command.as_str() {
-        "add-me" if words.next().is_none() => Some(Command::AddMe),
+        "add_me" | "add-me" if words.next().is_none() => Some(Command::AddMe),
         "help" if words.next().is_none() => Some(Command::Help),
         "status" if words.next().is_none() => Some(Command::Status),
         "backup" => {
@@ -107,7 +107,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
 }
 
 pub fn help_message() -> &'static str {
-    "<b>crab-dump commands</b>\n\n/add-me — register this Telegram account\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup"
+    "<b>crab-dump commands</b>\n\n/add_me — register this Telegram account\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +205,17 @@ struct ApiParameters {
 #[derive(Debug, Deserialize)]
 struct Me {
     username: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BotCommand {
+    command: &'static str,
+    description: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct SetMyCommandsRequest {
+    commands: Vec<BotCommand>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +323,43 @@ pub fn check(client: &Client, token: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Telegram bot did not return a username"))
 }
 
+fn set_my_commands(client: &Client, token: &str) -> Result<()> {
+    let response: ApiEnvelope<bool> = client
+        .post(format!("{}/bot{token}/setMyCommands", telegram::API_BASE))
+        .json(&SetMyCommandsRequest {
+            commands: vec![
+                BotCommand {
+                    command: "add_me",
+                    description: "Register this Telegram account",
+                },
+                BotCommand {
+                    command: "help",
+                    description: "List available commands",
+                },
+                BotCommand {
+                    command: "status",
+                    description: "Show application and Telegram status",
+                },
+                BotCommand {
+                    command: "backup",
+                    description: "Queue a database backup",
+                },
+            ],
+        })
+        .send()
+        .context("registering Telegram bot commands")?
+        .json()
+        .context("parsing Telegram bot commands response")?;
+    if !response.ok {
+        anyhow::bail!(
+            "Telegram bot command registration failed (description={}, tg_code={:?})",
+            response.description.as_deref().unwrap_or("unknown"),
+            response.error_code
+        );
+    }
+    Ok(())
+}
+
 fn run(
     client: ClientHandle,
     token: String,
@@ -329,6 +377,10 @@ fn run(
                 current.username = Some(username);
                 current.last_success_at = Some(now());
                 current.last_error = None;
+                drop(current);
+                if let Err(error) = set_my_commands(&client, &token) {
+                    set_error(&status, &safe_error(&error.to_string(), &token));
+                }
             }
             Err(error) => set_error(&status, &safe_error(&error.to_string(), &token)),
         }
@@ -664,12 +716,13 @@ mod tests {
 
     #[test]
     fn parses_supported_commands_and_rejects_bad_arguments() {
+        assert_eq!(parse_command("/add_me"), Some(Command::AddMe));
+        assert_eq!(parse_command("/add_me@crab_dump"), Some(Command::AddMe));
         assert_eq!(parse_command("/add-me"), Some(Command::AddMe));
         assert_eq!(parse_command("/add-me@crab_dump"), Some(Command::AddMe));
-        assert_eq!(parse_command("/add-me@"), None);
-        assert_eq!(parse_command("/add-me@a@b"), None);
-        assert_eq!(parse_command("/add-me now"), None);
-        assert_eq!(parse_command("/add_me"), None);
+        assert_eq!(parse_command("/add_me@"), None);
+        assert_eq!(parse_command("/add_me@a@b"), None);
+        assert_eq!(parse_command("/add_me now"), None);
         assert_eq!(parse_command("/help"), Some(Command::Help));
         assert_eq!(parse_command("/status@crab_dump"), Some(Command::Status));
         assert_eq!(
@@ -722,6 +775,36 @@ mod tests {
             .expect("keyboard row");
         assert_eq!(buttons[0]["callback_data"], "bot:status");
         assert_eq!(buttons[1]["callback_data"], "bot:backup");
+    }
+
+    #[test]
+    fn command_suggestions_publish_all_supported_commands() {
+        let request = SetMyCommandsRequest {
+            commands: vec![
+                BotCommand {
+                    command: "add_me",
+                    description: "Register this Telegram account",
+                },
+                BotCommand {
+                    command: "help",
+                    description: "List available commands",
+                },
+                BotCommand {
+                    command: "status",
+                    description: "Show application and Telegram status",
+                },
+                BotCommand {
+                    command: "backup",
+                    description: "Queue a database backup",
+                },
+            ],
+        };
+        let payload: serde_json::Value =
+            serde_json::to_value(request).expect("command registration serializes");
+        let commands = payload["commands"].as_array().expect("commands array");
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0]["command"], "add_me");
+        assert_eq!(commands[3]["command"], "backup");
     }
 
     #[test]
