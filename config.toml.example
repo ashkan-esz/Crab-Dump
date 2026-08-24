@@ -39,8 +39,9 @@ compression_codec = "zstd"
 # in ./data and configured from the dashboard. SOCKS_PROXY/socks_proxy cannot
 # be combined with an active profile.
 
-# Extra args passed verbatim to pg_dump.
-# pg_dump_extra_args = "--format=custom --no-owner"
+# Read-oriented pg_dump filters only; connection, file-output, role, and
+# restore-behaviour options are rejected.
+# pg_dump_extra_args = "--exclude-table=events --schema-only"
 
 # Max size of each uploaded part in MiB (default: 49).
 # chunk_size_mb = 49
@@ -52,6 +53,10 @@ compression_codec = "zstd"
 # Peak work_dir usage is this many compressed dumps at once; lower it when
 # disk, CPU or database load is the constraint. 1 = fully sequential.
 # max_parallel_databases = 4
+# Maximum wall-clock time per pg_dump process (default: 3600 seconds).
+# pg_dump_timeout_secs = 3600
+# Maximum packaged output per database (default: 10240 MiB).
+# max_dump_size_mb = 10240
 
 # Keep a failed backup's partial chunk files in work_dir for debugging
 # (default: false — chunks are deleted as soon as they upload, and a failure

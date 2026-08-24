@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+use shell_words::split;
 
 use crate::compress::CompressionCodec;
 use crate::cron::Cron;
@@ -47,6 +48,15 @@ pub const DEFAULT_MAX_DATABASES: usize = 10;
 /// full compressed dump in `work_dir`, so peak disk and CPU scale with this
 /// number — not with the total database count.
 pub const DEFAULT_MAX_PARALLEL_DATABASES: usize = 4;
+
+/// Maximum duration allowed for one `pg_dump` process.
+pub const DEFAULT_PG_DUMP_TIMEOUT_SECS: u64 = 3600;
+const MIN_PG_DUMP_TIMEOUT_SECS: u64 = 60;
+const MAX_PG_DUMP_TIMEOUT_SECS: u64 = 86_400;
+
+/// Maximum packaged bytes produced for one database backup.
+pub const DEFAULT_MAX_DUMP_SIZE_MB: u64 = 10_240;
+const MAX_MAX_DUMP_SIZE_MB: u64 = 1_048_576;
 
 /// Shortest accepted `BACKUP_INTERVAL`. A dump cycle costs minutes of CPU and
 /// disk; anything under a minute would stack cycles on top of each other.
@@ -121,6 +131,10 @@ pub struct SharedConfig {
     /// How many database backups may run at the same time (≥ 1). Databases
     /// beyond this many wait for a free slot.
     pub max_parallel_databases: usize,
+    /// Maximum wall-clock duration for one pg_dump process.
+    pub pg_dump_timeout: Duration,
+    /// Maximum packaged bytes produced for one database backup.
+    pub max_dump_size_mb: u64,
     /// Keep the temporary chunk files of a failed backup for debugging.
     /// Default `false`: chunks are removed as soon as they are uploaded, and a
     /// failure sweeps whatever is left behind.
@@ -171,6 +185,8 @@ impl fmt::Debug for SharedConfig {
                 &self.socks_proxy.as_ref().map(|_| "[REDACTED]"),
             )
             .field("max_parallel_databases", &self.max_parallel_databases)
+            .field("pg_dump_timeout", &self.pg_dump_timeout)
+            .field("max_dump_size_mb", &self.max_dump_size_mb)
             .field("keep_failed_dumps", &self.keep_failed_dumps)
             .field("backup_schedule", &self.backup_schedule)
             .field("history_upload_schedule", &self.history_upload_schedule)
@@ -355,6 +371,10 @@ fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
     let mut seen_names: std::collections::HashMap<String, usize> = Default::default();
     for (idx, db) in dbs.iter().enumerate() {
         validate_database_url(idx, &db.url)?;
+        if let Some(extra_args) = db.pg_dump_extra_args.as_deref() {
+            parse_pg_dump_extra_args(extra_args)
+                .with_context(|| format!("Database {idx}: invalid PG_DUMP_EXTRA_ARGS"))?;
+        }
         if let Some(ref nm) = db.name {
             if !nm
                 .chars()
@@ -378,6 +398,50 @@ fn validate_databases(dbs: &[DatabaseConfig]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse the limited, read-oriented subset of pg_dump options supported by the
+/// application. Connection, file-output, and restore-behaviour flags stay
+/// under application control.
+pub fn parse_pg_dump_extra_args(value: &str) -> Result<Vec<String>> {
+    let args = split(value).context("PG_DUMP_EXTRA_ARGS is not valid shell syntax")?;
+    for arg in &args {
+        let safe_flag = matches!(
+            arg.as_str(),
+            "--schema-only"
+                | "--data-only"
+                | "--no-owner"
+                | "--no-privileges"
+                | "--no-acl"
+                | "--no-comments"
+                | "--no-publications"
+                | "--no-subscriptions"
+                | "--no-security-labels"
+                | "--no-unlogged-table-data"
+                | "--no-table-access-method"
+                | "--blobs"
+                | "--no-blobs"
+                | "-Fc"
+                | "-Fp"
+        );
+        let safe_value = [
+            "--schema=",
+            "--exclude-schema=",
+            "--table=",
+            "--exclude-table=",
+            "--exclude-table-data=",
+        ]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix) && arg.len() > prefix.len());
+        let safe_format = matches!(arg.as_str(), "--format=custom" | "--format=plain");
+        if !(safe_flag || safe_value || safe_format) {
+            bail!(
+                "unsupported pg_dump option `{arg}`; only read-oriented filtering \
+                 and format options are allowed"
+            );
+        }
+    }
+    Ok(args)
 }
 
 // ===========================================================================
@@ -415,6 +479,8 @@ struct RawConfigFile {
     dashboard_viewer_password: Option<String>,
     socks_proxy: Option<String>,
     max_parallel_databases: Option<usize>,
+    pg_dump_timeout_secs: Option<u64>,
+    max_dump_size_mb: Option<u64>,
     keep_failed_dumps: Option<bool>,
     /// Interval (`"6h"`, `"90m"`, `"3600"`) or crontab expression
     /// (`"0 */4 * * *"`), parsed by [`parse_schedule`]. Kept as a string so the
@@ -667,6 +733,21 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         Some(n) => n,
         None => DEFAULT_MAX_PARALLEL_DATABASES,
     };
+    let pg_dump_timeout_secs = raw
+        .pg_dump_timeout_secs
+        .unwrap_or(DEFAULT_PG_DUMP_TIMEOUT_SECS);
+    if !(MIN_PG_DUMP_TIMEOUT_SECS..=MAX_PG_DUMP_TIMEOUT_SECS).contains(&pg_dump_timeout_secs) {
+        bail!(
+            "PG_DUMP_TIMEOUT_SECS must be between {MIN_PG_DUMP_TIMEOUT_SECS} and \
+             {MAX_PG_DUMP_TIMEOUT_SECS}, got {pg_dump_timeout_secs}"
+        );
+    }
+    let max_dump_size_mb = raw.max_dump_size_mb.unwrap_or(DEFAULT_MAX_DUMP_SIZE_MB);
+    if !(1..=MAX_MAX_DUMP_SIZE_MB).contains(&max_dump_size_mb) {
+        bail!(
+            "MAX_DUMP_SIZE_MB must be between 1 and {MAX_MAX_DUMP_SIZE_MB}, got {max_dump_size_mb}"
+        );
+    }
 
     // Unset (or explicitly blank/`0`) keeps the historical one-shot behaviour,
     // so an existing cron/systemd deployment is unaffected by the upgrade.
@@ -702,6 +783,8 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         dashboard_viewer_password: raw.dashboard_viewer_password.clone(),
         socks_proxy,
         max_parallel_databases,
+        pg_dump_timeout: Duration::from_secs(pg_dump_timeout_secs),
+        max_dump_size_mb,
         keep_failed_dumps: raw.keep_failed_dumps.unwrap_or(false),
         backup_schedule,
         history_upload_schedule,
@@ -822,6 +905,12 @@ fn merge_raw_with_env(raw: RawConfigFile, env: impl Fn(&str) -> Option<String>) 
         max_parallel_databases: env("MAX_PARALLEL_DATABASES")
             .and_then(|v| v.parse().ok())
             .or(raw.max_parallel_databases),
+        pg_dump_timeout_secs: env("PG_DUMP_TIMEOUT_SECS")
+            .and_then(|v| v.parse().ok())
+            .or(raw.pg_dump_timeout_secs),
+        max_dump_size_mb: env("MAX_DUMP_SIZE_MB")
+            .and_then(|v| v.parse().ok())
+            .or(raw.max_dump_size_mb),
         keep_failed_dumps: env("KEEP_FAILED_DUMPS")
             .map(|v| parse_bool(&v))
             .or(raw.keep_failed_dumps),
@@ -1135,6 +1224,8 @@ mod tests {
             dashboard_viewer_password: None,
             socks_proxy: None,
             max_parallel_databases: DEFAULT_MAX_PARALLEL_DATABASES,
+            pg_dump_timeout: Duration::from_secs(DEFAULT_PG_DUMP_TIMEOUT_SECS),
+            max_dump_size_mb: DEFAULT_MAX_DUMP_SIZE_MB,
             keep_failed_dumps: false,
             backup_schedule: None,
             history_upload_schedule: Some(parse_schedule("59 23 * * *").unwrap()),
@@ -1441,6 +1532,37 @@ mod tests {
         };
         let env = |k: &str| (k == "MAX_PARALLEL_DATABASES").then(|| "7".to_string());
         assert_eq!(merge_raw_with_env(raw, env).max_parallel_databases, Some(7));
+    }
+
+    #[test]
+    fn pg_dump_extra_args_allow_safe_selectors_and_reject_side_effecting_options() {
+        let args = parse_pg_dump_extra_args(
+            "--schema=public --exclude-table=events --schema-only --no-owner",
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--schema=public",
+                "--exclude-table=events",
+                "--schema-only",
+                "--no-owner"
+            ]
+        );
+
+        for unsafe_args in [
+            "--file=/tmp/dump",
+            "--dbname=postgresql://other/db",
+            "--host=other-host",
+            "--role=owner",
+            "--format=directory",
+            "-f /tmp/dump",
+        ] {
+            assert!(
+                parse_pg_dump_extra_args(unsafe_args).is_err(),
+                "must reject `{unsafe_args}`"
+            );
+        }
     }
 
     // -- Keeping failed dumps --

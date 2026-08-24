@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::config::DatabaseConfig;
+use crate::config::{parse_pg_dump_extra_args, DatabaseConfig};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -408,6 +408,10 @@ fn validate_runtime(databases: &[RuntimeDatabase], max: usize) -> Result<()> {
         }
         if !database.config.url.contains('/') {
             bail!("database URL is missing a database name");
+        }
+        if let Some(extra_args) = database.config.pg_dump_extra_args.as_deref() {
+            parse_pg_dump_extra_args(extra_args)
+                .context("invalid PG_DUMP_EXTRA_ARGS for dashboard database")?;
         }
     }
     Ok(())

@@ -1198,8 +1198,12 @@ fn backup_pipeline(
     // Keep the DumpPipe alive so we can verify pg_dump's exit status after
     // draining stdout; a non-zero exit means the dump is incomplete.
     tracing::info!(db = db_name, "starting pg_dump");
-    let mut pipe = dump::spawn_pg_dump(&db.url, db.pg_dump_extra_args.as_deref())
-        .with_context(|| format!("starting pg_dump for {db_name}"))?;
+    let mut pipe = dump::spawn_pg_dump(
+        &db.url,
+        db.pg_dump_extra_args.as_deref(),
+        cfg.pg_dump_timeout,
+    )
+    .with_context(|| format!("starting pg_dump for {db_name}"))?;
     if cancellation_requested(cancellation) {
         pipe.cancel().context("terminating cancelled pg_dump")?;
         return Err(cancelled());
@@ -1220,7 +1224,12 @@ fn backup_pipeline(
                 );
                 let age_writer = encrypt::wrap(
                     enc,
-                    ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes()),
+                    ChunkWriter::with_total_limit(
+                        &cfg.work_dir,
+                        base_name,
+                        cfg.chunk_size_bytes(),
+                        Some(cfg.max_dump_size_mb * 1024 * 1024),
+                    ),
                 )
                 .context("wrapping chunker in age StreamWriter")?;
                 match cfg.compression_codec {
@@ -1241,7 +1250,12 @@ fn backup_pipeline(
                 if cfg.compression_codec.is_none() {
                     tracing::info!(db = db_name, "compression disabled (raw dump)");
                 }
-                let chunker = ChunkWriter::new(&cfg.work_dir, base_name, cfg.chunk_size_bytes());
+                let chunker = ChunkWriter::with_total_limit(
+                    &cfg.work_dir,
+                    base_name,
+                    cfg.chunk_size_bytes(),
+                    Some(cfg.max_dump_size_mb * 1024 * 1024),
+                );
                 match cfg.compression_codec {
                     Some(codec) => {
                         let level = cfg.compression_level.ok_or_else(|| {

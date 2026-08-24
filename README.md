@@ -183,9 +183,11 @@ directory yourself).
 | `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `1..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
 | `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; rejected without a codec and for gzip/brotli |
 | `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
-| `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | extra `pg_dump` args                               |
+| `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | read-only filters/formats only; unsafe options are rejected |
 | `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
 | `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
+| `PG_DUMP_TIMEOUT_SECS` | no     | `3600`         | per-dump timeout; must be 60–86400                 |
+| `MAX_DUMP_SIZE_MB`   | no       | `10240`        | maximum packaged output per database               |
 | `HISTORY_DIR`        | no       | `./history`    | monthly JSONL backup-attempt history               |
 | `HISTORY_RETENTION_MONTHS` | no | `12`       | current month plus this many total monthly files   |
 | `HISTORY_UPLOAD_SCHEDULE` | no | `59 23 * * *` | upload active monthly history in scheduled mode; `0`/blank disables |
@@ -243,6 +245,10 @@ DATABASE_URL_1=postgresql://user:pass@host-b:5432/analytics
 DB_NAME_1=analytics
 PG_DUMP_EXTRA_ARGS_1=--exclude-table=events
 ```
+
+Only read-oriented filtering and format flags are accepted in
+`PG_DUMP_EXTRA_ARGS`; connection, file-output, role, and restore-behaviour
+options are rejected at startup or by the dashboard.
 
 or as `[[databases]]` entries in `config.toml` (which take precedence over the
 indexed variables):

@@ -30,6 +30,7 @@ pub struct ChunkWriter {
     paths: Vec<PathBuf>,
     hasher: Sha256,
     total_written: u64,
+    max_total_bytes: Option<u64>,
 }
 
 impl ChunkWriter {
@@ -46,7 +47,19 @@ impl ChunkWriter {
             paths: Vec::new(),
             hasher: Sha256::new(),
             total_written: 0,
+            max_total_bytes: None,
         }
+    }
+
+    pub fn with_total_limit(
+        work_dir: impl Into<PathBuf>,
+        prefix: impl Into<String>,
+        max_bytes: u64,
+        max_total_bytes: Option<u64>,
+    ) -> Self {
+        let mut writer = Self::new(work_dir, prefix, max_bytes);
+        writer.max_total_bytes = max_total_bytes;
+        writer
     }
 
     fn next_path(&self, index: usize) -> PathBuf {
@@ -114,6 +127,13 @@ impl ChunkWriter {
 
 impl Write for ChunkWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(max_total_bytes) = self.max_total_bytes {
+            if self.total_written >= max_total_bytes {
+                return Err(io::Error::other(format!(
+                    "output quota of {max_total_bytes} bytes exceeded"
+                )));
+            }
+        }
         // Defensive: with empty state and the file can't be created, surface
         // as io::Error so async/sync plumbing still works as expected.
         self.roll_if_needed()
@@ -121,7 +141,14 @@ impl Write for ChunkWriter {
 
         // Never write past the current chunk's limit.
         let room = (self.max_bytes - self.current_len) as usize;
-        let n = buf.len().min(room);
+        let quota_room = self
+            .max_total_bytes
+            .map(|limit| limit.saturating_sub(self.total_written) as usize)
+            .unwrap_or(usize::MAX);
+        let n = buf.len().min(room).min(quota_room);
+        if n == 0 {
+            return Err(io::Error::other("output quota exhausted"));
+        }
 
         let f = self
             .current
@@ -279,6 +306,20 @@ mod tests {
         want.copy_from_slice(&h.finalize());
         assert_eq!(hash, want);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn output_quota_rejects_writes_before_exceeding_limit() {
+        let dir = tmpdir();
+        let mut writer = ChunkWriter::with_total_limit(&dir, "limited", 4, Some(5));
+
+        assert_eq!(writer.write(b"1234").unwrap(), 4);
+        assert_eq!(writer.write(b"56").unwrap(), 1);
+        let error = writer.write(b"6").unwrap_err();
+        assert!(error.to_string().contains("output quota"));
+
+        drop(writer);
         std::fs::remove_dir_all(&dir).ok();
     }
 
