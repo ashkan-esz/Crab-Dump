@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Restore approvals · crab-dump</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <main class="page">
+    <h1>Restore approvals</h1>
+    <p>Telegram restore requests remain queued until an operator approves them.</p>
+    <section id="restore-state">Loading…</section>
+  </main>
+  <script src="/dashboard-auth.js"></script>
+  <script>
+    async function load() {
+      const state = document.querySelector('#restore-state');
+      if (!(await window.dashboardAuth.ensureSession())) return;
+      const statusResponse = await window.dashboardAuth.request('/api/status');
+      const dashboardRole = statusResponse.ok
+        ? (await statusResponse.json()).dashboard_role
+        : 'viewer';
+      const canApprove = dashboardRole === 'operator' || dashboardRole === 'admin';
+      const canCleanApprove = dashboardRole === 'admin';
+      const response = await window.dashboardAuth.request('/api/restores');
+      if (!response.ok) { state.textContent = 'Restore state unavailable.'; return; }
+      const data = await response.json();
+      state.replaceChildren();
+      const backups = document.createElement('section');
+      const backupsHeading = document.createElement('h2');
+      backupsHeading.textContent = 'Restorable backups';
+      backups.append(backupsHeading);
+      for (const backup of data.backups || []) {
+        const item = document.createElement('p');
+        item.textContent =
+          `${backup.database_name} · ${backup.timestamp} · ${backup.packaged_bytes} bytes · ` +
+          `${backup.codec} · ${backup.encrypted ? 'encrypted' : 'unencrypted'} · ` +
+          `${backup.part_count} part(s) · sha256 ${backup.sha256}`;
+        backups.append(item);
+      }
+      if (!(data.backups || []).length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No restorable backups are available.';
+        backups.append(empty);
+      }
+      state.append(backups);
+
+      const requestsHeading = document.createElement('h2');
+      requestsHeading.textContent = 'Restore requests';
+      state.append(requestsHeading);
+      for (const request of data.requests || []) {
+        const article = document.createElement('article');
+        const heading = document.createElement('h3');
+        heading.textContent = `${request.database_name} · ${request.mode}`;
+        const status = document.createElement('p');
+        status.textContent = `Status: ${request.status}`;
+        article.append(heading, status);
+        if (request.audit && request.audit.length) {
+          const audit = document.createElement('ul');
+          for (const entry of request.audit) {
+            const item = document.createElement('li');
+            item.textContent = entry;
+            audit.append(item);
+          }
+          article.append(audit);
+        }
+        if (request.error) {
+          const error = document.createElement('p');
+          error.textContent = `Error: ${request.error}`;
+          article.append(error);
+        }
+        if (request.status === 'queued' && canApprove) {
+          const modes = canCleanApprove ? ['safe', 'clean'] : ['safe'];
+          for (const mode of modes) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = `Approve ${mode}`;
+            button.addEventListener('click', () => approve(request.request_id, mode, button));
+            article.append(button);
+          }
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.textContent = 'Cancel request';
+          cancel.addEventListener('click', () => cancelRequest(request.request_id, cancel));
+          article.append(cancel);
+        }
+        state.append(article);
+      }
+      if (!(data.requests || []).length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No restore requests.';
+        state.append(empty);
+      }
+    }
+    async function cancelRequest(id, button) {
+      button.disabled = true;
+      try {
+        const response = await window.dashboardAuth.request(
+          '/api/restores/' + encodeURIComponent(id),
+          {method: 'DELETE'}
+        );
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Restore cancellation failed.');
+        }
+        await load();
+      } catch (error) {
+        button.disabled = false;
+        const message = document.createElement('p');
+        message.textContent = error instanceof Error ? error.message : 'Restore cancellation failed.';
+        message.setAttribute('role', 'alert');
+        button.parentElement.append(message);
+      }
+    }
+    async function approve(id, mode, button) {
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = 'Approving…';
+      try {
+        const response = await window.dashboardAuth.request(
+          '/api/restores/' + encodeURIComponent(id) + '/approve',
+          {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({mode})
+          }
+        );
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Restore approval failed.');
+        }
+        await load();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = originalLabel;
+        const message = document.createElement('p');
+        message.textContent = error instanceof Error ? error.message : 'Restore approval failed.';
+        message.setAttribute('role', 'alert');
+        button.parentElement.append(message);
+      }
+    }
+    load();
+  </script>
+</body>
+</html>

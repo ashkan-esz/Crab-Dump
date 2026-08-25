@@ -87,6 +87,12 @@ pub struct UploadStats {
     pub retries: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadReceipt {
+    pub message_id: i64,
+    pub file_id: String,
+}
+
 pub type UploadProgress = Arc<dyn Fn(u64) + Send + Sync>;
 
 struct ProgressReader {
@@ -214,9 +220,22 @@ pub(crate) fn escape_html(value: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     ok: bool,
+    #[serde(default)]
+    result: Option<ApiResult>,
     description: Option<String>,
     error_code: Option<i64>,
     parameters: Option<ResponseParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResult {
+    message_id: Option<i64>,
+    document: Option<ApiDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiDocument {
+    file_id: String,
 }
 
 /// Telegram's `responseParameters`; on 429 it carries how long to wait.
@@ -237,7 +256,7 @@ pub fn send_document(
     path: &Path,
     stats: &mut UploadStats,
 ) -> Result<()> {
-    send_document_with_progress(client, bot_token, chat_id, path, stats, None, None)
+    send_document_with_progress(client, bot_token, chat_id, path, stats, None, None).map(|_| ())
 }
 
 pub fn send_document_with_progress(
@@ -249,6 +268,27 @@ pub fn send_document_with_progress(
     progress: Option<UploadProgress>,
     cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
+    send_document_with_progress_receipt(
+        client,
+        bot_token,
+        chat_id,
+        path,
+        stats,
+        progress,
+        cancellation,
+    )
+    .map(|_| ())
+}
+
+pub fn send_document_with_progress_receipt(
+    client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    path: &Path,
+    stats: &mut UploadStats,
+    progress: Option<UploadProgress>,
+    cancellation: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<UploadReceipt> {
     // The guard protects no data, so a poisoned lock is safe to adopt.
     let _operation_guard = acquire_operation(Operation::Upload);
 
@@ -306,23 +346,28 @@ pub fn send_document_with_progress(
         let outcome = match send_result {
             Ok(resp) => {
                 let status = resp.status();
-                let body: ApiResponse = resp.json().context("parsing Telegram JSON response")?;
-                if body.ok {
-                    Ok(())
-                } else {
-                    Err((
+                let bytes = resp.bytes().context("reading Telegram JSON response")?;
+                match serde_json::from_slice::<ApiResponse>(&bytes) {
+                    Ok(body) if body.ok => Ok(parse_upload_receipt(body)?),
+                    Ok(body) => Err((
                         status.as_u16(),
                         body.error_code,
                         body.description,
                         body.parameters.and_then(|p| p.retry_after),
-                    ))
+                    )),
+                    Err(error) => Err((
+                        status.as_u16(),
+                        None,
+                        Some(format!("invalid Telegram response: {error}")),
+                        None,
+                    )),
                 }
             }
             Err(e) => Err((0, None, Some(e.to_string()), None)),
         };
 
         match outcome {
-            Ok(()) => {
+            Ok(receipt) => {
                 if cancellation.is_some_and(|token| token.load(Ordering::SeqCst)) {
                     return Err(anyhow::Error::new(web::CancellationError));
                 }
@@ -331,7 +376,7 @@ pub fn send_document_with_progress(
                     "uploaded chunk"
                 );
                 web::set_telegram_status(0);
-                return Ok(());
+                return Ok(receipt);
             }
             Err((http_status, tg_code, desc, retry_after)) => {
                 let transient = is_transient(http_status, tg_code);
@@ -364,6 +409,28 @@ pub fn send_document_with_progress(
             }
         }
     }
+}
+
+fn parse_upload_receipt(body: ApiResponse) -> Result<UploadReceipt> {
+    let result = body
+        .result
+        .as_ref()
+        .context("Telegram sendDocument response omitted result")?;
+    let document = result
+        .document
+        .as_ref()
+        .context("Telegram sendDocument response omitted document")?;
+    let message_id = result
+        .message_id
+        .filter(|message_id| *message_id > 0)
+        .context("Telegram sendDocument response omitted message_id")?;
+    if document.file_id.is_empty() {
+        bail!("Telegram sendDocument response omitted file_id");
+    }
+    Ok(UploadReceipt {
+        message_id,
+        file_id: document.file_id.clone(),
+    })
 }
 
 fn interruptible_sleep(
@@ -424,6 +491,124 @@ pub fn answer_callback_query(
             response.error_code
         )
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct FileResult {
+    file_path: Option<String>,
+}
+
+/// Resolve a Telegram file identifier and stream it to `destination`.
+///
+/// Both requests use the caller-provided client, so routing/proxy policy is
+/// inherited from the application's shared client.
+pub fn download_file(
+    client: &Client,
+    bot_token: &str,
+    file_id: &str,
+    destination: &Path,
+) -> Result<u64> {
+    let mut file_path = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let response = match client
+            .get(format!("{API_BASE}/bot{bot_token}/getFile"))
+            .query(&[("file_id", file_id)])
+            .send()
+        {
+            Ok(response) => response,
+            Err(error) if attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
+                continue;
+            }
+            Err(error) => return Err(error).context("requesting Telegram file path"),
+        };
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .context("reading Telegram getFile response")?;
+        let body: ApiEnvelope<FileResult> = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(error) if attempt < MAX_ATTEMPTS && is_transient(status.as_u16(), None) => {
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
+                continue;
+            }
+            Err(error) => {
+                bail!("parsing Telegram getFile response failed (http={status}): {error}");
+            }
+        };
+        if body.ok {
+            file_path = body.result.and_then(|file| file.file_path);
+            break;
+        }
+        if attempt == MAX_ATTEMPTS || !is_transient(status.as_u16(), body.error_code) {
+            bail!(
+                "Telegram getFile failed (tg_code={:?}, description={})",
+                body.error_code,
+                body.description.as_deref().unwrap_or("unknown")
+            );
+        }
+        std::thread::sleep(Duration::from_secs(backoff_secs(
+            attempt,
+            body.parameters.and_then(|params| params.retry_after),
+        )));
+    }
+    let file_path = file_path.context("Telegram getFile response omitted file_path")?;
+    let download_url = format!("{API_BASE}/file/bot{bot_token}/{file_path}");
+    for attempt in 1..=MAX_ATTEMPTS {
+        let mut response = match client.get(&download_url).send() {
+            Ok(response) => response,
+            Err(_error) if attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
+                continue;
+            }
+            Err(error) => return Err(error).context("downloading Telegram file"),
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.bytes().unwrap_or_default();
+            let envelope: Option<ApiEnvelope<FileResult>> = serde_json::from_slice(&body).ok();
+            let tg_code = envelope.as_ref().and_then(|body| body.error_code);
+            let retry_after = envelope
+                .and_then(|body| body.parameters)
+                .and_then(|parameters| parameters.retry_after);
+            if attempt == MAX_ATTEMPTS || !is_transient(status.as_u16(), tg_code) {
+                bail!("Telegram file download failed with HTTP {}", status);
+            }
+            std::thread::sleep(Duration::from_secs(backoff_secs(attempt, retry_after)));
+            continue;
+        }
+        let mut output = File::create(destination)
+            .with_context(|| format!("creating downloaded file {}", destination.display()))?;
+        match io::copy(&mut response, &mut output) {
+            Ok(bytes) => {
+                output.sync_all().with_context(|| {
+                    format!("syncing downloaded file {}", destination.display())
+                })?;
+                return Ok(bytes);
+            }
+            Err(error) if attempt < MAX_ATTEMPTS => {
+                drop(output);
+                let _ = std::fs::remove_file(destination);
+                std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("streaming Telegram file to {}", destination.display())
+                });
+            }
+        }
+    }
+    unreachable!("Telegram file download retry loop always returns")
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiEnvelope<T> {
+    ok: bool,
+    result: Option<T>,
+    description: Option<String>,
+    error_code: Option<i64>,
+    parameters: Option<ResponseParameters>,
 }
 
 pub fn send_message_with_cancel(
@@ -651,6 +836,37 @@ mod tests {
         assert!(is_transient(200, Some(429)), "code in the JSON body");
         assert!(!is_transient(400, None), "bad request is permanent");
         assert!(!is_transient(401, None), "bad token is permanent");
+    }
+
+    #[test]
+    fn send_document_response_yields_manifest_identifiers() {
+        let body: ApiResponse = serde_json::from_str(
+            r#"{"ok":true,"result":{"message_id":42,"document":{"file_id":"telegram-file"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_upload_receipt(body).unwrap(),
+            UploadReceipt {
+                message_id: 42,
+                file_id: "telegram-file".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn send_document_response_rejects_missing_identifiers() {
+        for json in [
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"result":{"message_id":42}}"#,
+            r#"{"ok":true,"result":{"message_id":0,"document":{"file_id":"file"}}}"#,
+            r#"{"ok":true,"result":{"message_id":42,"document":{"file_id":""}}}"#,
+        ] {
+            let body: ApiResponse = serde_json::from_str(json).unwrap();
+            assert!(
+                parse_upload_receipt(body).is_err(),
+                "payload should be rejected: {json}"
+            );
+        }
     }
 
     #[test]

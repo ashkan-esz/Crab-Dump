@@ -39,6 +39,7 @@ use crate::health_monitor::{HealthMonitor, ServiceDefinition, ServiceInput};
 use crate::history::HistoryStore;
 use crate::migration::MigrationContext;
 use crate::resource_usage::{ResourceCollector, ResourceUsage};
+use crate::restore::{ManifestStore, RestoreController, RestoreMode, RestoreStatus};
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_DASHBOARD};
@@ -1494,6 +1495,234 @@ async fn api_history(
     }
 }
 
+async fn api_restores(
+    manifests: web::Data<Arc<ManifestStore>>,
+    restores: web::Data<Arc<RestoreController>>,
+) -> impl Responder {
+    let backups = match manifests.restorable() {
+        Ok(backups) => backups,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to list restorable backups");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "restore state unavailable"}));
+        }
+    };
+    match restores.list() {
+        Ok(requests) => {
+            let backups = backups
+                .into_iter()
+                .map(RestoreBackupSummary::from)
+                .collect::<Vec<_>>();
+            let requests = requests
+                .into_iter()
+                .map(RestoreRequestSummary::from)
+                .collect::<Vec<_>>();
+            HttpResponse::Ok().json(serde_json::json!({ "backups": backups, "requests": requests }))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to list restore requests");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "restore state unavailable"}))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RestoreBackupSummary {
+    backup_id: String,
+    database_name: String,
+    timestamp: String,
+    filename: String,
+    codec: String,
+    encrypted: bool,
+    packaged_bytes: u64,
+    sha256: String,
+    part_count: usize,
+}
+
+impl From<crate::restore::BackupManifest> for RestoreBackupSummary {
+    fn from(manifest: crate::restore::BackupManifest) -> Self {
+        Self {
+            backup_id: manifest.backup_id,
+            database_name: manifest.database_name,
+            timestamp: manifest.timestamp,
+            filename: manifest.filename,
+            codec: manifest.codec,
+            encrypted: manifest.encrypted,
+            packaged_bytes: manifest.packaged_bytes,
+            sha256: manifest.sha256,
+            part_count: manifest.part_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RestoreRequestSummary {
+    request_id: String,
+    backup_id: String,
+    database_name: String,
+    mode: RestoreMode,
+    status: RestoreStatus,
+    audit: Vec<String>,
+    error: Option<String>,
+}
+
+impl From<crate::restore::RestoreRequest> for RestoreRequestSummary {
+    fn from(request: crate::restore::RestoreRequest) -> Self {
+        Self {
+            request_id: request.request_id,
+            backup_id: request.backup_id,
+            database_name: request.database_name,
+            mode: request.mode,
+            status: request.status,
+            audit: request.audit,
+            error: request.error,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RestoreApprovalPayload {
+    #[serde(default = "default_restore_mode")]
+    mode: RestoreMode,
+}
+
+fn default_restore_mode() -> RestoreMode {
+    RestoreMode::Safe
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approve_restore(
+    req: HttpRequest,
+    path: web::Path<String>,
+    payload: web::Json<RestoreApprovalPayload>,
+    restores: web::Data<Arc<RestoreController>>,
+    manifests: web::Data<Arc<ManifestStore>>,
+    registry: web::Data<Arc<DatabaseRegistry>>,
+    client: web::Data<Arc<RwLock<Arc<Client>>>>,
+    bot_token: web::Data<String>,
+    restore_work_dir: web::Data<std::path::PathBuf>,
+    keep_failed_dumps: web::Data<bool>,
+) -> impl Responder {
+    let extensions = req.extensions();
+    let user = extensions.get::<AuthenticatedUser>();
+    let Some(user) = user else {
+        return HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error": "authentication required"}));
+    };
+    if payload.mode == RestoreMode::Clean && user.role != DashboardRole::Admin {
+        return HttpResponse::Forbidden()
+            .json(serde_json::json!({"error": "clean restore requires administrator approval"}));
+    }
+    let request_id = path.into_inner();
+    if let Err(error) = restores.set_mode(&request_id, payload.mode) {
+        return HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}));
+    }
+    match restores.approve_as(
+        &request_id,
+        &user.username,
+        user.role == DashboardRole::Admin,
+    ) {
+        Ok(request) => {
+            let request_for_worker = request.clone();
+            let manifests = manifests.get_ref().clone();
+            let restores = restores.get_ref().clone();
+            let registry = registry.get_ref().clone();
+            let client = client.get_ref().clone();
+            let bot_token = bot_token.get_ref().clone();
+            let restore_work_dir = restore_work_dir.get_ref().clone();
+            let keep_failed_dumps = *keep_failed_dumps.get_ref();
+            let cancellation = restores.cancellation_token(&request_for_worker.request_id);
+            let restores_for_status = restores.clone();
+            std::thread::spawn(move || {
+                let result = (|| -> anyhow::Result<()> {
+                    let manifest = manifests.find_restorable(&request_for_worker.backup_id)?;
+                    let database_url = registry
+                        .config_snapshot()
+                        .into_iter()
+                        .find(|database| {
+                            database.display_name() == request_for_worker.database_name
+                        })
+                        .map(|database| database.url)
+                        .with_context(|| {
+                            format!(
+                                "restore target database is unavailable: {}",
+                                request_for_worker.database_name
+                            )
+                        })?;
+                    let shared_client = client
+                        .read()
+                        .map_err(|_| anyhow::anyhow!("Telegram client lock poisoned"))?
+                        .clone();
+                    let (identity, passphrase) = crate::config::restore_credentials()?;
+                    crate::restore::download_and_restore(
+                        &shared_client,
+                        &bot_token,
+                        &manifest,
+                        restore_work_dir.as_ref(),
+                        &database_url,
+                        request_for_worker.mode,
+                        identity.as_deref(),
+                        passphrase.as_deref(),
+                        keep_failed_dumps,
+                        cancellation.as_deref(),
+                    )
+                })();
+                match result {
+                    Ok(()) => {
+                        let _ = restores.finish(
+                            &request_for_worker.request_id,
+                            RestoreStatus::Succeeded,
+                            None,
+                        );
+                    }
+                    Err(error) => {
+                        if restores_for_status.is_cancelled(&request_for_worker.request_id) {
+                            return;
+                        }
+                        let _ = restores.finish(
+                            &request_for_worker.request_id,
+                            RestoreStatus::Failed,
+                            Some(crate::history::sanitize_error(
+                                &error.to_string(),
+                                "",
+                                &bot_token,
+                                &[],
+                            )),
+                        );
+                    }
+                }
+            });
+            audit_action(&req, "restore_approve", &request.database_name, "accepted");
+            HttpResponse::Accepted().json(RestoreRequestSummary::from(request))
+        }
+        Err(error) => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+async fn cancel_restore(
+    req: HttpRequest,
+    path: web::Path<String>,
+    restores: web::Data<Arc<RestoreController>>,
+) -> impl Responder {
+    let extensions = req.extensions();
+    let Some(user) = extensions.get::<AuthenticatedUser>() else {
+        return HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error": "authentication required"}));
+    };
+    match restores.cancel(&path.into_inner(), &user.username) {
+        Ok(request) => {
+            audit_action(&req, "restore_cancel", &request.database_name, "accepted");
+            HttpResponse::Ok().json(RestoreRequestSummary::from(request))
+        }
+        Err(error) => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ManagedDatabaseResponse {
     id: Option<String>,
@@ -2180,6 +2409,8 @@ fn minimum_role(req: &ServiceRequest) -> DashboardRole {
         || path.ends_with("/backup")
         || path.ends_with("/enable")
         || path.ends_with("/disable")
+        || path.ends_with("/approve")
+        || (path.starts_with("/api/restores/") && *req.method() == Method::DELETE)
     {
         DashboardRole::Operator
     } else if matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE) {
@@ -2216,6 +2447,7 @@ async fn dashboard_auth(
             | "/databases"
             | "/services"
             | "/settings"
+            | "/restores"
             | "/dashboard.css"
             | "/dashboard-auth.js"
             | "/healthz"
@@ -3074,6 +3306,12 @@ async fn serve_settings() -> impl Responder {
         .body(include_str!("../dashboard/settings.html"))
 }
 
+async fn serve_restores() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(include_str!("../dashboard/restores.html"))
+}
+
 fn service_definition_for_role(
     mut definition: ServiceDefinition,
     role: DashboardRole,
@@ -3290,6 +3528,10 @@ pub async fn start_server(
     data_dir: std::path::PathBuf,
     history_dir: std::path::PathBuf,
     bot_status: BotStatusHandle,
+    manifests: Arc<ManifestStore>,
+    restores: Arc<RestoreController>,
+    restore_work_dir: std::path::PathBuf,
+    keep_failed_dumps: bool,
 ) -> std::io::Result<()> {
     // Share the port via actix-web `Data` so every handler can read it.
     let port_data = web::Data::new(port);
@@ -3310,6 +3552,10 @@ pub async fn start_server(
     let database_registry_data = web::Data::new(database_registry);
     let health_monitor_data = web::Data::new(health_monitor);
     let bot_status_data = web::Data::new(bot_status);
+    let manifests_data = web::Data::new(manifests);
+    let restores_data = web::Data::new(restores);
+    let restore_work_dir_data = web::Data::new(restore_work_dir);
+    let keep_failed_dumps_data = web::Data::new(keep_failed_dumps);
     let migration_data = web::Data::new(MigrationContext {
         data_dir,
         history_dir,
@@ -3337,6 +3583,10 @@ pub async fn start_server(
             .app_data(database_registry_data.clone())
             .app_data(health_monitor_data.clone())
             .app_data(bot_status_data.clone())
+            .app_data(manifests_data.clone())
+            .app_data(restores_data.clone())
+            .app_data(restore_work_dir_data.clone())
+            .app_data(keep_failed_dumps_data.clone())
             .app_data(migration_data.clone())
             .route("/healthz", web::get().to(healthz))
             .route("/api/auth/login", web::post().to(login))
@@ -3392,6 +3642,12 @@ pub async fn start_server(
                 web::post().to(api_database_action),
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
+            .route("/api/restores", web::get().to(api_restores))
+            .route(
+                "/api/restores/{id}/approve",
+                web::post().to(approve_restore),
+            )
+            .route("/api/restores/{id}", web::delete().to(cancel_restore))
             .route("/api/databases", web::get().to(api_managed_databases))
             .route(
                 "/api/database-connections/check",
@@ -3457,6 +3713,7 @@ pub async fn start_server(
             .route("/databases", web::get().to(serve_databases))
             .route("/services", web::get().to(serve_services))
             .route("/settings", web::get().to(serve_settings))
+            .route("/restores", web::get().to(serve_restores))
             .route("/dashboard.css", web::get().to(serve_dashboard_styles))
             .route("/dashboard-auth.js", web::get().to(serve_dashboard_auth))
             .wrap(from_fn(dashboard_auth))

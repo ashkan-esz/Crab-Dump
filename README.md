@@ -160,6 +160,32 @@ database's leftovers are swept too, unless you set `KEEP_FAILED_DUMPS=1`, which
 leaves them in `WORK_DIR` for debugging (nothing removes them later — sweep the
 directory yourself).
 
+## Telegram-selected restore
+
+After a backup is uploaded, an enabled Telegram user can run `/restore` and
+select one of the recent restorable backups. The bot only queues the request;
+an operator must approve it from the dashboard's `/restores` page.
+
+The dashboard supports `safe` restores for operators. `clean` restores use
+`pg_restore --clean --if-exists` and require administrator approval. Restore
+targets are existing configured databases; Telegram users cannot supply an
+arbitrary database URL.
+
+For encrypted backups, configure exactly one restore credential before
+approval:
+
+```bash
+AGE_IDENTITY_FILE=/run/secrets/age-identity.txt
+# or:
+AGE_PASSPHRASE=the-backup-passphrase
+```
+
+Missing credentials are rejected before Telegram parts are downloaded. Restore
+parts are downloaded through the configured routed client, reassembled and
+SHA-256 verified, then decrypted, decompressed, and passed to `pg_restore`.
+Temporary restore files are removed after success or failure unless
+`KEEP_FAILED_DUMPS=1` is enabled.
+
 ## Configuration reference
 
 | Variable             | Required | Default        | Notes                                              |
@@ -179,6 +205,7 @@ directory yourself).
 | `ENCRYPTION_TYPE`    | no       | `none`         | `none`, `age-recipient`, or `age-passphrase`; `.env` only |
 | `AGE_RECIPIENT`      | conditional | *(none)*     | `age1…` X25519 public key for `age-recipient` |
 | `AGE_PASSPHRASE`     | conditional | *(none)*     | non-empty passphrase for `age-passphrase` |
+| `AGE_IDENTITY_FILE`  | restore     | *(none)*     | restore-only age identity file; mutually exclusive with restore `AGE_PASSPHRASE` |
 | `COMPRESSION_CODEC`  | no       |                | `zstd`, `gzip`, or `brotli`; omit for uncompressed `.dump`; also `compression_codec` in `config.toml` |
 | `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `1..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
 | `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; rejected without a codec and for gzip/brotli |

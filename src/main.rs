@@ -34,6 +34,7 @@ mod health_monitor;
 mod history;
 mod migration;
 mod resource_usage;
+mod restore;
 mod routing;
 mod telegram;
 mod telegram_users;
@@ -48,6 +49,7 @@ use encrypt::EncryptionMode;
 use health_monitor::HealthMonitor;
 use history::{HistoryRecord, HistoryStore};
 use resource_usage::ResourceCollector;
+use restore::{cleanup_stale_workspaces, manifest_part, ManifestStore, RestoreController};
 use routing::{ProfileStore, RouteManager, DEFAULT_SHOES_PATH, DEFAULT_SING_BOX_PATH};
 
 type ClientHandle = Arc<RwLock<Arc<Client>>>;
@@ -181,6 +183,20 @@ fn main() -> Result<()> {
     .context("loading health monitor")?;
 
     let resource_collector = Arc::new(ResourceCollector::new(shared_cfg.work_dir.clone()));
+    let manifest_store = Arc::new(ManifestStore::new(&data_dir));
+    let restore_controller = Arc::new(RestoreController::new(&data_dir));
+    match cleanup_stale_workspaces(&shared_cfg.work_dir, shared_cfg.keep_failed_dumps) {
+        Ok(removed) if removed > 0 => {
+            tracing::info!(removed, "removed stale restore workspaces");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to remove stale restore workspaces");
+        }
+    }
+    if let Err(error) = restore_controller.recover_stale_running() {
+        tracing::warn!(error = %error, "failed to recover interrupted restore requests");
+    }
     let bot_runtime = if cli.dry_run {
         None
     } else {
@@ -191,6 +207,8 @@ fn main() -> Result<()> {
             Arc::clone(&registry),
             Arc::clone(&database_states),
             Arc::clone(&resource_collector),
+            Arc::clone(&manifest_store),
+            Arc::clone(&restore_controller),
         ))
     };
 
@@ -220,6 +238,8 @@ fn main() -> Result<()> {
     let dashboard_resources = Arc::clone(&resource_collector);
     let dashboard_registry = Arc::clone(&registry);
     let dashboard_health_monitor = Arc::clone(&health_monitor);
+    let dashboard_restore_work_dir = shared_cfg.work_dir.clone();
+    let dashboard_keep_failed_dumps = shared_cfg.keep_failed_dumps;
     let dashboard_bot_status = bot_runtime
         .as_ref()
         .map(|runtime| runtime.status())
@@ -255,6 +275,10 @@ fn main() -> Result<()> {
                 data_dir,
                 dashboard_history_dir.into(),
                 dashboard_bot_status,
+                manifest_store,
+                restore_controller,
+                dashboard_restore_work_dir,
+                dashboard_keep_failed_dumps,
             )
             .await
             {
@@ -649,10 +673,7 @@ fn run_manual_requests(
                 .iter()
                 .find(|request| request.database_name == failure.db_name)
             {
-                let message = format!(
-                    "❌ Backup for <code>{}</code> failed. Check the dashboard for details.",
-                    telegram::escape_html(&failure.db_name)
-                );
+                let message = format_failure_notification(&failure);
                 let client_guard = client.read().expect("Telegram client lock poisoned");
                 if let Err(error) = telegram::send_message(
                     &client_guard,
@@ -1019,8 +1040,138 @@ struct DatabaseFailure {
     index: usize,
     /// Human-readable display name of the database.
     db_name: String,
-    /// The failure, formatted with its full context chain.
-    error: String,
+    /// Pipeline stage where the failure occurred.
+    stage: String,
+    /// Concise, single-line, redacted explanation.
+    reason: String,
+    /// Actionable next step for the operator.
+    action: String,
+    /// Full, single-line, redacted error chain for logs and history.
+    diagnostics: String,
+}
+
+struct FailureSummary {
+    stage: String,
+    reason: String,
+    action: String,
+    diagnostics: String,
+}
+
+impl DatabaseFailure {
+    fn from_error(
+        index: usize,
+        db_name: String,
+        error: &str,
+        database_url: &str,
+        bot_token: &str,
+        chat_ids: &[String],
+    ) -> Self {
+        let summary = summarize_failure(error, database_url, bot_token, chat_ids);
+        Self {
+            index,
+            db_name,
+            stage: summary.stage,
+            reason: summary.reason,
+            action: summary.action,
+            diagnostics: summary.diagnostics,
+        }
+    }
+}
+
+fn summarize_failure(
+    error: &str,
+    database_url: &str,
+    bot_token: &str,
+    chat_ids: &[String],
+) -> FailureSummary {
+    let diagnostics = single_line(&history::sanitize_error(
+        error,
+        database_url,
+        bot_token,
+        chat_ids,
+    ));
+    let (stage, action) = classify_failure(&diagnostics);
+    let reason = shorten_reason(&diagnostics, stage);
+    FailureSummary {
+        stage: stage.to_string(),
+        reason,
+        action: action.to_string(),
+        diagnostics,
+    }
+}
+
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn shorten_reason(diagnostics: &str, stage: &str) -> String {
+    let reason = diagnostics
+        .split(": ")
+        .last()
+        .unwrap_or(diagnostics)
+        .trim()
+        .trim_matches(|character| matches!(character, '.' | ':' | ';'));
+    let reason = if reason.is_empty() { stage } else { reason };
+    const MAX_REASON_LENGTH: usize = 180;
+    if reason.chars().count() <= MAX_REASON_LENGTH {
+        reason.to_string()
+    } else {
+        let shortened = reason
+            .chars()
+            .take(MAX_REASON_LENGTH.saturating_sub(1))
+            .collect::<String>();
+        format!("{shortened}…")
+    }
+}
+
+fn classify_failure(diagnostics: &str) -> (&'static str, &'static str) {
+    let lower = diagnostics.to_ascii_lowercase();
+    if lower.contains("pg_dump") || lower.contains("postgres") {
+        (
+            "pg_dump",
+            "Check DATABASE_URL, PostgreSQL access, and pg_dump availability.",
+        )
+    } else if lower.contains("upload")
+        || lower.contains("telegram")
+        || lower.contains("destination")
+    {
+        (
+            "Telegram upload",
+            "Check the bot token, chat ID, network route, and Telegram availability.",
+        )
+    } else if lower.contains("packag")
+        || lower.contains("compress")
+        || lower.contains("encrypt")
+        || lower.contains("chunk")
+        || lower.contains("pipeline")
+    {
+        (
+            "packaging",
+            "Check WORK_DIR space and the compression/encryption configuration.",
+        )
+    } else {
+        (
+            "pipeline",
+            "Check the dashboard and logs for the full failure details.",
+        )
+    }
+}
+
+fn format_failure_manifest(failure: &DatabaseFailure) -> String {
+    format!(
+        "FAILED [{}] {}: {} — {}. Action: {}",
+        failure.index, failure.db_name, failure.stage, failure.reason, failure.action
+    )
+}
+
+fn format_failure_notification(failure: &DatabaseFailure) -> String {
+    format!(
+        "❌ Backup for <code>{}</code> failed: {} — {}. Action: {}",
+        telegram::escape_html(&failure.db_name),
+        telegram::escape_html(&failure.stage),
+        telegram::escape_html(&failure.reason),
+        telegram::escape_html(&failure.action),
+    )
 }
 
 /// Execute the full backup pipeline for a single database.
@@ -1331,6 +1482,26 @@ fn backup_pipeline(
     metrics.chunks_count = chunks_count;
     metrics.sha256 = Some(hash);
 
+    let manifest_store = ManifestStore::new(DATA_DIR);
+    let backup_id = base_name.to_string();
+    let timestamp = base_name
+        .strip_prefix(&format!("{db_name}_"))
+        .and_then(|value| value.split(".dump").next())
+        .unwrap_or(base_name);
+    manifest_store
+        .begin(
+            &backup_id,
+            db_name,
+            timestamp,
+            base_name,
+            compression_label(cfg.compression_codec),
+            encrypted,
+            total_bytes,
+            hex::encode(hash),
+            chunks_count,
+        )
+        .context("starting backup manifest")?;
+
     // Dump + packaging done; the upload stage starts next. `total_bytes` is
     // the post-compression (and post-encryption) size — i.e. exactly what
     // goes over the wire to Telegram.
@@ -1453,7 +1624,7 @@ fn backup_pipeline(
                     },
                 );
             });
-            telegram::send_document_with_progress(
+            let receipt = telegram::send_document_with_progress_receipt(
                 &client_guard,
                 &cfg.tg_bot_token,
                 chat_id,
@@ -1461,7 +1632,12 @@ fn backup_pipeline(
                 stats,
                 Some(progress),
                 Some(cancellation),
-            )
+            )?;
+            let part = manifest_part(chunk_index, path, chat_id, &receipt)?;
+            manifest_store
+                .record_part(&backup_id, part)
+                .context("recording uploaded backup part")?;
+            Ok(())
         },
         |i| {
             let path = &chunks[i];
@@ -1484,6 +1660,9 @@ fn backup_pipeline(
         Some(cancellation),
     )
     .with_context(|| format!("uploading backup chunks (db={db_name})"))?;
+    manifest_store
+        .complete(&backup_id)
+        .context("completing backup manifest")?;
     metrics.upload_attempts += upload_stats.attempts;
     metrics.upload_retries += upload_stats.retries;
     metrics.upload_duration_secs = upload_started.elapsed().as_secs_f64();
@@ -1780,12 +1959,6 @@ fn execute_database_indices(
                 results.push(result);
             }
             Ok(Err(e)) => {
-                tracing::error!(
-                    db_index = i,
-                    db_name = %db_name,
-                    error = %e,
-                    "database backup failed",
-                );
                 if is_cancelled(&e) {
                     web::cancel_db(&db_name);
                     tracing::info!(
@@ -1794,12 +1967,25 @@ fn execute_database_indices(
                         "database backup cancelled by operator",
                     );
                 } else {
-                    web::fail_db(&db_name, e.to_string()); // keeps the failed stage
-                    errors.push(DatabaseFailure {
-                        index: i,
+                    let options = options_by_db
+                        .get(&db_name)
+                        .expect("backup options must exist for configured database");
+                    let failure = DatabaseFailure::from_error(
+                        i,
                         db_name,
-                        error: format!("{e:#}"),
-                    });
+                        &format!("{e:#}"),
+                        &databases[i].url,
+                        &cfg.tg_bot_token,
+                        &options.chat_ids,
+                    );
+                    tracing::error!(
+                        db_index = i,
+                        database = %failure.db_name,
+                        error = %failure.diagnostics,
+                        "database backup failed",
+                    );
+                    web::fail_db(&failure.db_name, &failure.diagnostics);
+                    errors.push(failure);
                 }
             }
             Err(payload) => {
@@ -1811,18 +1997,25 @@ fn execute_database_indices(
                 } else {
                     "unknown panic".to_string()
                 };
+                let options = options_by_db
+                    .get(&db_name)
+                    .expect("backup options must exist for configured database");
+                let failure = DatabaseFailure::from_error(
+                    i,
+                    db_name,
+                    &format!("panicked: {panic_msg}"),
+                    &databases[i].url,
+                    &cfg.tg_bot_token,
+                    &options.chat_ids,
+                );
                 tracing::error!(
                     db_index = i,
-                    db_name = %db_name,
-                    error = %panic_msg,
+                    database = %failure.db_name,
+                    error = %failure.diagnostics,
                     "backup thread panicked",
                 );
-                web::fail_db(&db_name, format!("panicked: {panic_msg}"));
-                errors.push(DatabaseFailure {
-                    index: i,
-                    db_name,
-                    error: format!("panicked: {panic_msg}"),
-                });
+                web::fail_db(&failure.db_name, &failure.diagnostics);
+                errors.push(failure);
                 let now = SystemTime::now();
                 record_history(
                     &cfg.history,
@@ -1836,15 +2029,15 @@ fn execute_database_indices(
                             .get(&databases[i].display_name())
                             .and_then(|options| options.recipient.clone()),
                         status: "failure".into(),
-                        error: Some(history::sanitize_error(
-                            &format!("panicked: {panic_msg}"),
-                            &databases[i].url,
-                            &cfg.tg_bot_token,
-                            options_by_db
-                                .get(&databases[i].display_name())
-                                .map(|options| options.chat_ids.as_slice())
-                                .unwrap_or(&[]),
-                        )),
+                        error: Some(
+                            summarize_failure(
+                                &format!("panicked: {panic_msg}"),
+                                &databases[i].url,
+                                &cfg.tg_bot_token,
+                                &options.chat_ids,
+                            )
+                            .diagnostics,
+                        ),
                         dump_bytes: 0,
                         packaged_bytes: 0,
                         chunk_count: 0,
@@ -1964,7 +2157,7 @@ fn print_manifest(results: &[BackupResult], failures: &[DatabaseFailure]) {
     // Failures are part of the manifest: a reader that sees only successes
     // cannot tell a complete run from a partial one.
     for f in failures {
-        println!("FAILED [{}] {}: {}", f.index, f.db_name, f.error);
+        println!("{}", format_failure_manifest(f));
     }
 }
 
@@ -2584,5 +2777,61 @@ mod tests {
         assert!(is_cancelled(&error));
         assert!(chunks.iter().all(|path| path.exists()));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failure_summary_is_actionable_single_line_and_redacted() {
+        let database_url = "postgres://admin:secret@example.test/app";
+        let bot_token = "123456:bot-secret";
+        let chat_id = "998877";
+        let failure = DatabaseFailure::from_error(
+            2,
+            "app".into(),
+            &format!(
+                "uploading backup chunks (db=app):\nTelegram rejected {} for chat {}",
+                database_url, chat_id
+            ),
+            database_url,
+            bot_token,
+            &[chat_id.into()],
+        );
+
+        let manifest = format_failure_manifest(&failure);
+        let notification = format_failure_notification(&failure);
+        for output in [&manifest, &notification] {
+            assert!(!output.contains("secret"));
+            assert!(!output.contains(bot_token));
+            assert!(!output.contains(chat_id));
+            assert!(!output.contains('\n'));
+        }
+        assert!(manifest.starts_with("FAILED [2] app: Telegram upload —"));
+        assert!(manifest.contains("Action: Check the bot token"));
+        assert!(notification.contains("Telegram upload"));
+        assert!(notification.contains("Action: Check the bot token"));
+    }
+
+    #[test]
+    fn failure_summary_classifies_dump_and_packaging_stages() {
+        let dump = DatabaseFailure::from_error(
+            0,
+            "dump".into(),
+            "starting pg_dump for dump: executable not found",
+            "postgres://host/db",
+            "token",
+            &[],
+        );
+        assert_eq!(dump.stage, "pg_dump");
+        assert!(dump.action.contains("DATABASE_URL"));
+
+        let packaging = DatabaseFailure::from_error(
+            1,
+            "package".into(),
+            "finalizing pipeline stages (db=package): disk full",
+            "postgres://host/db",
+            "token",
+            &[],
+        );
+        assert_eq!(packaging.stage, "packaging");
+        assert!(packaging.action.contains("WORK_DIR"));
     }
 }

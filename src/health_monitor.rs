@@ -880,7 +880,12 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    };
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn input(name: &str) -> ServiceInput {
         ServiceInput {
@@ -908,11 +913,12 @@ mod tests {
         incidents: &[Incident],
     ) -> (Arc<HealthMonitor>, std::path::PathBuf) {
         let data_dir = std::env::temp_dir().join(format!(
-            "crab-dump-health-monitor-test-{}",
+            "crab-dump-health-monitor-test-{}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&data_dir).unwrap();
         persist_json(
@@ -1214,11 +1220,12 @@ mod tests {
     fn legacy_runtime_and_incident_json_load_without_last_up_version() {
         let service = test_service("api");
         let data_dir = std::env::temp_dir().join(format!(
-            "crab-dump-health-monitor-legacy-test-{}",
+            "crab-dump-health-monitor-legacy-test-{}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&data_dir).unwrap();
         persist_json(

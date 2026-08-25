@@ -68,6 +68,26 @@ pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
 /// Fixed directory for persistent application state.
 pub const DATA_DIR: &str = "./data";
 
+/// Restore-only credentials. They are deliberately resolved on demand so
+/// backup configuration/debug output can never accidentally include them.
+#[allow(dead_code)]
+pub fn restore_credentials() -> Result<(Option<PathBuf>, Option<String>)> {
+    restore_credentials_from(get_env)
+}
+
+fn restore_credentials_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<(Option<PathBuf>, Option<String>)> {
+    let identity = get("AGE_IDENTITY_FILE")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    let passphrase = get("AGE_PASSPHRASE").filter(|value| !value.trim().is_empty());
+    if identity.is_some() && passphrase.is_some() {
+        bail!("AGE_IDENTITY_FILE and AGE_PASSPHRASE are mutually exclusive");
+    }
+    Ok((identity, passphrase))
+}
+
 // ===========================================================================
 // Backup schedule
 // ===========================================================================
@@ -1202,6 +1222,38 @@ mod tests {
     }
 
     // -- Shared config helpers --
+
+    #[test]
+    fn restore_credentials_ignore_blank_values() {
+        let result = restore_credentials_from(|_| Some("  ".into())).unwrap();
+        assert_eq!(result, (None, None));
+    }
+
+    #[test]
+    fn restore_credentials_reject_mixed_modes() {
+        let error = restore_credentials_from(|key| match key {
+            "AGE_IDENTITY_FILE" => Some("/run/secrets/identity".into()),
+            "AGE_PASSPHRASE" => Some("secret".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn restore_credentials_accept_one_mode() {
+        let identity = restore_credentials_from(|key| {
+            (key == "AGE_IDENTITY_FILE").then(|| "/run/secrets/identity".into())
+        })
+        .unwrap();
+        assert_eq!(identity.0, Some(PathBuf::from("/run/secrets/identity")));
+        assert_eq!(identity.1, None);
+
+        let passphrase =
+            restore_credentials_from(|key| (key == "AGE_PASSPHRASE").then(|| "secret".into()))
+                .unwrap();
+        assert_eq!(passphrase, (None, Some("secret".into())));
+    }
 
     #[test]
     fn chunk_size_bytes_computes_correctly() {
