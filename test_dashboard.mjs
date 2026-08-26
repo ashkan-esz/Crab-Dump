@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 
 const dashboardDir = './dashboard/';
 const html = readFileSync(new URL(`${dashboardDir}index.html`, import.meta.url), 'utf8');
-const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html', 'services.html', 'settings.html'];
+const dashboardPages = ['index.html', 'databases.html', 'users.html', 'routing.html', 'services.html', 'restores.html', 'settings.html'];
 const pageHtml = Object.fromEntries(dashboardPages.map(file => [
     file,
     readFileSync(new URL(`${dashboardDir}${file}`, import.meta.url), 'utf8'),
@@ -83,6 +83,7 @@ const expectedOperations = [
     { href: '/services', label: 'Services' },
     { href: '/users', label: 'Telegram users' },
     { href: '/routing', label: 'Routing' },
+    { href: '/restores', label: 'Restores' },
 ];
 for (const [file, source] of Object.entries(pageHtml)) {
     const operations = source.match(/<span class="app-nav-label">Operations<\/span>\s*<div class="app-nav-links">([\s\S]*?)<\/div>/)?.[1] ?? '';
@@ -98,6 +99,38 @@ assert.match(settingsHtml, /api\/migration\/export/);
 assert.match(settingsHtml, /api\/migration\/import/);
 assert.match(settingsHtml, /Import will replace all dashboard-managed state/);
 assert.doesNotMatch(html, /id="migrationCard"/, 'migration controls must live on Settings');
+const restoresHtml = pageHtml['restores.html'];
+assert.match(restoresHtml, /<title>Restores · crab-dump<\/title>/);
+assert.match(restoresHtml, /<a class="skip-link" href="#restores-main">Skip to main content<\/a>/);
+assert.match(restoresHtml, /<main id="restores-main" class="page restores-page">/);
+assert.match(restoresHtml, /<script src="\/dashboard-auth.js"><\/script>/);
+assert.match(restoresHtml, /class="app-signout"[^>]*>Sign out<\/button>/);
+assert.match(restoresHtml, /id="sidebarRole"/);
+assert.match(restoresHtml, /id="restore-role"/);
+assert.match(restoresHtml, /id="restore-summary"[^>]*aria-label="Restore summary"/);
+for (const id of ['backup-count', 'queued-count', 'active-count', 'failed-count', 'backups-region', 'requests-region', 'backups-list', 'requests-list']) {
+    assert.match(restoresHtml, new RegExp(`id="${id}"`), `${id} must remain available to restore operations`);
+}
+for (const marker of ['backups-loading', 'backups-error', 'backups-empty', 'backups-filtered-empty', 'requests-loading', 'requests-error', 'requests-empty', 'requests-filtered-empty']) {
+    assert.match(restoresHtml, new RegExp(`id="${marker}"`), `${marker} state must be present`);
+}
+assert.match(restoresHtml, /aria-live="polite"/);
+assert.match(restoresHtml, /data-action="approve"/);
+assert.match(restoresHtml, /data-action="cancel"/);
+assert.match(restoresHtml, /data-mode="safe"/);
+assert.match(restoresHtml, /data-mode="clean"/);
+assert.match(restoresHtml, /api\/restores/);
+assert.match(restoresHtml, /Restore API returned HTTP \$\{response\.status\}/);
+assert.match(restoresHtml, /Restore dashboard failed/);
+assert.match(restoresHtml, /document\.createElement\('option'\)/);
+assert.match(restoresHtml, /api\/restores\/\$\{encodeURIComponent\(id\)\}/);
+assert.match(restoresHtml, /approve.*\/approve|\/approve.*approve/);
+assert.match(restoresHtml, /restore-table-wrap/);
+assert.match(restoresHtml, /restore-request-list/);
+assert.match(dashboardCss, /\.restore-table-wrap[\s\S]*overflow: auto/);
+assert.match(dashboardCss, /\.restore-request[\s\S]*min-width: 0/);
+assert.match(dashboardCss, /\.restore-summary[\s\S]*repeat\(4, minmax\(0, 1fr\)\)/);
+assert.match(dashboardCss, /@media \(max-width: 700px\)[\s\S]*\.restore-request/);
 const routingStyles = pageHtml['routing.html'].split('<link rel="stylesheet" href="/dashboard.css">', 1)[0];
 assert.doesNotMatch(routingStyles, /\.app-nav\s*\{/, 'routing.html must use shared sidebar geometry');
 assert.doesNotMatch(routingStyles, /(?:^|[}])\s*main(?:\s*[,{]|\s*\{)/, 'routing.html must not override main layout');

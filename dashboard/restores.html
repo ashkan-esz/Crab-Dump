@@ -3,143 +3,399 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Restore approvals · crab-dump</title>
+  <title>Restores · crab-dump</title>
   <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard-auth.js"></script>
 </head>
 <body>
-  <main class="page">
-    <h1>Restore approvals</h1>
-    <p>Telegram restore requests remain queued until an operator approves them.</p>
-    <section id="restore-state">Loading…</section>
-  </main>
-  <script src="/dashboard-auth.js"></script>
-  <script>
-    async function load() {
-      const state = document.querySelector('#restore-state');
-      if (!(await window.dashboardAuth.ensureSession())) return;
-      const statusResponse = await window.dashboardAuth.request('/api/status');
-      const dashboardRole = statusResponse.ok
-        ? (await statusResponse.json()).dashboard_role
-        : 'viewer';
-      const canApprove = dashboardRole === 'operator' || dashboardRole === 'admin';
-      const canCleanApprove = dashboardRole === 'admin';
-      const response = await window.dashboardAuth.request('/api/restores');
-      if (!response.ok) { state.textContent = 'Restore state unavailable.'; return; }
-      const data = await response.json();
-      state.replaceChildren();
-      const backups = document.createElement('section');
-      const backupsHeading = document.createElement('h2');
-      backupsHeading.textContent = 'Restorable backups';
-      backups.append(backupsHeading);
-      for (const backup of data.backups || []) {
-        const item = document.createElement('p');
-        item.textContent =
-          `${backup.database_name} · ${backup.timestamp} · ${backup.packaged_bytes} bytes · ` +
-          `${backup.codec} · ${backup.encrypted ? 'encrypted' : 'unencrypted'} · ` +
-          `${backup.part_count} part(s) · sha256 ${backup.sha256}`;
-        backups.append(item);
-      }
-      if (!(data.backups || []).length) {
-        const empty = document.createElement('p');
-        empty.textContent = 'No restorable backups are available.';
-        backups.append(empty);
-      }
-      state.append(backups);
+  <a class="skip-link" href="#restores-main">Skip to main content</a>
+  <nav class="app-nav" aria-label="Primary navigation">
+    <a class="app-brand" href="/" aria-label="crab-dump overview"><span class="dot"></span><span>crab-dump</span></a>
+    <div class="app-role" aria-label="Current dashboard role"><span>Current role</span><strong id="sidebarRole">Loading...</strong></div>
+    <span class="app-nav-label">Operations</span>
+    <div class="app-nav-links">
+      <a href="/"><span aria-hidden="true">◈</span><span>Overview</span></a>
+      <a href="/databases"><span aria-hidden="true">▤</span><span>Databases</span></a>
+      <a href="/services"><span aria-hidden="true">◌</span><span>Services</span></a>
+      <a href="/users"><span aria-hidden="true">◎</span><span>Telegram users</span></a>
+      <a href="/routing"><span aria-hidden="true">⇄</span><span>Routing</span></a>
+      <a href="/restores" aria-current="page"><span aria-hidden="true">↻</span><span>Restores</span></a>
+    </div>
+    <span class="app-nav-label">System</span>
+    <div class="app-nav-links"><a href="/#resourceCard"><span aria-hidden="true">▥</span><span>Resources</span></a><a href="/settings"><span aria-hidden="true">⚙</span><span>Settings</span></a></div>
+    <div class="app-nav-footer">Live status<button class="app-signout" type="button" onclick="signOut()">Sign out</button></div>
+  </nav>
 
-      const requestsHeading = document.createElement('h2');
-      requestsHeading.textContent = 'Restore requests';
-      state.append(requestsHeading);
-      for (const request of data.requests || []) {
-        const article = document.createElement('article');
-        const heading = document.createElement('h3');
-        heading.textContent = `${request.database_name} · ${request.mode}`;
-        const status = document.createElement('p');
-        status.textContent = `Status: ${request.status}`;
-        article.append(heading, status);
-        if (request.audit && request.audit.length) {
-          const audit = document.createElement('ul');
-          for (const entry of request.audit) {
-            const item = document.createElement('li');
-            item.textContent = entry;
-            audit.append(item);
-          }
-          article.append(audit);
-        }
-        if (request.error) {
-          const error = document.createElement('p');
-          error.textContent = `Error: ${request.error}`;
-          article.append(error);
-        }
-        if (request.status === 'queued' && canApprove) {
-          const modes = canCleanApprove ? ['safe', 'clean'] : ['safe'];
-          for (const mode of modes) {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.textContent = `Approve ${mode}`;
-            button.addEventListener('click', () => approve(request.request_id, mode, button));
-            article.append(button);
-          }
-          const cancel = document.createElement('button');
-          cancel.type = 'button';
-          cancel.textContent = 'Cancel request';
-          cancel.addEventListener('click', () => cancelRequest(request.request_id, cancel));
-          article.append(cancel);
-        }
-        state.append(article);
+  <main id="restores-main" class="page restores-page">
+    <header class="page-header restores-header">
+      <div>
+        <p class="eyebrow"><a href="/">Overview</a> / Operations</p>
+        <h1>Restore operations</h1>
+        <p class="lede">Review Telegram restore requests against verified backups. Safe restores can be approved by operators; clean restores require administrator approval.</p>
+      </div>
+      <div class="restore-role-note" aria-live="polite">
+        <span>Approval access</span>
+        <strong id="restore-role">Loading role…</strong>
+      </div>
+    </header>
+
+    <div id="restore-page-status" class="restore-page-status" role="status" aria-live="polite"></div>
+
+    <section id="restore-summary" class="restore-summary" aria-label="Restore summary">
+      <div class="restore-summary-item"><span>Available backups</span><strong id="backup-count">—</strong></div>
+      <div class="restore-summary-item"><span>Queued requests</span><strong id="queued-count">—</strong></div>
+      <div class="restore-summary-item"><span>Active restores</span><strong id="active-count">—</strong></div>
+      <div class="restore-summary-item"><span>Failed restores</span><strong id="failed-count">—</strong></div>
+    </section>
+
+    <div class="restore-toolbar" aria-label="Restore filters">
+      <div class="restore-filter">
+        <label for="restore-database-filter">Database</label>
+        <select id="restore-database-filter">
+          <option value="all">All databases</option>
+        </select>
+      </div>
+      <div class="restore-filter">
+        <label for="restore-status-filter">Request status</label>
+        <select id="restore-status-filter">
+          <option value="all">All statuses</option>
+          <option value="queued">Queued</option>
+          <option value="running">Running</option>
+          <option value="succeeded">Succeeded</option>
+          <option value="failed">Failed</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </div>
+      <button id="restore-clear-filters" class="button subtle" type="button" hidden>Clear filters</button>
+      <span id="restore-filter-status" class="restore-filter-status" role="status" aria-live="polite"></span>
+    </div>
+
+    <section id="backups-region" class="restore-panel" aria-labelledby="restorable-backups-title">
+      <div class="restore-panel-heading">
+        <div>
+          <p class="panel-kicker">Verified Telegram uploads</p>
+          <h2 id="restorable-backups-title">Restorable backups</h2>
+        </div>
+        <span id="backups-count-label" class="restore-panel-meta">Loading…</span>
+      </div>
+      <div id="backups-loading" class="restore-skeleton" aria-label="Loading restorable backups">
+        <span></span><span></span><span></span>
+      </div>
+      <div id="backups-error" class="restore-state restore-error" role="alert" hidden>
+        <strong>Backups unavailable</strong><span id="backups-error-message">The restore API did not return backup data.</span>
+        <button id="backups-retry" class="button subtle" type="button">Try again</button>
+      </div>
+      <div id="backups-empty" class="restore-state restore-empty" hidden>
+        <strong>No restorable backups</strong><span>Completed, integrity-checked uploads will appear here when available.</span>
+      </div>
+      <div id="backups-filtered-empty" class="restore-state restore-empty" hidden>
+        <strong>No backups match this database</strong><span>Clear the database filter to see every verified upload.</span>
+      </div>
+      <div id="backups-table-wrap" class="restore-table-wrap" hidden>
+        <table id="backups-table">
+          <caption>Verified backups available for restore</caption>
+          <thead><tr><th>Database</th><th>Backup time</th><th>Size</th><th>Format</th><th>Encryption</th><th>Parts</th><th>Checksum</th></tr></thead>
+          <tbody id="backups-list"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="requests-region" class="restore-panel" aria-labelledby="restore-requests-title">
+      <div class="restore-panel-heading">
+        <div>
+          <p class="panel-kicker">Operator queue</p>
+          <h2 id="restore-requests-title">Restore requests</h2>
+        </div>
+        <span id="requests-count-label" class="restore-panel-meta">Loading…</span>
+      </div>
+      <div id="requests-loading" class="restore-skeleton restore-request-skeleton" aria-label="Loading restore requests">
+        <span></span><span></span>
+      </div>
+      <div id="requests-error" class="restore-state restore-error" role="alert" hidden>
+        <strong>Requests unavailable</strong><span id="requests-error-message">The restore API did not return request data.</span>
+        <button id="requests-retry" class="button subtle" type="button">Try again</button>
+      </div>
+      <div id="requests-empty" class="restore-state restore-empty" hidden>
+        <strong>No restore requests</strong><span>Requests raised from Telegram will wait here for operator review.</span>
+      </div>
+      <div id="requests-filtered-empty" class="restore-state restore-empty" hidden>
+        <strong>No requests match these filters</strong><span>Clear the filters to return to the full restore queue.</span>
+      </div>
+      <div id="requests-list" class="restore-request-list" hidden></div>
+    </section>
+  </main>
+
+  <script>
+    const restoreState = { backups: [], requests: [], errors: {}, role: 'viewer' };
+    const $ = id => document.getElementById(id);
+    const plural = (count, singular, pluralForm = `${singular}s`) => `${count} ${count === 1 ? singular : pluralForm}`;
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const bytes = value => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0) return 'Unknown';
+      if (number < 1024) return `${number} B`;
+      const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+      let size = number;
+      let index = -1;
+      do { size /= 1024; index += 1; } while (size >= 1024 && index < units.length - 1);
+      return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
+    };
+    const formatTimestamp = value => {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value || 'Unknown') : date.toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+    };
+    const statusLabel = value => String(value || 'unknown').replace(/^\w/, char => char.toUpperCase());
+    const statusClass = value => `restore-status-${String(value || 'unknown').toLowerCase()}`;
+
+    function setRole(role) {
+      restoreState.role = role || 'viewer';
+      $('sidebarRole').textContent = restoreState.role;
+      $('restore-role').textContent = restoreState.role === 'admin' ? 'Administrator · approve safe or clean' :
+        restoreState.role === 'operator' ? 'Operator · approve safe' : 'Viewer · read only';
+    }
+
+    function setPageStatus(message, kind = '') {
+      const node = $('restore-page-status');
+      node.textContent = message;
+      node.className = `restore-page-status ${kind}`.trim();
+    }
+
+    function filteredBackups() {
+      const database = $('restore-database-filter').value;
+      return restoreState.backups.filter(item => database === 'all' || item.database_name === database);
+    }
+
+    function filteredRequests() {
+      const database = $('restore-database-filter').value;
+      const status = $('restore-status-filter').value;
+      return restoreState.requests.filter(item =>
+        (database === 'all' || item.database_name === database) &&
+        (status === 'all' || String(item.status).toLowerCase() === status)
+      );
+    }
+
+    function updateSummary() {
+      $('backup-count').textContent = restoreState.backups.length;
+      $('queued-count').textContent = restoreState.requests.filter(item => item.status === 'queued').length;
+      $('active-count').textContent = restoreState.requests.filter(item => item.status === 'running').length;
+      $('failed-count').textContent = restoreState.requests.filter(item => item.status === 'failed').length;
+    }
+
+    function updateDatabaseFilter() {
+      const selected = $('restore-database-filter').value;
+      const names = [...new Set([...restoreState.backups, ...restoreState.requests].map(item => item.database_name).filter(Boolean))].sort();
+      const filter = $('restore-database-filter');
+      const all = document.createElement('option');
+      all.value = 'all';
+      all.textContent = 'All databases';
+      filter.replaceChildren(all);
+      names.forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        filter.append(option);
+      });
+      filter.value = names.includes(selected) ? selected : 'all';
+    }
+
+    function renderBackupRows(items) {
+      $('backups-list').innerHTML = items.map(backup => `
+        <tr>
+          <td><strong>${esc(backup.database_name)}</strong></td>
+          <td><time datetime="${esc(backup.timestamp)}">${esc(formatTimestamp(backup.timestamp))}</time></td>
+          <td class="mono">${esc(bytes(backup.packaged_bytes))}</td>
+          <td><span class="restore-codec">${esc(backup.codec || 'uncompressed')}</span></td>
+          <td><span class="restore-encryption ${backup.encrypted ? 'is-encrypted' : ''}">${backup.encrypted ? 'Encrypted' : 'Unencrypted'}</span></td>
+          <td class="mono">${esc(backup.part_count)} ${backup.part_count === 1 ? 'part' : 'parts'}</td>
+          <td><code class="restore-checksum" tabindex="0" title="${esc(backup.sha256)}">${esc(backup.sha256)}</code></td>
+        </tr>`).join('');
+    }
+
+    function renderBackups() {
+      const items = filteredBackups();
+      $('backups-count-label').textContent = plural(items.length, 'backup');
+      $('backups-loading').hidden = true;
+      $('backups-error').hidden = true;
+      $('backups-empty').hidden = restoreState.backups.length !== 0;
+      $('backups-filtered-empty').hidden = restoreState.backups.length === 0 || items.length !== 0;
+      $('backups-table-wrap').hidden = items.length === 0;
+      if (items.length) renderBackupRows(items);
+    }
+
+    function showPanelError(panel, message) {
+      const prefix = panel === 'backups' ? 'backups' : 'requests';
+      $(`${prefix}-loading`).hidden = true;
+      if (panel === 'backups') $('backups-table-wrap').hidden = true;
+      if (panel === 'requests') $('requests-list').hidden = true;
+      $(`${prefix}-empty`).hidden = true;
+      $(`${prefix}-filtered-empty`).hidden = true;
+      $(`${prefix}-error-message`).textContent = message;
+      $(`${prefix}-error`).hidden = false;
+      $(`${prefix}-count-label`).textContent = 'Unavailable';
+    }
+
+    function requestActions(request) {
+      if (request.status !== 'queued' || restoreState.role === 'viewer') return '';
+      const safe = `<button class="button primary restore-action" data-action="approve" data-mode="safe" data-request-id="${esc(request.request_id)}">Approve safe</button>`;
+      const clean = restoreState.role === 'admin'
+        ? `<button class="button restore-action" data-action="approve" data-mode="clean" data-request-id="${esc(request.request_id)}">Approve clean</button>` : '';
+      return `<div class="restore-actions" aria-label="Actions for ${esc(request.database_name)}">${safe}${clean}<button class="button danger restore-action" data-action="cancel" data-request-id="${esc(request.request_id)}">Cancel request</button></div>`;
+    }
+
+    function renderRequest(request) {
+      const audit = (request.audit || []).map(entry => `<li>${esc(entry)}</li>`).join('');
+      return `<article class="restore-request" data-request-id="${esc(request.request_id)}">
+        <div class="restore-request-main">
+          <div class="restore-request-heading"><h3>${esc(request.database_name)}</h3><span class="restore-status ${statusClass(request.status)}">${esc(statusLabel(request.status))}</span></div>
+          <dl class="restore-request-meta"><div><dt>Mode</dt><dd>${esc(request.mode)}</dd></div><div><dt>Requested by</dt><dd class="mono">${esc(request.requested_by)}</dd></div><div><dt>Request ID</dt><dd><code>${esc(request.request_id)}</code></dd></div></dl>
+          ${request.error ? `<p class="restore-request-error" role="alert"><strong>Restore error</strong>${esc(request.error)}</p>` : ''}
+        </div>
+        <details class="restore-audit"><summary>Audit history <span>${plural((request.audit || []).length, 'entry')}</span></summary><ul>${audit || '<li>No audit entries recorded.</li>'}</ul></details>
+        ${requestActions(request)}
+      </article>`;
+    }
+
+    function renderRequests() {
+      const items = filteredRequests();
+      $('requests-count-label').textContent = plural(items.length, 'request');
+      $('requests-loading').hidden = true;
+      $('requests-error').hidden = true;
+      $('requests-empty').hidden = restoreState.requests.length !== 0;
+      $('requests-filtered-empty').hidden = restoreState.requests.length === 0 || items.length !== 0;
+      $('requests-list').hidden = items.length === 0;
+      $('requests-list').innerHTML = items.map(renderRequest).join('');
+      $('restore-clear-filters').hidden = $('restore-database-filter').value === 'all' && $('restore-status-filter').value === 'all';
+      $('restore-filter-status').textContent = $('restore-clear-filters').hidden ? '' : `${plural(items.length, 'matching request')}; ${plural(filteredBackups().length, 'matching backup')}`;
+    }
+
+    function render() {
+      updateSummary();
+      updateDatabaseFilter();
+      renderBackups();
+      renderRequests();
+    }
+
+    function showError(message, source = 'restore page') {
+      $('backups-loading').hidden = true;
+      $('requests-loading').hidden = true;
+      $('backups-table-wrap').hidden = true;
+      $('requests-list').hidden = true;
+      $('backups-empty').hidden = true;
+      $('requests-empty').hidden = true;
+      $('backups-filtered-empty').hidden = true;
+      $('requests-filtered-empty').hidden = true;
+      const detail = `${source}: ${message}`;
+      $('backups-error-message').textContent = detail;
+      $('requests-error-message').textContent = detail;
+      $('backups-error').hidden = false;
+      $('requests-error').hidden = false;
+      $('backups-count-label').textContent = 'Unavailable';
+      $('requests-count-label').textContent = 'Unavailable';
+      setPageStatus('Restore state unavailable. Try again when the dashboard is ready.', 'is-error');
+    }
+
+    function normalizeRestorePayload(payload) {
+      const data = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+        ? payload.data
+        : payload;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('response JSON is not an object');
       }
-      if (!(data.requests || []).length) {
-        const empty = document.createElement('p');
-        empty.textContent = 'No restore requests.';
-        state.append(empty);
+      const backups = data.backups ?? data.backup_data;
+      if (!Array.isArray(backups)) {
+        throw new Error('response JSON does not contain a backups array');
+      }
+      return {
+        backups,
+        requests: Array.isArray(data.requests) ? data.requests : [],
+        errors: data.errors && typeof data.errors === 'object' ? data.errors : {},
+      };
+    }
+
+    async function load() {
+      setPageStatus('Loading restore state…');
+      $('backups-loading').hidden = false;
+      $('requests-loading').hidden = false;
+      $('backups-error').hidden = true;
+      $('requests-error').hidden = true;
+      if (!(await window.dashboardAuth.ensureSession())) return;
+      try {
+        const statusResponse = await window.dashboardAuth.request('/api/config');
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+          setRole(status.dashboard_role);
+        } else setRole('viewer');
+        const response = await window.dashboardAuth.request('/api/restores');
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || `Restore API returned HTTP ${response.status}.`);
+        }
+        const data = normalizeRestorePayload(await response.json());
+        restoreState.backups = data.backups;
+        restoreState.requests = data.requests;
+        const errors = data.errors;
+        restoreState.errors = {
+          backups: typeof errors.backups === 'string' ? errors.backups : null,
+          requests: typeof errors.requests === 'string' ? errors.requests : null,
+        };
+        try {
+          render();
+          if (restoreState.errors.backups) showPanelError('backups', restoreState.errors.backups);
+          if (restoreState.errors.requests) showPanelError('requests', restoreState.errors.requests);
+        } catch (error) {
+          console.error('Restore dashboard rendering failed', error, data);
+          throw new Error(error instanceof Error ? error.message : 'unknown rendering error');
+        }
+        setPageStatus(`Updated just now · ${restoreState.backups.length} backups, ${restoreState.requests.length} requests.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Restore state unavailable.';
+        console.error('Restore dashboard load failed', error);
+        showError(message, message.startsWith('Restore API returned') ? 'GET /api/restores failed' : 'Restore dashboard failed');
       }
     }
-    async function cancelRequest(id, button) {
+
+    async function performAction(button) {
+      const id = button.dataset.requestId;
+      const action = button.dataset.action;
+      const mode = button.dataset.mode;
+      const original = button.textContent;
       button.disabled = true;
+      button.textContent = action === 'cancel' ? 'Cancelling…' : 'Approving…';
       try {
         const response = await window.dashboardAuth.request(
-          '/api/restores/' + encodeURIComponent(id),
-          {method: 'DELETE'}
+          `/api/restores/${encodeURIComponent(id)}${action === 'approve' ? '/approve' : ''}`,
+          action === 'approve' ? { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({mode}) } : { method: 'DELETE' }
         );
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || 'Restore cancellation failed.');
+          throw new Error(payload.error || (action === 'cancel' ? 'Restore cancellation failed.' : 'Restore approval failed.'));
         }
+        setPageStatus(action === 'cancel' ? 'Restore request cancelled.' : `Restore approved in ${mode} mode.`, 'is-success');
         await load();
       } catch (error) {
         button.disabled = false;
+        button.textContent = original;
         const message = document.createElement('p');
-        message.textContent = error instanceof Error ? error.message : 'Restore cancellation failed.';
+        message.className = 'restore-inline-error';
         message.setAttribute('role', 'alert');
-        button.parentElement.append(message);
+        message.textContent = error instanceof Error ? error.message : 'Restore action failed.';
+        button.closest('.restore-request')?.append(message);
       }
     }
-    async function approve(id, mode, button) {
-      button.disabled = true;
-      const originalLabel = button.textContent;
-      button.textContent = 'Approving…';
-      try {
-        const response = await window.dashboardAuth.request(
-          '/api/restores/' + encodeURIComponent(id) + '/approve',
-          {
-            method: 'POST',
-            headers: {'content-type': 'application/json'},
-            body: JSON.stringify({mode})
-          }
-        );
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || 'Restore approval failed.');
-        }
-        await load();
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = originalLabel;
-        const message = document.createElement('p');
-        message.textContent = error instanceof Error ? error.message : 'Restore approval failed.';
-        message.setAttribute('role', 'alert');
-        button.parentElement.append(message);
-      }
-    }
+
+    $('restore-database-filter').addEventListener('change', render);
+    $('restore-status-filter').addEventListener('change', render);
+    $('restore-clear-filters').addEventListener('click', () => {
+      $('restore-database-filter').value = 'all';
+      $('restore-status-filter').value = 'all';
+      render();
+    });
+    $('backups-retry').addEventListener('click', load);
+    $('requests-retry').addEventListener('click', load);
+    $('requests-list').addEventListener('click', event => {
+      const button = event.target.closest('.restore-action');
+      if (button) performAction(button);
+    });
     load();
   </script>
 </body>

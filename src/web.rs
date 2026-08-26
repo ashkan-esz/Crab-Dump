@@ -1499,32 +1499,42 @@ async fn api_restores(
     manifests: web::Data<Arc<ManifestStore>>,
     restores: web::Data<Arc<RestoreController>>,
 ) -> impl Responder {
-    let backups = match manifests.restorable() {
-        Ok(backups) => backups,
+    let (backups, backups_error) = match manifests.restorable() {
+        Ok(backups) => (backups, None),
         Err(error) => {
             tracing::warn!(error = %error, "failed to list restorable backups");
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": "restore state unavailable"}));
+            (
+                Vec::new(),
+                Some("backup manifests are unavailable".to_string()),
+            )
         }
     };
-    match restores.list() {
-        Ok(requests) => {
-            let backups = backups
-                .into_iter()
-                .map(RestoreBackupSummary::from)
-                .collect::<Vec<_>>();
-            let requests = requests
-                .into_iter()
-                .map(RestoreRequestSummary::from)
-                .collect::<Vec<_>>();
-            HttpResponse::Ok().json(serde_json::json!({ "backups": backups, "requests": requests }))
-        }
+    let (requests, requests_error) = match restores.list() {
+        Ok(requests) => (requests, None),
         Err(error) => {
             tracing::warn!(error = %error, "failed to list restore requests");
-            HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": "restore state unavailable"}))
+            (
+                Vec::new(),
+                Some("restore requests are unavailable".to_string()),
+            )
         }
-    }
+    };
+    let backups = backups
+        .into_iter()
+        .map(RestoreBackupSummary::from)
+        .collect::<Vec<_>>();
+    let requests = requests
+        .into_iter()
+        .map(RestoreRequestSummary::from)
+        .collect::<Vec<_>>();
+    HttpResponse::Ok().json(serde_json::json!({
+        "backups": backups,
+        "requests": requests,
+        "errors": {
+            "backups": backups_error,
+            "requests": requests_error
+        }
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -1561,6 +1571,7 @@ struct RestoreRequestSummary {
     request_id: String,
     backup_id: String,
     database_name: String,
+    requested_by: String,
     mode: RestoreMode,
     status: RestoreStatus,
     audit: Vec<String>,
@@ -1573,6 +1584,7 @@ impl From<crate::restore::RestoreRequest> for RestoreRequestSummary {
             request_id: request.request_id,
             backup_id: request.backup_id,
             database_name: request.database_name,
+            requested_by: request.requested_by,
             mode: request.mode,
             status: request.status,
             audit: request.audit,
@@ -3309,6 +3321,7 @@ async fn serve_settings() -> impl Responder {
 async fn serve_restores() -> impl Responder {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
+        .insert_header((header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"))
         .body(include_str!("../dashboard/restores.html"))
 }
 
@@ -3733,6 +3746,7 @@ mod tests {
     use actix_web::http::header;
     use actix_web::test as aw_test;
     use actix_web_httpauth::middleware::HttpAuthentication;
+    use sha2::Digest;
 
     /// Read one entry's fields. Tests use distinct database names because
     /// `DUMP_STATUSES` is process-global and tests run in parallel.
@@ -4689,6 +4703,119 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), 400);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[actix_web::test]
+    async fn restores_api_keeps_backups_when_request_state_is_malformed() {
+        let directory = std::env::temp_dir().join(format!(
+            "crab-restores-api-no-requests-{}",
+            now_epoch_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let manifests = Arc::new(ManifestStore::new(&directory));
+        manifests
+            .begin(
+                "backup-1",
+                "db",
+                "2026-08-25T00:00:00Z",
+                "db.dump.zst",
+                "zstd",
+                false,
+                3,
+                hex::encode(sha2::Sha256::digest(b"abc")),
+                1,
+            )
+            .unwrap();
+        manifests
+            .record_part(
+                "backup-1",
+                crate::restore::ManifestPart {
+                    index: 0,
+                    filename: "db.dump.zst".into(),
+                    bytes: 3,
+                    chat_id: "chat".into(),
+                    message_id: 1,
+                    file_id: "file".into(),
+                },
+            )
+            .unwrap();
+        manifests.complete("backup-1").unwrap();
+        std::fs::write(directory.join("restore-requests.json"), b"{malformed").unwrap();
+
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(manifests))
+                .app_data(web::Data::new(Arc::new(RestoreController::new(&directory))))
+                .route("/api/restores", web::get().to(api_restores)),
+        )
+        .await;
+        let response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri("/api/restores")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = aw_test::read_body_json(response).await;
+        assert_eq!(body["backups"].as_array().unwrap().len(), 1);
+        assert!(body["requests"].as_array().unwrap().is_empty());
+        assert!(body["errors"]["backups"].is_null());
+        assert_eq!(
+            body["errors"]["requests"],
+            "restore requests are unavailable"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[actix_web::test]
+    async fn restores_api_keeps_requests_when_manifest_state_is_malformed() {
+        let directory = std::env::temp_dir().join(format!(
+            "crab-restores-api-independent-{}",
+            now_epoch_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("backup-manifests.json"), b"{malformed").unwrap();
+        let restores = Arc::new(RestoreController::new(&directory));
+        restores
+            .queue(crate::restore::RestoreRequest {
+                request_id: "request-1".into(),
+                backup_id: "backup-1".into(),
+                database_name: "db".into(),
+                requested_by: "telegram-user".into(),
+                mode: RestoreMode::Safe,
+                status: RestoreStatus::Queued,
+                audit: Vec::new(),
+                error: None,
+            })
+            .unwrap();
+
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(Arc::new(ManifestStore::new(&directory))))
+                .app_data(web::Data::new(restores))
+                .route("/api/restores", web::get().to(api_restores)),
+        )
+        .await;
+        let response = aw_test::call_service(
+            &app,
+            aw_test::TestRequest::get()
+                .uri("/api/restores")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = aw_test::read_body_json(response).await;
+        assert!(body["backups"].as_array().unwrap().is_empty());
+        assert_eq!(body["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(body["requests"][0]["requested_by"], "telegram-user");
+        assert_eq!(
+            body["errors"]["backups"],
+            "backup manifests are unavailable"
+        );
+        assert!(body["errors"]["requests"].is_null());
         let _ = std::fs::remove_dir_all(directory);
     }
 }

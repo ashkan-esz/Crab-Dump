@@ -266,15 +266,35 @@ pub enum RestoreStatus {
     Cancelled,
 }
 
+fn default_restore_requested_by() -> String {
+    "unknown".to_string()
+}
+
+fn default_restore_mode() -> RestoreMode {
+    RestoreMode::Safe
+}
+
+fn default_restore_status() -> RestoreStatus {
+    RestoreStatus::Queued
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestoreRequest {
+    #[serde(default)]
     pub request_id: String,
+    #[serde(default)]
     pub backup_id: String,
+    #[serde(default)]
     pub database_name: String,
+    #[serde(default = "default_restore_requested_by")]
     pub requested_by: String,
+    #[serde(default = "default_restore_mode")]
     pub mode: RestoreMode,
+    #[serde(default = "default_restore_status")]
     pub status: RestoreStatus,
+    #[serde(default)]
     pub audit: Vec<String>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -494,11 +514,13 @@ impl RestoreController {
 
     fn read_locked(&self) -> Result<Vec<RestoreRequest>> {
         match fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing restore requests {}", self.path.display())),
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+                format!("parsing persisted restore requests {}", self.path.display())
+            }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error)
-                .with_context(|| format!("reading restore requests {}", self.path.display())),
+            Err(error) => Err(error).with_context(|| {
+                format!("reading persisted restore requests {}", self.path.display())
+            }),
         }
     }
 
@@ -897,6 +919,19 @@ mod tests {
         assert!(!manifest.restorable());
         manifest.sha256 = "a".repeat(64);
         assert!(manifest.restorable());
+    }
+
+    #[test]
+    fn legacy_restore_request_defaults_missing_fields() {
+        let request: RestoreRequest = serde_json::from_str(
+            r#"{"request_id":"request-1","backup_id":"backup-1","database_name":"db"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.requested_by, "unknown");
+        assert_eq!(request.mode, RestoreMode::Safe);
+        assert_eq!(request.status, RestoreStatus::Queued);
+        assert!(request.audit.is_empty());
+        assert_eq!(request.error, None);
     }
 
     #[test]
