@@ -515,7 +515,7 @@ impl RestoreController {
     fn read_locked(&self) -> Result<Vec<RestoreRequest>> {
         match fs::read(&self.path) {
             Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(Vec::new()),
-            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+            Ok(bytes) => parse_restore_requests(&bytes).with_context(|| {
                 format!("parsing persisted restore requests {}", self.path.display())
             }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -539,6 +539,24 @@ impl RestoreController {
         restrict_file_permissions(&temp)?;
         fs::rename(&temp, &self.path)
             .with_context(|| format!("installing restore requests {}", self.path.display()))
+    }
+}
+
+fn parse_restore_requests(bytes: &[u8]) -> Result<Vec<RestoreRequest>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).context("invalid JSON")?;
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(_) => {
+            serde_json::from_value(value).context("restore request list must be an array")
+        }
+        serde_json::Value::Object(mut object) => {
+            let requests = object
+                .remove("requests")
+                .or_else(|| object.remove("restore_requests"))
+                .context("restore request state must contain a requests array")?;
+            serde_json::from_value(requests).context("restore request list must be an array")
+        }
+        _ => bail!("restore request state must be an array"),
     }
 }
 
@@ -943,6 +961,15 @@ mod tests {
         let controller = RestoreController::new(&dir);
 
         assert!(controller.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_request_state_accepts_legacy_wrappers_and_null() {
+        let wrapped = br#"{"requests":[]}"#;
+        let legacy = br#"{"restore_requests":[]}"#;
+        assert!(parse_restore_requests(wrapped).unwrap().is_empty());
+        assert!(parse_restore_requests(legacy).unwrap().is_empty());
+        assert!(parse_restore_requests(b"null").unwrap().is_empty());
     }
 
     #[test]

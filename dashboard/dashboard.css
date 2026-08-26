@@ -1777,6 +1777,13 @@ td:nth-last-child(-n + 2) {
   font-size: .72rem;
 }
 
+.restore-state[hidden],
+.restore-skeleton[hidden],
+.restore-table-wrap[hidden],
+.restore-request-list[hidden] {
+  display: none;
+}
+
 .restore-state strong {
   color: var(--dash-text);
   font-size: .76rem;
