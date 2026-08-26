@@ -97,6 +97,18 @@
     if (sessionEstablished) return true;
     if (loginPromise) return loginPromise;
     loginPromise = (async () => {
+      const sessionCheck = await fetch('/api/config', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (sessionCheck.ok) {
+        sessionEstablished = true;
+        return true;
+      }
+      // Do not prompt for credentials when the server is unavailable or the
+      // session is forbidden for another reason. A login prompt can only fix
+      // an absent/expired session (401).
+      if (sessionCheck.status !== 401) return false;
       const authenticated = await requestCredentials();
       sessionEstablished = authenticated === true;
       return sessionEstablished;

@@ -112,7 +112,7 @@
         <span></span><span></span>
       </div>
       <div id="requests-error" class="restore-state restore-error" role="alert" hidden>
-        <strong>Requests unavailable</strong><span id="requests-error-message">The restore API did not return request data.</span>
+        <strong>Requests unavailable</strong><span id="requests-error-message">The restore request store could not be loaded.</span>
         <button id="requests-retry" class="button subtle" type="button">Try again</button>
       </div>
       <div id="requests-empty" class="restore-state restore-empty" hidden>
@@ -146,6 +146,20 @@
     };
     const statusLabel = value => String(value || 'unknown').replace(/^\w/, char => char.toUpperCase());
     const statusClass = value => `restore-status-${String(value || 'unknown').toLowerCase()}`;
+    const errorText = (payload, fallback) => {
+      if (typeof payload === 'string' && payload.trim()) return payload.trim();
+      if (payload && typeof payload === 'object') {
+        for (const key of ['error', 'message', 'detail']) {
+          if (typeof payload[key] === 'string' && payload[key].trim()) return payload[key].trim();
+        }
+      }
+      return fallback;
+    };
+
+    async function responseError(response, fallback) {
+      const payload = await response.json().catch(() => null);
+      return errorText(payload, fallback);
+    }
 
     function setRole(role) {
       restoreState.role = role || 'viewer';
@@ -306,9 +320,11 @@
         throw new Error('response JSON does not contain a backups array');
       }
       return {
-        backups,
-        requests: Array.isArray(data.requests) ? data.requests : [],
-        errors: data.errors && typeof data.errors === 'object' ? data.errors : {},
+        backups: backups.filter(item => item && typeof item === 'object' && !Array.isArray(item)),
+        requests: Array.isArray(data.requests)
+          ? data.requests.filter(item => item && typeof item === 'object' && !Array.isArray(item))
+          : [],
+        errors: data.errors && typeof data.errors === 'object' && !Array.isArray(data.errors) ? data.errors : {},
       };
     }
 
@@ -327,8 +343,7 @@
         } else setRole('viewer');
         const response = await window.dashboardAuth.request('/api/restores');
         if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || `Restore API returned HTTP ${response.status}.`);
+          throw new Error(await responseError(response, `Restore API returned HTTP ${response.status}.`));
         }
         const data = normalizeRestorePayload(await response.json());
         restoreState.backups = data.backups;
@@ -346,7 +361,13 @@
           console.error('Restore dashboard rendering failed', error, data);
           throw new Error(error instanceof Error ? error.message : 'unknown rendering error');
         }
-        setPageStatus(`Updated just now · ${restoreState.backups.length} backups, ${restoreState.requests.length} requests.`);
+        const partial = restoreState.errors.backups || restoreState.errors.requests;
+        setPageStatus(
+          partial
+            ? `Updated with limited data · ${restoreState.backups.length} backups, ${restoreState.requests.length} requests.`
+            : `Updated just now · ${restoreState.backups.length} backups, ${restoreState.requests.length} requests.`,
+          partial ? 'is-warning' : ''
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Restore state unavailable.';
         console.error('Restore dashboard load failed', error);
@@ -367,19 +388,25 @@
           action === 'approve' ? { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({mode}) } : { method: 'DELETE' }
         );
         if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || (action === 'cancel' ? 'Restore cancellation failed.' : 'Restore approval failed.'));
+          throw new Error(await responseError(
+            response,
+            action === 'cancel' ? 'Restore cancellation failed.' : 'Restore approval failed.'
+          ));
         }
         setPageStatus(action === 'cancel' ? 'Restore request cancelled.' : `Restore approved in ${mode} mode.`, 'is-success');
         await load();
       } catch (error) {
         button.disabled = false;
         button.textContent = original;
+        button.closest('.restore-request')?.querySelector('.restore-inline-error')?.remove();
         const message = document.createElement('p');
         message.className = 'restore-inline-error';
         message.setAttribute('role', 'alert');
         message.textContent = error instanceof Error ? error.message : 'Restore action failed.';
-        button.closest('.restore-request')?.append(message);
+        const request = button.closest('.restore-request');
+        request?.append(message);
+        message.tabIndex = -1;
+        message.focus();
       }
     }
 

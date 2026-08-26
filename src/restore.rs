@@ -514,6 +514,7 @@ impl RestoreController {
 
     fn read_locked(&self) -> Result<Vec<RestoreRequest>> {
         match fs::read(&self.path) {
+            Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(Vec::new()),
             Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
                 format!("parsing persisted restore requests {}", self.path.display())
             }),
@@ -932,6 +933,16 @@ mod tests {
         assert_eq!(request.status, RestoreStatus::Queued);
         assert!(request.audit.is_empty());
         assert_eq!(request.error, None);
+    }
+
+    #[test]
+    fn empty_restore_request_state_is_an_empty_queue() {
+        let dir = temp_dir("empty-request-state");
+        fs::write(dir.join(REQUEST_FILE), b" \n\t").unwrap();
+
+        let controller = RestoreController::new(&dir);
+
+        assert!(controller.list().unwrap().is_empty());
     }
 
     #[test]

@@ -1441,6 +1441,10 @@ td:nth-last-child(-n + 2) {
   color: var(--dash-danger);
 }
 
+.restore-page-status.is-warning {
+  color: var(--dash-warning);
+}
+
 .restore-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1546,6 +1550,14 @@ td:nth-last-child(-n + 2) {
 
 #backups-table {
   min-width: 880px;
+}
+
+#backups-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dash-surface-raised);
+  box-shadow: 0 1px 0 var(--dash-border);
 }
 
 #backups-table th:first-child,
@@ -1745,6 +1757,10 @@ td:nth-last-child(-n + 2) {
 
 .restore-inline-error {
   grid-column: 1 / -1;
+  padding: 9px 11px;
+  background: var(--dash-danger-soft);
+  border: 1px solid rgba(255, 125, 134, .24);
+  border-radius: var(--dash-radius-sm);
   margin: 0;
   color: var(--dash-danger);
   font-size: .68rem;
@@ -1809,6 +1825,10 @@ td:nth-last-child(-n + 2) {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
+  .restore-request-main {
+    min-width: 0;
+  }
+
   .restore-audit {
     grid-column: 1;
   }
@@ -1846,6 +1866,12 @@ td:nth-last-child(-n + 2) {
     gap: 12px;
   }
 
+  .restore-request-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+  }
+
   .restore-audit,
   .restore-actions,
   .restore-inline-error {
@@ -1876,6 +1902,10 @@ td:nth-last-child(-n + 2) {
 
   .restore-actions .button {
     flex: 1 1 120px;
+  }
+
+  .restore-request-meta {
+    grid-template-columns: 1fr;
   }
 }
 
