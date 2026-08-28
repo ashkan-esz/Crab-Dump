@@ -110,7 +110,14 @@ assert.match(restoresHtml, /id="restore-role"/);
 assert.match(restoresHtml, /id="restore-summary"[^>]*aria-label="Restore summary"/);
 assert.match(restoresHtml, /id="restore-refresh"/);
 assert.match(restoresHtml, /id="restore-refresh-status"[^>]*aria-live="polite"/);
+assert.doesNotMatch(restoresHtml, /id="restore-page-status"/);
+assert.doesNotMatch(restoresHtml, /setPageStatus/);
+assert.doesNotMatch(restoresHtml, /class="lede"/);
+assert.match(restoresHtml, /<main id="restores-main" class="page restores-page">\s*<div class="restore-refresh-bar">/);
 for (const id of ['backup-count', 'queued-count', 'active-count', 'failed-count', 'backups-region', 'requests-region', 'backups-list', 'requests-list']) {
+    assert.match(restoresHtml, new RegExp(`id="${id}"`), `${id} must remain available to restore operations`);
+}
+for (const id of ['requests-pagination', 'requests-previous', 'requests-next']) {
     assert.match(restoresHtml, new RegExp(`id="${id}"`), `${id} must remain available to restore operations`);
 }
 for (const marker of ['backups-loading', 'backups-error', 'backups-empty', 'backups-filtered-empty', 'requests-loading', 'requests-error', 'requests-empty', 'requests-filtered-empty']) {
@@ -121,6 +128,24 @@ assert.match(restoresHtml, /data-action="approve"/);
 assert.match(restoresHtml, /data-action="cancel"/);
 assert.match(restoresHtml, /data-mode="safe"/);
 assert.match(restoresHtml, /data-mode="clean"/);
+assert.match(restoresHtml, /REQUESTS_PER_PAGE = 10/);
+assert.match(restoresHtml, /requestPage: 1/);
+assert.match(restoresHtml, /pageItems = items\.slice/);
+assert.match(restoresHtml, /data-detail-kind="error"/);
+assert.match(restoresHtml, /data-detail-kind="audit"/);
+assert.match(restoresHtml, /function openRequestDetails/);
+assert.match(restoresHtml, /function restoreRequestDetails/);
+assert.match(restoresHtml, /id="backups-pagination"/);
+assert.match(restoresHtml, /id="backups-previous"/);
+assert.match(restoresHtml, /id="backups-next"/);
+assert.match(restoresHtml, /BACKUPS_PER_PAGE = 10/);
+assert.match(restoresHtml, /backupPage: 1/);
+assert.match(restoresHtml, /pageItems = items\.slice/);
+assert.match(restoresHtml, /filteredRequests\(\)\.slice\(\)\.reverse\(\)/);
+assert.match(restoresHtml, /class="restore-error-details"/);
+assert.match(restoresHtml, /<summary>View restore error<\/summary>/);
+assert.match(dashboardCss, /\.restore-error-details summary/);
+assert.match(dashboardCss, /\.restore-error-details\[open\] summary::before/);
 assert.match(restoresHtml, /id="restore-dialog"/);
 assert.match(restoresHtml, /id="restore-mode"/);
 assert.match(restoresHtml, /id="restore-dialog-submit"/);
@@ -140,6 +165,18 @@ assert.match(restoresHtml, /restore-request-list/);
 assert.match(restoresHtml, /REFRESH_INTERVAL_MS = 2000/);
 assert.match(restoresHtml, /setInterval\(\(\) => load\(true\), REFRESH_INTERVAL_MS\)/);
 assert.match(dashboardCss, /\.restore-table-wrap[\s\S]*overflow: auto/);
+assert.match(dashboardCss, /\.restore-pagination/);
+assert.match(dashboardCss, /\.restore-page-number/);
+assert.match(dashboardCss, /\.restore-refresh-bar[\s\S]*gap: 6px/);
+assert.match(dashboardCss, /\.restore-refresh-bar[\s\S]*min-height: 24px/);
+assert.match(dashboardCss, /\.restore-refresh-status[\s\S]*font: \.56rem\/1\.05/);
+assert.match(dashboardCss, /\.restore-summary-item[\s\S]*grid-template-columns: 1fr auto/);
+assert.match(restoresHtml, /<section id="backups-region"[\s\S]*<section id="restore-summary"/);
+assert.match(dashboardCss, /\.restore-summary[\s\S]*margin: 0/);
+assert.match(dashboardCss, /\.restore-summary-item[\s\S]*padding: 7px 10px/);
+assert.match(dashboardCss, /\.restore-request[\s\S]*padding: 8px 12px/);
+assert.match(dashboardCss, /\.restore-request-meta[\s\S]*margin: 6px 0 0/);
+assert.match(dashboardCss, /\.restore-actions \.button[\s\S]*min-height: 28px/);
 assert.match(dashboardCss, /\.restore-dialog::backdrop/);
 assert.match(dashboardCss, /\.restore-start/);
 assert.match(dashboardCss, /\.restore-request[\s\S]*min-width: 0/);

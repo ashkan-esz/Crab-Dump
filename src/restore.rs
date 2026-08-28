@@ -681,18 +681,93 @@ pub fn restore_archive(
         .sync_all()
         .context("syncing decoded restore dump")?;
 
-    let args = pg_restore_args(database_url, mode, &decoded);
-    let status = Command::new("pg_restore")
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("spawning pg_restore")?;
-    if !status.success() {
-        bail!("pg_restore exited with status {status}");
+    let mut format_probe = [0_u8; 5];
+    let mut decoded_input = File::open(&decoded).context("opening decoded restore dump")?;
+    let format_probe_bytes = decoded_input
+        .read(&mut format_probe)
+        .context("detecting restore dump format")?;
+    let is_custom_archive = format_probe_bytes == format_probe.len() && &format_probe == b"PGDMP";
+    if is_custom_archive {
+        let args = pg_restore_args(database_url, mode, &decoded);
+        run_restore_command("pg_restore", &args, Stdio::null(), Stdio::null())?;
+    } else {
+        let args = psql_restore_args(database_url, mode);
+        run_restore_command("psql", &args, decoded_input, Stdio::null())?;
     }
     Ok(())
+}
+
+fn psql_restore_args(database_url: &str, mode: RestoreMode) -> Vec<String> {
+    let mut args = vec![
+        "--dbname".to_string(),
+        database_url.to_string(),
+        "--set=ON_ERROR_STOP=1".into(),
+    ];
+    if mode == RestoreMode::Clean {
+        args.push("--single-transaction".into());
+    }
+    args
+}
+
+fn run_restore_command(
+    program: &str,
+    args: &[String],
+    stdin: impl Into<Stdio>,
+    stdout: impl Into<Stdio>,
+) -> Result<()> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("spawning {program}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    if is_ignorable_restore_failure(program, detail) {
+        tracing::warn!(
+            program,
+            "restore completed with an ignorable PostgreSQL compatibility warning"
+        );
+        return Ok(());
+    }
+    if detail.is_empty() {
+        bail!("{program} exited with status {}", output.status);
+    }
+    bail!(
+        "{program} exited with status {}: {}",
+        output.status,
+        detail.chars().take(1200).collect::<String>()
+    );
+}
+
+fn is_ignorable_restore_failure(program: &str, stderr: &str) -> bool {
+    if program != "pg_restore" {
+        return false;
+    }
+
+    let mut found_transaction_timeout = false;
+    for line in stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with(
+            "pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter \"transaction_timeout\"",
+        ) {
+            found_transaction_timeout = true;
+        } else if line == "Command was: SET transaction_timeout = 0;"
+            || line.starts_with("pg_restore: warning: errors ignored on restore:")
+        {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    found_transaction_timeout
 }
 
 fn validate_restore_credentials(
@@ -1038,6 +1113,27 @@ mod tests {
         let clean = pg_restore_args("postgresql://user:secret@host/db", RestoreMode::Clean, dump);
         assert!(clean.contains(&"--clean".into()));
         assert!(clean.contains(&"--if-exists".into()));
+    }
+
+    #[test]
+    fn plain_sql_restore_uses_psql_with_error_stop() {
+        assert_eq!(
+            psql_restore_args("postgresql://host/db", RestoreMode::Safe),
+            vec!["--dbname", "postgresql://host/db", "--set=ON_ERROR_STOP=1"]
+        );
+    }
+
+    #[test]
+    fn transaction_timeout_compatibility_warning_is_ignored_only_for_pg_restore() {
+        let warning = r#"pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"
+Command was: SET transaction_timeout = 0;
+pg_restore: warning: errors ignored on restore: 1"#;
+        assert!(is_ignorable_restore_failure("pg_restore", warning));
+        assert!(!is_ignorable_restore_failure("psql", warning));
+        assert!(!is_ignorable_restore_failure(
+            "pg_restore",
+            "pg_restore: error: permission denied"
+        ));
     }
 
     #[test]

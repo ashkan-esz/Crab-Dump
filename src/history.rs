@@ -399,10 +399,17 @@ pub fn sanitize_error(
     bot_token: &str,
     chat_ids: &[String],
 ) -> String {
-    let mut sanitized = error.replace(database_url, "[REDACTED_DATABASE_URL]");
-    sanitized = sanitized.replace(bot_token, "[REDACTED_BOT_TOKEN]");
+    let mut sanitized = error.to_string();
+    if !database_url.is_empty() {
+        sanitized = sanitized.replace(database_url, "[REDACTED_DATABASE_URL]");
+    }
+    if !bot_token.is_empty() {
+        sanitized = sanitized.replace(bot_token, "[REDACTED_BOT_TOKEN]");
+    }
     for chat_id in chat_ids {
-        sanitized = sanitized.replace(chat_id, "[REDACTED_CHAT_ID]");
+        if !chat_id.is_empty() {
+            sanitized = sanitized.replace(chat_id, "[REDACTED_CHAT_ID]");
+        }
     }
 
     for scheme in ["postgresql://", "postgres://"] {
@@ -621,6 +628,12 @@ mod tests {
         );
         assert!(!out.contains("-100111"));
         assert!(!out.contains("@backup-channel"));
+    }
+
+    #[test]
+    fn sanitizer_ignores_empty_secret_values() {
+        let error = "pg_restore exited with status exit status: 1";
+        assert_eq!(sanitize_error(error, "", "", &["".into()]), error);
     }
 
     #[test]
