@@ -39,7 +39,9 @@ use crate::health_monitor::{HealthMonitor, ServiceDefinition, ServiceInput};
 use crate::history::HistoryStore;
 use crate::migration::MigrationContext;
 use crate::resource_usage::{ResourceCollector, ResourceUsage};
-use crate::restore::{ManifestStore, RestoreController, RestoreMode, RestoreStatus};
+use crate::restore::{
+    new_request_id, ManifestStore, RestoreController, RestoreMode, RestoreRequest, RestoreStatus,
+};
 use crate::routing::{ProfileInput, ProfileKind, ProfileStore, RouteManager, RoutingBackend};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_DASHBOARD};
@@ -1594,6 +1596,73 @@ impl From<crate::restore::RestoreRequest> for RestoreRequestSummary {
 }
 
 #[derive(Debug, Deserialize)]
+struct RestoreCreatePayload {
+    backup_id: String,
+    #[serde(default = "default_restore_mode")]
+    mode: RestoreMode,
+}
+
+async fn create_restore(
+    req: HttpRequest,
+    payload: web::Json<RestoreCreatePayload>,
+    restores: web::Data<Arc<RestoreController>>,
+    manifests: web::Data<Arc<ManifestStore>>,
+    registry: web::Data<Arc<DatabaseRegistry>>,
+) -> impl Responder {
+    let Some((username, is_admin)) = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| (user.username.clone(), user.role == DashboardRole::Admin))
+    else {
+        return HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error": "authentication required"}));
+    };
+    if payload.backup_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "backup_id is required"}));
+    }
+    if payload.mode == RestoreMode::Clean && !is_admin {
+        return HttpResponse::Forbidden()
+            .json(serde_json::json!({"error": "clean restore requires administrator approval"}));
+    }
+    let backup = match manifests.find_restorable(&payload.backup_id) {
+        Ok(backup) => backup,
+        Err(_) => {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "backup is no longer restorable"}))
+        }
+    };
+    if !registry
+        .config_snapshot()
+        .into_iter()
+        .any(|database| database.display_name() == backup.database_name)
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "restore target database is not configured"
+        }));
+    }
+    let request = RestoreRequest {
+        request_id: new_request_id(),
+        backup_id: backup.backup_id,
+        database_name: backup.database_name.clone(),
+        requested_by: username.clone(),
+        mode: payload.mode,
+        status: RestoreStatus::Queued,
+        audit: vec![format!("requested from dashboard by {username}")],
+        error: None,
+    };
+    match restores.queue(request.clone()) {
+        Ok(()) => {
+            audit_action(&req, "restore_request", &request.database_name, "queued");
+            HttpResponse::Created().json(RestoreRequestSummary::from(request))
+        }
+        Err(error) => {
+            HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct RestoreApprovalPayload {
     #[serde(default = "default_restore_mode")]
     mode: RestoreMode,
@@ -1616,13 +1685,15 @@ async fn approve_restore(
     restore_work_dir: web::Data<std::path::PathBuf>,
     keep_failed_dumps: web::Data<bool>,
 ) -> impl Responder {
-    let extensions = req.extensions();
-    let user = extensions.get::<AuthenticatedUser>();
-    let Some(user) = user else {
+    let Some((username, is_admin)) = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| (user.username.clone(), user.role == DashboardRole::Admin))
+    else {
         return HttpResponse::Unauthorized()
             .json(serde_json::json!({"error": "authentication required"}));
     };
-    if payload.mode == RestoreMode::Clean && user.role != DashboardRole::Admin {
+    if payload.mode == RestoreMode::Clean && !is_admin {
         return HttpResponse::Forbidden()
             .json(serde_json::json!({"error": "clean restore requires administrator approval"}));
     }
@@ -1630,11 +1701,7 @@ async fn approve_restore(
     if let Err(error) = restores.set_mode(&request_id, payload.mode) {
         return HttpResponse::Conflict().json(serde_json::json!({"error": error.to_string()}));
     }
-    match restores.approve_as(
-        &request_id,
-        &user.username,
-        user.role == DashboardRole::Admin,
-    ) {
+    match restores.approve_as(&request_id, &username, is_admin) {
         Ok(request) => {
             let request_for_worker = request.clone();
             let manifests = manifests.get_ref().clone();
@@ -1719,12 +1786,15 @@ async fn cancel_restore(
     path: web::Path<String>,
     restores: web::Data<Arc<RestoreController>>,
 ) -> impl Responder {
-    let extensions = req.extensions();
-    let Some(user) = extensions.get::<AuthenticatedUser>() else {
+    let Some(username) = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| user.username.clone())
+    else {
         return HttpResponse::Unauthorized()
             .json(serde_json::json!({"error": "authentication required"}));
     };
-    match restores.cancel(&path.into_inner(), &user.username) {
+    match restores.cancel(&path.into_inner(), &username) {
         Ok(request) => {
             audit_action(&req, "restore_cancel", &request.database_name, "accepted");
             HttpResponse::Ok().json(RestoreRequestSummary::from(request))
@@ -2422,6 +2492,7 @@ fn minimum_role(req: &ServiceRequest) -> DashboardRole {
         || path.ends_with("/enable")
         || path.ends_with("/disable")
         || path.ends_with("/approve")
+        || (path == "/api/restores" && *req.method() == Method::POST)
         || (path.starts_with("/api/restores/") && *req.method() == Method::DELETE)
     {
         DashboardRole::Operator
@@ -3656,6 +3727,7 @@ pub async fn start_server(
             )
             .route("/api/history/{database_name}", web::get().to(api_history))
             .route("/api/restores", web::get().to(api_restores))
+            .route("/api/restores", web::post().to(create_restore))
             .route(
                 "/api/restores/{id}/approve",
                 web::post().to(approve_restore),

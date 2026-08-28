@@ -160,11 +160,10 @@ database's leftovers are swept too, unless you set `KEEP_FAILED_DUMPS=1`, which
 leaves them in `WORK_DIR` for debugging (nothing removes them later — sweep the
 directory yourself).
 
-## Telegram-selected restore
+## Dashboard restore
 
-After a backup is uploaded, an enabled Telegram user can run `/restore` and
-select one of the recent restorable backups. The bot only queues the request;
-an operator must approve it from the dashboard's `/restores` page.
+Restore requests are managed from the dashboard's `/restores` page. Telegram
+does not expose a restore command or create restore requests.
 
 The dashboard supports `safe` restores for operators. `clean` restores use
 `pg_restore --clean --if-exists` and require administrator approval. Restore

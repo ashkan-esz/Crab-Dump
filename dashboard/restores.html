@@ -31,7 +31,7 @@
       <div>
         <p class="eyebrow"><a href="/">Overview</a> / Operations</p>
         <h1>Restore operations</h1>
-        <p class="lede">Review Telegram restore requests against verified backups. Safe restores can be approved by operators; clean restores require administrator approval.</p>
+        <p class="lede">Restore a verified backup into its configured database. Safe restores are available to operators; clean restores require administrator approval.</p>
       </div>
       <div class="restore-role-note" aria-live="polite">
         <span>Approval access</span>
@@ -40,6 +40,10 @@
     </header>
 
     <div id="restore-page-status" class="restore-page-status" role="status" aria-live="polite"></div>
+    <div class="restore-refresh-bar">
+      <span id="restore-refresh-status" class="restore-refresh-status" role="status" aria-live="polite">Auto-refresh every 2 seconds</span>
+      <button id="restore-refresh" class="button subtle" type="button">Refresh now</button>
+    </div>
 
     <section id="restore-summary" class="restore-summary" aria-label="Restore summary">
       <div class="restore-summary-item"><span>Available backups</span><strong id="backup-count">—</strong></div>
@@ -94,7 +98,7 @@
       <div id="backups-table-wrap" class="restore-table-wrap" hidden>
         <table id="backups-table">
           <caption>Verified backups available for restore</caption>
-          <thead><tr><th>Database</th><th>Backup time</th><th>Size</th><th>Format</th><th>Encryption</th><th>Parts</th><th>Checksum</th></tr></thead>
+          <thead><tr><th>Database</th><th>Backup time</th><th>Size</th><th>Format</th><th>Encryption</th><th>Parts</th><th>Checksum</th><th>Action</th></tr></thead>
           <tbody id="backups-list"></tbody>
         </table>
       </div>
@@ -116,7 +120,7 @@
         <button id="requests-retry" class="button subtle" type="button">Try again</button>
       </div>
       <div id="requests-empty" class="restore-state restore-empty" hidden>
-        <strong>No restore requests</strong><span>Requests raised from Telegram will wait here for operator review.</span>
+        <strong>No restore requests</strong><span>Start a restore from a verified backup above to create a request and begin the operation.</span>
       </div>
       <div id="requests-filtered-empty" class="restore-state restore-empty" hidden>
         <strong>No requests match these filters</strong><span>Clear the filters to return to the full restore queue.</span>
@@ -125,8 +129,36 @@
     </section>
   </main>
 
+  <dialog id="restore-dialog" class="restore-dialog" aria-labelledby="restore-dialog-title">
+    <form method="dialog" id="restore-form">
+      <div class="restore-dialog-heading">
+        <div>
+          <p class="panel-kicker">Start restore</p>
+          <h2 id="restore-dialog-title">Restore this backup?</h2>
+        </div>
+        <button class="button subtle restore-dialog-close" value="cancel" type="submit" aria-label="Close restore dialog">Close</button>
+      </div>
+      <p id="restore-dialog-backup" class="restore-dialog-backup"></p>
+      <div class="restore-dialog-warning" role="note">
+        This operation writes backup data into the configured database. Confirm the target and mode before starting.
+      </div>
+      <label class="restore-mode-label" for="restore-mode">Restore mode</label>
+      <select id="restore-mode" name="mode">
+        <option value="safe">Safe — restore without removing existing objects</option>
+        <option value="clean">Clean — replace existing objects (administrator only)</option>
+      </select>
+      <p id="restore-dialog-error" class="restore-inline-error" role="alert" hidden></p>
+      <div class="restore-dialog-actions">
+        <button class="button subtle" value="cancel" type="submit">Go back</button>
+        <button id="restore-dialog-submit" class="button primary" value="default" type="submit">Start restore</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
-    const restoreState = { backups: [], requests: [], errors: {}, role: 'viewer' };
+    const restoreState = { backups: [], requests: [], errors: {}, role: 'viewer', selectedBackup: null };
+    const REFRESH_INTERVAL_MS = 2000;
+    let loadInFlight = false;
     const $ = id => document.getElementById(id);
     const plural = (count, singular, pluralForm = `${singular}s`) => `${count} ${count === 1 ? singular : pluralForm}`;
     const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -222,6 +254,7 @@
           <td><span class="restore-encryption ${backup.encrypted ? 'is-encrypted' : ''}">${backup.encrypted ? 'Encrypted' : 'Unencrypted'}</span></td>
           <td class="mono">${esc(backup.part_count)} ${backup.part_count === 1 ? 'part' : 'parts'}</td>
           <td><code class="restore-checksum" tabindex="0" title="${esc(backup.sha256)}">${esc(backup.sha256)}</code></td>
+          <td>${restoreState.role === 'viewer' ? '<span class="restore-read-only">Read only</span>' : `<button class="button primary restore-start" type="button" data-backup-id="${esc(backup.backup_id)}">Restore</button>`}</td>
         </tr>`).join('');
     }
 
@@ -282,6 +315,62 @@
       $('restore-filter-status').textContent = $('restore-clear-filters').hidden ? '' : `${plural(items.length, 'matching request')}; ${plural(filteredBackups().length, 'matching backup')}`;
     }
 
+    function selectedBackup(backupId) {
+      return restoreState.backups.find(item => item.backup_id === backupId);
+    }
+
+    function openRestoreDialog(backup) {
+      if (!backup || restoreState.role === 'viewer') return;
+      restoreState.selectedBackup = backup;
+      $('restore-dialog-backup').textContent = `${backup.database_name} · ${formatTimestamp(backup.timestamp)} · ${bytes(backup.packaged_bytes)}`;
+      const mode = $('restore-mode');
+      mode.value = 'safe';
+      mode.querySelector('option[value="clean"]').disabled = restoreState.role !== 'admin';
+      $('restore-dialog-error').hidden = true;
+      $('restore-dialog-submit').disabled = false;
+      $('restore-dialog').showModal();
+    }
+
+    async function startRestore() {
+      const backup = restoreState.selectedBackup;
+      if (!backup) return;
+      const mode = $('restore-mode').value;
+      const submit = $('restore-dialog-submit');
+      submit.disabled = true;
+      submit.textContent = 'Starting…';
+      $('restore-dialog-error').hidden = true;
+      try {
+        const createResponse = await window.dashboardAuth.request('/api/restores', {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify({backup_id: backup.backup_id, mode}),
+        });
+        if (!createResponse.ok) {
+          throw new Error(await responseError(createResponse, 'Could not create restore request.'));
+        }
+        const request = await createResponse.json();
+        const approveResponse = await window.dashboardAuth.request(`/api/restores/${encodeURIComponent(request.request_id)}/approve`, {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify({mode}),
+        });
+        if (!approveResponse.ok) {
+          throw new Error(await responseError(approveResponse, 'Restore request was queued but could not be started.'));
+        }
+        $('restore-dialog').close();
+        setPageStatus(`Restore started for ${backup.database_name} in ${mode} mode.`, 'is-success');
+        await load();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Restore could not be started.';
+        $('restore-dialog-error').textContent = message;
+        $('restore-dialog-error').hidden = false;
+        $('restore-dialog-error').focus();
+      } finally {
+        submit.disabled = false;
+        submit.textContent = 'Start restore';
+      }
+    }
+
     function render() {
       updateSummary();
       updateDatabaseFilter();
@@ -328,14 +417,21 @@
       };
     }
 
-    async function load() {
-      setPageStatus('Loading restore state…');
-      $('backups-loading').hidden = false;
-      $('requests-loading').hidden = false;
+    async function load(background = false) {
+      if (loadInFlight) return;
+      loadInFlight = true;
+      const refreshButton = $('restore-refresh');
+      refreshButton.disabled = true;
+      $('restore-refresh-status').textContent = background ? 'Refreshing restore state…' : 'Checking restore state…';
+      if (!background) {
+        setPageStatus('Loading restore state…');
+        $('backups-loading').hidden = false;
+        $('requests-loading').hidden = false;
+      }
       $('backups-error').hidden = true;
       $('requests-error').hidden = true;
-      if (!(await window.dashboardAuth.ensureSession())) return;
       try {
+        if (!(await window.dashboardAuth.ensureSession())) return;
         const statusResponse = await window.dashboardAuth.request('/api/config');
         if (statusResponse.ok) {
           const status = await statusResponse.json();
@@ -372,6 +468,10 @@
         const message = error instanceof Error ? error.message : 'Restore state unavailable.';
         console.error('Restore dashboard load failed', error);
         showError(message, message.startsWith('Restore API returned') ? 'GET /api/restores failed' : 'Restore dashboard failed');
+      } finally {
+        loadInFlight = false;
+        refreshButton.disabled = false;
+        $('restore-refresh-status').textContent = `Auto-refresh every 2 seconds · Last checked ${new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}`;
       }
     }
 
@@ -417,13 +517,24 @@
       $('restore-status-filter').value = 'all';
       render();
     });
-    $('backups-retry').addEventListener('click', load);
-    $('requests-retry').addEventListener('click', load);
+    $('backups-retry').addEventListener('click', () => load());
+    $('requests-retry').addEventListener('click', () => load());
+    $('restore-refresh').addEventListener('click', () => load());
     $('requests-list').addEventListener('click', event => {
       const button = event.target.closest('.restore-action');
       if (button) performAction(button);
     });
+    $('backups-list').addEventListener('click', event => {
+      const button = event.target.closest('.restore-start');
+      if (button) openRestoreDialog(selectedBackup(button.dataset.backupId));
+    });
+    $('restore-form').addEventListener('submit', event => {
+      if (event.submitter?.value !== 'default') return;
+      event.preventDefault();
+      startRestore();
+    });
     load();
+    window.setInterval(() => load(true), REFRESH_INTERVAL_MS);
   </script>
 </body>
 </html>

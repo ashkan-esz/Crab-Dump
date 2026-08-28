@@ -12,7 +12,7 @@ Existing Rust 2021 single-binary application with an Actix Web dashboard, Tokio 
 
 ## Users
 
-Self-hosting operators who need to schedule, monitor, deliver, and restore backups for one or more PostgreSQL databases. Operators use the dashboard to manage databases, routing, service monitoring, backup history, and restore approvals; Telegram users can request eligible restores.
+Self-hosting operators who need to schedule, monitor, deliver, and restore backups for one or more PostgreSQL databases. Operators use the dashboard to manage databases, routing, service monitoring, backup history, and restore approvals.
 
 ## Product Purpose
 
@@ -26,7 +26,7 @@ The product combines constant-memory PostgreSQL dump streaming with optional com
 
 ## Operating Context
 
-The service runs locally or in Docker and is typically invoked once or on a cron/systemd-style schedule. PostgreSQL is the source system; Telegram is the backup destination and user notification channel. Operators authenticate to the dashboard with role-based permissions. Telegram restore requests are queued for operator approval before execution against configured databases.
+The service runs locally or in Docker and is typically invoked once or on a cron/systemd-style schedule. PostgreSQL is the source system; Telegram is the backup destination and user notification channel. Operators authenticate to the dashboard with role-based permissions. Restore operations are approved and started from the dashboard.
 
 ## Capabilities and Constraints
 

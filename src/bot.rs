@@ -12,9 +12,6 @@ use crate::config::DatabaseConfig;
 use crate::database_registry::DatabaseRegistry;
 use crate::database_state::DatabaseStateStore;
 use crate::resource_usage::ResourceCollector;
-use crate::restore::{
-    new_request_id, ManifestStore, RestoreController, RestoreMode, RestoreRequest, RestoreStatus,
-};
 use crate::telegram;
 use crate::telegram_users::{TelegramUser, TelegramUserStore, SOURCE_TELEGRAM};
 use crate::web::{self, ManualBackupRequest};
@@ -87,7 +84,6 @@ pub enum Command {
     Help,
     Status,
     Backup(String),
-    Restore,
 }
 
 pub fn parse_command(text: &str) -> Option<Command> {
@@ -107,13 +103,12 @@ pub fn parse_command(text: &str) -> Option<Command> {
             let database = words.next()?.to_string();
             (words.next().is_none() && !database.is_empty()).then_some(Command::Backup(database))
         }
-        "restore" if words.next().is_none() => Some(Command::Restore),
         _ => None,
     }
 }
 
 pub fn help_message() -> &'static str {
-    "<b>crab-dump commands</b>\n\n/add_me — register this Telegram account\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup\n/restore — request a restore from a restorable backup"
+    "<b>crab-dump commands</b>\n\n/add_me — register this Telegram account\n/help — list commands\n/status — application and Telegram status\n/backup &lt;database&gt; — queue a database backup"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,10 +132,6 @@ fn action_markup() -> String {
             InlineButton {
                 text: "💾 Backup".into(),
                 callback_data: "bot:backup".into(),
-            },
-            InlineButton {
-                text: "♻️ Restore".into(),
-                callback_data: "bot:restore".into(),
             },
         ]],
     })
@@ -487,8 +478,6 @@ impl BotRuntime {
         registry: Arc<DatabaseRegistry>,
         database_states: Arc<DatabaseStateStore>,
         resources: Arc<ResourceCollector>,
-        manifests: Arc<ManifestStore>,
-        restores: Arc<RestoreController>,
     ) -> Arc<Self> {
         let status = new_status();
         let stop = Arc::new(AtomicBool::new(false));
@@ -505,8 +494,6 @@ impl BotRuntime {
                 registry,
                 database_states,
                 resources,
-                manifests,
-                restores,
                 thread_status,
                 stop,
             );
@@ -566,10 +553,6 @@ fn set_my_commands(client: &Client, token: &str) -> Result<()> {
                     command: "backup",
                     description: "Queue a database backup",
                 },
-                BotCommand {
-                    command: "restore",
-                    description: "Request a backup restore",
-                },
             ],
         })
         .send()
@@ -594,8 +577,6 @@ fn run(
     registry: Arc<DatabaseRegistry>,
     database_states: Arc<DatabaseStateStore>,
     resources: Arc<ResourceCollector>,
-    manifests: Arc<ManifestStore>,
-    restores: Arc<RestoreController>,
     status: BotStatusHandle,
     stop: Arc<AtomicBool>,
 ) {
@@ -645,8 +626,6 @@ fn run(
                             &registry,
                             &database_states,
                             &resources,
-                            &manifests,
-                            &restores,
                             &status,
                             message,
                         );
@@ -659,8 +638,6 @@ fn run(
                             &registry,
                             &database_states,
                             &resources,
-                            &manifests,
-                            &restores,
                             &status,
                             callback,
                         );
@@ -726,8 +703,6 @@ fn handle_message(
     registry: &DatabaseRegistry,
     database_states: &DatabaseStateStore,
     resources: &ResourceCollector,
-    manifests: &ManifestStore,
-    _restores: &RestoreController,
     status: &BotStatusHandle,
     message: Message,
 ) {
@@ -783,7 +758,6 @@ fn handle_message(
             queue_backup(&chat_id, &user.name, &database, registry, database_states),
             Some(action_markup()),
         ),
-        Command::Restore => restore_menu(manifests),
     };
     if let Err(error) = telegram::send_message_with_markup(
         client,
@@ -833,8 +807,6 @@ fn handle_callback(
     registry: &DatabaseRegistry,
     database_states: &DatabaseStateStore,
     resources: &ResourceCollector,
-    manifests: &ManifestStore,
-    restores: &RestoreController,
     status: &BotStatusHandle,
     callback: CallbackQuery,
 ) {
@@ -870,11 +842,6 @@ fn handle_callback(
                 queue_backup(&chat_id, &user.name, name, registry, database_states),
                 Some(action_markup()),
             )
-        }
-        "bot:restore" => restore_menu(manifests),
-        backup if backup.starts_with("bot:restore:") => {
-            let backup_id = &backup["bot:restore:".len()..];
-            queue_restore(&chat_id, &user.name, backup_id, manifests, restores)
         }
         _ => return,
     };
@@ -934,84 +901,6 @@ fn queue_backup(
     )
 }
 
-fn restore_menu(manifests: &ManifestStore) -> (String, Option<String>) {
-    let backups = match manifests.restorable() {
-        Ok(backups) => backups,
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to list restorable backups");
-            return (
-                "Restore is temporarily unavailable.".into(),
-                Some(action_markup()),
-            );
-        }
-    };
-    if backups.is_empty() {
-        return (
-            "No restorable backups are available.".into(),
-            Some(action_markup()),
-        );
-    }
-    let buttons = backups
-        .iter()
-        .take(20)
-        .filter(|backup| format!("bot:restore:{}", backup.backup_id).len() <= 64)
-        .map(|backup| InlineButton {
-            text: format!("{} · {}", backup.database_name, backup.timestamp),
-            callback_data: format!("bot:restore:{}", backup.backup_id),
-        })
-        .collect::<Vec<_>>();
-    (
-        "Choose a backup. The request will wait for dashboard approval.".into(),
-        Some(
-            serde_json::to_string(&InlineKeyboardMarkup {
-                inline_keyboard: buttons.chunks(1).map(|row| row.to_vec()).collect(),
-            })
-            .expect("restore keyboard serializes"),
-        ),
-    )
-}
-
-fn queue_restore(
-    chat_id: &str,
-    user_name: &str,
-    backup_id: &str,
-    manifests: &ManifestStore,
-    restores: &RestoreController,
-) -> (String, Option<String>) {
-    let backup = match manifests.find_restorable(backup_id) {
-        Ok(backup) => backup,
-        Err(_) => {
-            return (
-                "That backup is no longer restorable.".into(),
-                Some(action_markup()),
-            )
-        }
-    };
-    let request = RestoreRequest {
-        request_id: new_request_id(),
-        backup_id: backup.backup_id.clone(),
-        database_name: backup.database_name.clone(),
-        requested_by: chat_id.to_string(),
-        mode: RestoreMode::Safe,
-        status: RestoreStatus::Queued,
-        audit: vec![format!("requested by {user_name}")],
-        error: None,
-    };
-    match restores.queue(request) {
-        Ok(()) => (
-            format!(
-                "✅ Restore for <code>{}</code> queued in safe mode. An operator must approve it in the dashboard.",
-                telegram::escape_html(&backup.database_name)
-            ),
-            Some(action_markup()),
-        ),
-        Err(_) => (
-            "A restore is already queued or running for that database.".into(),
-            Some(action_markup()),
-        ),
-    }
-}
-
 fn set_state(status: &BotStatusHandle, state: BotState) {
     status.lock().expect("bot status lock poisoned").state = state;
 }
@@ -1059,6 +948,8 @@ mod tests {
         assert_eq!(parse_command("/add_me now"), None);
         assert_eq!(parse_command("/help"), Some(Command::Help));
         assert_eq!(parse_command("/status@crab_dump"), Some(Command::Status));
+        assert_eq!(parse_command("/restore"), None);
+        assert_eq!(parse_command("/restore@crab_dump"), None);
         assert_eq!(
             parse_command("/backup analytics"),
             Some(Command::Backup("analytics".into()))
@@ -1093,6 +984,7 @@ mod tests {
     #[test]
     fn html_and_errors_are_safe() {
         assert!(help_message().contains("&lt;database&gt;"));
+        assert!(!help_message().contains("/restore"));
         assert_eq!(
             safe_error("bad token secret", "secret"),
             "bad token [REDACTED]"
@@ -1150,8 +1042,12 @@ mod tests {
         let buttons = markup["inline_keyboard"][0]
             .as_array()
             .expect("keyboard row");
+        assert_eq!(buttons.len(), 2);
         assert_eq!(buttons[0]["callback_data"], "bot:status");
         assert_eq!(buttons[1]["callback_data"], "bot:backup");
+        assert!(buttons
+            .iter()
+            .all(|button| button["callback_data"] != "bot:restore"));
     }
 
     #[test]

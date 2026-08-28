@@ -1445,6 +1445,30 @@ td:nth-last-child(-n + 2) {
   color: var(--dash-warning);
 }
 
+.restore-refresh-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--dash-space-3);
+  min-height: 36px;
+  margin: -8px 0 var(--dash-space-4);
+}
+
+.restore-refresh-status {
+  color: var(--dash-subtle);
+  font: .62rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.restore-refresh-bar .button {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.restore-refresh-bar .button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
 .restore-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1588,6 +1612,97 @@ td:nth-last-child(-n + 2) {
   overflow-wrap: anywhere;
   color: var(--dash-subtle);
   font: .61rem/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.restore-start {
+  min-height: 30px;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.restore-read-only {
+  color: var(--dash-subtle);
+  font: .6rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+
+.restore-dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  color: var(--dash-text);
+  background: var(--dash-surface-raised);
+  border: 1px solid var(--dash-border-strong);
+  border-radius: var(--dash-radius-md);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .42);
+}
+
+.restore-dialog::backdrop {
+  background: rgba(3, 8, 15, .72);
+  backdrop-filter: blur(3px);
+}
+
+.restore-dialog form {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.restore-dialog-heading,
+.restore-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.restore-dialog-heading h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.restore-dialog-close {
+  min-height: 32px;
+}
+
+.restore-dialog-backup {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--dash-text);
+  background: var(--dash-accent-soft);
+  border: 1px solid rgba(105, 173, 255, .28);
+  border-radius: var(--dash-radius-sm);
+  font: .68rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.restore-dialog-warning {
+  padding: 10px 12px;
+  color: var(--dash-warning);
+  background: var(--dash-warning-soft);
+  border: 1px solid rgba(246, 200, 95, .28);
+  border-radius: var(--dash-radius-sm);
+  font-size: .72rem;
+  line-height: 1.45;
+}
+
+.restore-mode-label {
+  color: var(--dash-muted);
+  font-size: .7rem;
+  font-weight: 650;
+}
+
+.restore-dialog select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border-strong);
+  border-radius: var(--dash-radius-sm);
+}
+
+.restore-dialog-actions {
+  justify-content: flex-end;
 }
 
 .restore-request-list {
@@ -1865,6 +1980,12 @@ td:nth-last-child(-n + 2) {
   .restore-filter-status {
     width: 100%;
     margin-left: 0;
+  }
+
+  .restore-refresh-bar {
+    align-items: flex-start;
+    justify-content: space-between;
+    flex-wrap: wrap;
   }
 
   .restore-request {

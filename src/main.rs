@@ -207,8 +207,6 @@ fn main() -> Result<()> {
             Arc::clone(&registry),
             Arc::clone(&database_states),
             Arc::clone(&resource_collector),
-            Arc::clone(&manifest_store),
-            Arc::clone(&restore_controller),
         ))
     };
 
