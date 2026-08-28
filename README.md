@@ -1,644 +1,722 @@
 # crab-dump
 
-Stream an optionally **compressed** and **encrypted** PostgreSQL dump to **Telegram**, in chunks.
+Self-hosted PostgreSQL backups delivered to Telegram with streaming compression,
+optional age encryption, shell-reassemblable chunks, and an operator dashboard.
 
-```
-encrypted:  pg_dump  →  compression?  →  age (X25519)  →  ≤49 MiB parts  →  Telegram
-plain:      pg_dump  →  compression?                       →  ≤49 MiB parts  →  Telegram
+[![Rust](https://img.shields.io/badge/rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
-Single self-contained binary. No external services to run. Designed to be
-scheduled from cron or a systemd timer.
+`crab-dump` is a single Rust binary that turns `pg_dump` output into encrypted
+or unencrypted backup archives and sends them to one or more Telegram
+destinations. It is designed for small self-hosted deployments that want
+simple storage, predictable recovery commands, and no hosted backup service.
 
-## Why these choices
+> Telegram's cloud Bot API has a 50 MiB `sendDocument` limit. `crab-dump`
+> defaults to 49 MiB parts so every upload remains below that limit.
 
-| Stage   | Choice         | Reason                                                            |
-|---------|----------------|-------------------------------------------------------------------|
-| Dump    | `pg_dump -Fc`  | Custom format → fast, supports selective `pg_restore`.            |
-| Compress| `zstd`, `gzip`, `brotli` | Select one globally with `COMPRESSION_CODEC`; omit it for streaming, constant-memory raw `.dump` files. |
-| Encrypt | `age` | Optional streaming encryption: `none`, X25519 recipient, or passphrase. |
-| Upload  | `reqwest`      | Direct Bot API calls; no bot-framework overhead for a one-shot job.|
+## Contents
 
-**Chunking** is used instead of a self-hosted Telegram Bot API server: the
-cloud Bot API caps `sendDocument` at 50 MiB, so this tool packages the archive
-into ≤49 MiB uploads. A stream that fits in one chunk is uploaded as the bare
-`name`; larger streams use `name.part0000`, `name.part0001`, … . The receiving
-side reassembles multi-part backups with plain `cat` (the zero-padded names
-make the shell glob `cat name.part*` order lexically).
+- [Features](#features)
+- [How the backup pipeline works](#how-the-backup-pipeline-works)
+- [Quick start with Docker Compose](#quick-start-with-docker-compose)
+- [Local installation](#local-installation)
+- [Telegram setup](#telegram-setup)
+- [Configuration](#configuration)
+- [Encryption](#encryption)
+- [Scheduling](#scheduling)
+- [Dashboard](#dashboard)
+- [Restore backups](#restore-backups)
+- [File naming and recovery contract](#file-naming-and-recovery-contract)
+- [Routing and network access](#routing-and-network-access)
+- [Service monitoring](#service-monitoring)
+- [Reliability and security](#reliability-and-security)
+- [Operational boundaries](#operational-boundaries)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+- [Project layout](#project-layout)
+- [Development and verification](#development-and-verification)
 
-## Setup
+## Features
 
-### 1. Build
+- Constant-memory streaming: dump data is copied through fixed-size buffers and
+  is never collected into a single in-memory archive.
+- PostgreSQL custom-format dumps suitable for selective `pg_restore`.
+- Optional streaming compression with `zstd`, `gzip`, or `brotli`.
+- Optional streaming encryption with age X25519 recipients or passphrases.
+- Multiple PostgreSQL databases and Telegram destinations.
+- Bounded parallel backups with fail-soft execution: one failed database does
+  not stop its siblings.
+- Deterministic chunk names with zero-padded part numbers, allowing recovery
+  with ordinary shell tools.
+- One-shot mode for cron and systemd timers.
+- Long-running interval or crontab scheduling for Docker Compose deployments.
+- Authenticated dashboard for status, database controls, history, restores,
+  routing, and service monitoring.
+- SOCKS5 proxy support and dashboard-managed VMess, VLESS, Shadowsocks, and
+  Trojan routing profiles.
+- SHA-256 manifests for uploaded backup streams.
+- Automatic cleanup of temporary files and stale restore workspaces.
+- No direct-connect fallback when routed Telegram traffic fails.
 
-**Option A — Cargo (local binary):**
-```bash
-cargo build --release
-# binary: target/release/crab-dump
-```
-
-**Option B — Docker (image with `pg_dump` baked in):**
-```bash
-docker build --target runtime-none -t crab-dump:none .
-docker build --target runtime-sing-box -t crab-dump:sing-box .
-docker build --target runtime-shoes -t crab-dump:shoes .
-docker build --target runtime-all -t crab-dump:all .
-# or: docker compose build
-```
-`runtime-all` is the default and includes both routing cores. The other targets
-include no core or only the named core; routing remains unavailable when its
-executable is not present. Every image ships a matching `pg_dump`, so no
-Postgres client tools are needed on the host.
-
-Compose selects the target with `ROUTING_TARGET` and the image tag with
-`IMAGE_TAG`:
-
-```bash
-ROUTING_TARGET=runtime-sing-box docker compose build
-ROUTING_TARGET=runtime-sing-box docker compose up -d
-```
-
-### 2. (Optional) Configure age encryption
-
-The backup works without encryption. Set `ENCRYPTION_TYPE` in `.env` for encrypted
-dumps; the selected mode applies uniformly to every database.
-
-You only need the `age` tooling for key generation and for restoring. The
-backup itself uses the `age` Rust crate internally and needs no external CLI.
-
-```bash
-cargo install rage   # provides rage-keygen, rage
-rage-keygen -o identity.txt
-# → writes identity.txt (KEEP SECRET) and prints:
-#   Public key: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-Put the **public key** (`age1…`) in `AGE_RECIPIENT` on the backup host when using
-`ENCRYPTION_TYPE=age-recipient`. For passphrase mode, set a non-empty
-`AGE_PASSPHRASE`. Keep that secret safe for restoration.
-Keep `identity.txt` somewhere safe and offline — you'll need it to restore.
-
-### 3. (Optional) SOCKS5 proxy
-
-If Telegram is blocked in your country, set `SOCKS_PROXY`:
-
-```bash
-export SOCKS_PROXY=socks5h://127.0.0.1:2080
-```
-
-Use the `socks5h://` scheme (the `h` resolves DNS through the proxy) to
-avoid DNS-based blocking. All Telegram API traffic goes through the proxy.
-
-### 3a. Dashboard-managed routing profiles
-
-The `runtime-all` Docker target bundles pinned `sing-box` and `shoes`
-executables; the single-core targets bundle only their named executable. Local
-Cargo builds need the supported `sing-box` executable installed separately, or can set
-`SING_BOX_PATH` to its path. Log in as the dashboard administrator and use the
-the routing section to create, test, select, and explicitly apply VMess,
-VLESS, Shadowsocks SIP002, or Trojan share URLs. The dashboard persists the
-selected core and records which cores each profile supports; core changes
-require routing to be disabled. Operators and viewers can
-neither modify profiles nor see their URLs or credentials.
-
-For Docker deployments, leave `SING_BOX_PATH` and `SHOES_PATH` unset in `.env`.
-Those paths refer to files inside the container; host-local paths will not work
-there. Rebuild the selected image after changing the routing target.
-
-Profiles and the active selection are stored in `./data/routing_profiles.json`.
-The file and generated `sing-box` configuration are written atomically with
-owner-only permissions. `SOCKS_PROXY` remains supported for legacy deployments,
-but startup rejects it when a dashboard profile is active. Applying a new
-profile starts and verifies its local SOCKS5 listener before replacing the
-previous route; a failed replacement leaves the previous route in service.
-The managed core and generated configuration are removed when the process
-stops. The upstream sing-box binary is distributed under its upstream license;
-see the release artifact and `SING_BOX_VERSION` build argument for the exact
-platform/version.
-
-### 4. Create a Telegram bot
-
-1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token into `TG_BOT_TOKEN`.
-2. Create a chat/channel, add the bot, and promote it (channels: *Post Messages*; groups: *not* a member-only restriction).
-3. Get the chat id. For a channel: `-100` + channel id. Easiest way: post a message, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and read `result[].message.chat.id`.
-
-### 5. Configure
-
-```bash
-cp .env.example .env  # then edit
-```
-
-### 6. Run
-
-```bash
-set -a; source .env; set +a
-./target/release/crab-dump            # run a backup
-./target/release/crab-dump --dry-run  # validate config, no upload
-```
-
-On success the binary prints a **manifest**, one line per database:
-
-```
-# crab-dump manifest
-servers: 3 (2 ok, 1 failed)
-server 0: app (bytes=145572521, chunks=3, encrypted=false, sha256=4d52dfe801d349c71de6d485f2af62f5d01ab6dd08fb33fc037cdea4e964117, duration=31.4s)
-server 1: analytics (bytes=8815104, chunks=1, encrypted=false, sha256=9f2b1c0e5d47a8836be1f0a2c9d43e7715b6c8a09f3d2e1b4c5a6978d0e1f2a3, duration=4.2s)
-FAILED [2] archive: dumping database 'archive': pg_dump exited with status 1
-
-# restore [app]: cat db0-app-2026-08-12_20:55:32.part* | zstd -d | pg_restore --dbname=...
-# restore [analytics]: cat db1-analytics-2026-08-12_20:55:32 | zstd -d | pg_restore --dbname=...
-```
-
-Chunk files use the prefix `db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}` in UTC. A one-chunk
-backup uses that prefix as its bare filename; multi-part backups append
-`.partNNNN`. A database that fails does not stop the others — every remaining database is still dumped
-and uploaded — it gets a `FAILED` line in the manifest with its error. A
-one-shot run then exits non-zero; a scheduled run (`BACKUP_INTERVAL`) logs it
-and retries that database on the next cycle.
-
-Temp chunk files are deleted as soon as Telegram accepts them, so `WORK_DIR`
-holds only the chunks still waiting to upload — not the whole dump. A failed
-database's leftovers are swept too, unless you set `KEEP_FAILED_DUMPS=1`, which
-leaves them in `WORK_DIR` for debugging (nothing removes them later — sweep the
-directory yourself).
-
-## Dashboard restore
-
-Restore requests are managed from the dashboard's `/restores` page. Telegram
-does not expose a restore command or create restore requests.
-
-The dashboard supports `safe` restores for operators. `clean` restores use
-`pg_restore --clean --if-exists` and require administrator approval. Restore
-targets are existing configured databases; Telegram users cannot supply an
-arbitrary database URL.
-
-For encrypted backups, configure exactly one restore credential before
-approval:
-
-```bash
-AGE_IDENTITY_FILE=/run/secrets/age-identity.txt
-# or:
-AGE_PASSPHRASE=the-backup-passphrase
-```
-
-Missing credentials are rejected before Telegram parts are downloaded. Restore
-parts are downloaded through the configured routed client, reassembled and
-SHA-256 verified, then decrypted, decompressed, and passed to `pg_restore`.
-Temporary restore files are removed after success or failure unless
-`KEEP_FAILED_DUMPS=1` is enabled.
-
-## Configuration reference
-
-| Variable             | Required | Default        | Notes                                              |
-|----------------------|:--------:|----------------|----------------------------------------------------|
-| `DATABASE_URL_N`     | yes\*     |                | one per database, indexed from `0` — see below     |
-| `DB_NAME_N`          | no       | from URL path  | display name for database `N`; must be unique      |
-| `PG_DUMP_EXTRA_ARGS_N` | no     | shared value   | per-database override of `PG_DUMP_EXTRA_ARGS`      |
-| `CRAB_MAX_DATABASES` | no       | `10`           | refuses to start above this count                  |
-| `MAX_PARALLEL_DATABASES` | no   | `4`            | how many databases back up at the same time (≥ 1)  |
-| `TG_BOT_TOKEN`       | yes      |                | from @BotFather                                    |
-| `TG_CHAT_ID_0`, `_1`, … | yes |                | contiguous numeric IDs or `@channelusername` values |
-| `DASHBOARD_HOST`     | no       | `127.0.0.1`    | bind address; use `0.0.0.0` for remote/container access |
-| `DASHBOARD_USERNAME` | yes      |                | administrator username for the dashboard |
-| `DASHBOARD_PASSWORD` | yes     |                | administrator password; minimum 12 characters |
-| `DASHBOARD_OPERATOR_USERNAME/PASSWORD` | no | | optional backup/database-control account |
-| `DASHBOARD_VIEWER_USERNAME/PASSWORD` | no | | optional read-only status account |
-| `ENCRYPTION_TYPE`    | no       | `none`         | `none`, `age-recipient`, or `age-passphrase`; `.env` only |
-| `AGE_RECIPIENT`      | conditional | *(none)*     | `age1…` X25519 public key for `age-recipient` |
-| `AGE_PASSPHRASE`     | conditional | *(none)*     | non-empty passphrase for `age-passphrase` |
-| `AGE_IDENTITY_FILE`  | restore     | *(none)*     | restore-only age identity file; mutually exclusive with restore `AGE_PASSPHRASE` |
-| `COMPRESSION_CODEC`  | no       |                | `zstd`, `gzip`, or `brotli`; omit for uncompressed `.dump`; also `compression_codec` in `config.toml` |
-| `COMPRESSION_LEVEL`  | no       | codec-native   | zstd `1..22`, gzip `0..9`, brotli `0..11`; rejected without a codec |
-| `COMPRESSION_CHECKSUM` | no     | zstd enabled   | zstd only; rejected without a codec and for gzip/brotli |
-| `SOCKS_PROXY`        | no       | *(none)*       | SOCKS5 proxy, e.g. `socks5h://127.0.0.1:2080`    |
-| `PG_DUMP_EXTRA_ARGS` | no       | *(none)*       | read-only filters/formats only; unsafe options are rejected |
-| `CHUNK_SIZE_MB`      | no       | `49`           | must be 1–49                                       |
-| `WORK_DIR`           | no       | OS temp dir    | temp chunk storage                                 |
-| `PG_DUMP_TIMEOUT_SECS` | no     | `3600`         | per-dump timeout; must be 60–86400                 |
-| `MAX_DUMP_SIZE_MB`   | no       | `10240`        | maximum packaged output per database               |
-| `HISTORY_DIR`        | no       | `./history`    | monthly JSONL backup-attempt history               |
-| `HISTORY_RETENTION_MONTHS` | no | `12`       | current month plus this many total monthly files   |
-| `HISTORY_UPLOAD_SCHEDULE` | no | `59 23 * * *` | upload active monthly history in scheduled mode; `0`/blank disables |
-| `KEEP_FAILED_DUMPS`  | no       | `0`            | keep a failed backup's chunks in `WORK_DIR` for debugging |
-| `BACKUP_INTERVAL`    | no       | *(one-shot)*   | repeat instead of exiting: an interval like `6h` (min `60s`), or a crontab expression like `0 */4 * * *` |
-| `RUST_LOG`           | no       | `info`         | `debug` for per-chunk detail                       |
-
-\* At least one database is required: use `DATABASE_URL_0`, `DATABASE_URL_1`, …
-with contiguous indices, or one or more `[[databases]]` entries in
-`config.toml`. Telegram destinations are the exception: configure one or more
-contiguous `TG_CHAT_ID_N` variables in the environment; the removed scalar
-`TG_CHAT_ID` and TOML `tg_chat_id` settings are not supported.
-
-The dashboard and every dashboard API require a login session. Sessions expire
-after eight hours; mutating API requests also require a same-site CSRF token.
-The administrator account can manage Telegram users, the optional operator
-account can trigger backups and enable/disable databases, and the optional
-viewer account is read-only. Put the dashboard behind HTTPS when it is reachable
-outside localhost (for example, with a TLS-terminating reverse proxy).
-The Telegram user directory is informational/manageable only; backup uploads continue to
-use only the indexed `TG_CHAT_ID_N` destinations. Visit `/users` to add,
-edit, enable/disable, or delete directory entries. Changes are persisted
-atomically to `./data/telegram_users.toml`. Database enablement state is
-persisted to `./data/database-state.json`; both files share the fixed
-`./data` directory and are ignored by Git. `HISTORY_DIR` is reserved for
-monthly backup history. An existing root-level `telegram_users.toml` is no
-longer read automatically.
-
-### Dashboard service monitoring
-
-The `/services` dashboard page manages authenticated HTTP health checks. Each
-service has a unique name, URL, expected status, interval, retry count,
-failure threshold, version header, enabled state, and selected Telegram users.
-Defaults are `60s`, two additional retries, three consecutive failures, and
-`X-Version`. Health checks use a direct connection by default; an administrator
-can enable the active routing profile per service, which also honors
-`SOCKS_PROXY`. Alerts are transition-only: one outage notification and one
-recovery notification are sent to enabled selected users.
-
-Definitions and bounded outage/recovery history are stored atomically in
-`./data/health-services.json` and `./data/health-incidents.json`. The Compose
-`data` volume must remain persistent. Operators can acknowledge or clear
-incident presentation state; this does not change monitoring or alert behavior.
-Viewers can inspect services and history but cannot mutate them.
-
-### Multiple databases
-
-Declare databases with indexed environment variables, contiguous from `0` — a
-gap stops the scan, and every index after it is ignored (you get a warning):
-
-```bash
-DATABASE_URL_0=postgresql://user:pass@host-a:5432/app
-DB_NAME_0=app
-DATABASE_URL_1=postgresql://user:pass@host-b:5432/analytics
-DB_NAME_1=analytics
-PG_DUMP_EXTRA_ARGS_1=--exclude-table=events
-```
-
-Only read-oriented filtering and format flags are accepted in
-`PG_DUMP_EXTRA_ARGS`; connection, file-output, role, and restore-behaviour
-options are rejected at startup or by the dashboard.
-
-or as `[[databases]]` entries in `config.toml` (which take precedence over the
-indexed variables):
-
-```toml
-[[databases]]
-url  = "postgresql://user:pass@host-a:5432/app"
-name = "app"
-
-[[databases]]
-url  = "postgresql://user:pass@host-b:5432/analytics"
-name = "analytics"
-pg_dump_extra_args = "--exclude-table=events"
-```
-
-Display names must be unique — they key both the chunk filenames and the
-dashboard cards, so crab-dump refuses to start on a collision. Set `DB_NAME_N`
-(or `name`) when two servers host a database of the same name.
-
-Each database dumps and packages on its own thread; one failure does not stop
-the others — not even when every database fails — but in one-shot mode any
-failure makes the run exit non-zero. At most
-`MAX_PARALLEL_DATABASES` (default `4`) run at a time — a database waits for a
-free slot, and a worker takes the next queued database as soon as it finishes,
-so a slow dump never idles the others. Set it to `1` for strictly sequential
-backups. Uploads are serialized process-wide because Telegram rate-limits per
-chat. Each chunk is attempted for every destination still active. If one
-destination fails, it is skipped for the rest of that backup; the backup
-succeeds when at least one destination receives every chunk. A chunk remains
-on disk until all currently active destinations have been attempted.
-
-> **Disk:** each pipeline writes its entire compressed dump to `WORK_DIR`
-> before uploading its first chunk, so peak disk usage is the sum across the
-> databases running concurrently — up to `MAX_PARALLEL_DATABASES` × the
-> single-database figure. Chunks are deleted as they upload, so usage falls
-> during the upload stage, but the peak stands. Nothing pre-checks free space;
-> exhaustion surfaces as an I/O error mid-dump, after the dump time has been
-> spent. Size `WORK_DIR` accordingly, or lower `MAX_PARALLEL_DATABASES`.
-
-The dashboard shows the active limit in its info bar ("Parallel limit").
-
-Every database attempt is also appended to `HISTORY_DIR/YYYY-MM.jsonl`,
-including failures that happen before packaging completes. Records include
-timestamps, byte counts, chunk count, SHA-256, encryption, duration, and
-aggregate Telegram upload attempts/retries. History is best-effort: an
-I/O error is logged as a warning and does not change the backup outcome.
-Retention defaults to the current month plus the previous 11 months. In
-containers, mount `HISTORY_DIR` as persistent storage; the example
-`docker-compose.yml` provides separate named volumes for history and `./data`
-state.
-
-The dashboard keeps the live pipeline view separate from historical data.
-Expand a database row to load its retained history on demand. History is
-server-paginated with 10 records per page by default; the dashboard supports
-page sizes of 10, 20, and 50. Aggregate statistics always cover all retained
-monthly records, regardless of the selected page. The view includes
-success/failure counts and rate, last run and last successful run, average
-duration, dump and packaged sizes, upload retries, and sanitized failure
-messages.
-
-The read-only endpoint is:
+## How the backup pipeline works
 
 ```text
-GET /api/history/{database_name}
+PostgreSQL
+    │
+    ▼
+pg_dump -Fc
+    │
+    ▼
+compression (optional)
+    │
+    ▼
+age encryption (optional)
+    │
+    ▼
+bounded chunk writer
+    │
+    ▼
+Telegram Bot API
 ```
 
-Optional query parameters are `page` (1-based, default `1`) and `page_size`
-(one of `10`, `20`, or `50`; default `10`). It returns
-`{ "database", "stats", "records", "page", "page_size", "total_records",
-"total_pages" }`. Records are newest first. An out-of-range page is clamped
-to the last available page. Missing or empty history returns a successful
-response with zero-valued statistics, `total_records: 0`, `total_pages: 0`,
-and an empty `records` array. The dashboard caches expanded results by
-database, page, and page size until the user presses Refresh.
+Compression always happens before encryption. The resulting stream is either
+uploaded as one file or split into ordered `.partNNNN` files. A part is deleted
+from `WORK_DIR` after Telegram accepts it, so disk usage is bounded by the
+number of active database pipelines and their configured chunk size.
 
-## Running in Docker
+## Quick start with Docker Compose
 
-The image runs as the `postgres` user and ships `pg_dump` 17, so the only
-thing you need to provide is configuration via environment variables.
+Docker is the easiest deployment path because the image includes a matching
+PostgreSQL client (`pg_dump`) and exposes the embedded dashboard.
 
 ```bash
-# One-shot backup (without encryption):
-docker run --rm \
-  -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
-  -e TG_BOT_TOKEN="..." \
-  -e TG_CHAT_ID_0="..." \
-  -e DASHBOARD_USERNAME="admin" \
-  -e DASHBOARD_PASSWORD="replace-with-a-long-unique-secret" \
-  crab-dump
+cp .env.example .env
+${EDITOR:-vi} .env
 
-# One-shot backup (with encryption):
-docker run --rm \
-  -e DATABASE_URL_0="postgresql://user:pass@dbhost:5432/mydb" \
-  -e TG_BOT_TOKEN="..." \
-  -e TG_CHAT_ID_0="..." \
-  -e ENCRYPTION_TYPE="age-recipient" \
-  -e AGE_RECIPIENT="age1..." \
-  -e SOCKS_PROXY="socks5h://127.0.0.1:2080" \
-  -e DASHBOARD_USERNAME="admin" \
-  -e DASHBOARD_PASSWORD="replace-with-a-long-unique-secret" \
-  crab-dump
+docker compose build
+docker compose up -d
+docker compose logs -f crab-dump
+```
 
-# Or with docker-compose (uses a .env file)
+The dashboard is available at `http://127.0.0.1:1111` with the credentials
+configured in `.env`. Compose persists application data and backup history in
+named volumes. Temporary backup and restore workspaces are cleaned according
+to `WORK_DIR` and `KEEP_FAILED_DUMPS`.
+
+For a one-shot backup instead of a long-running service:
+
+```bash
 docker compose run --rm crab-dump
 ```
 
-### Networking notes (important)
-
-The container has its own network namespace:
-
-- **Postgres / SOCKS proxy on the Docker host?** Use `host.docker.internal`
-  (Docker Desktop) or the host's LAN IP — *not* `127.0.0.1`, which refers to
-  the container itself.
-- On Linux, add `--add-host=host.docker.internal:host-gateway` if you need
-  that name, or run with `--network host`.
-- **`WORK_DIR` on a mounted volume:** the container runs as UID 999
-  (`postgres`). Make the mount writable, e.g. `chmod 777 ./work` or use a
-  named volume.
+The default Compose service uses the `runtime-all` image, which contains both
+supported routing cores. Select a smaller image when dashboard-managed routing
+is not needed:
 
 ```bash
-docker run --rm \
-  -v pgbackup-work:/work \
-  -e WORK_DIR=/work \
-  ... crab-dump
+ROUTING_TARGET=runtime-none docker compose build
+ROUTING_TARGET=runtime-none docker compose up -d
 ```
+
+Available Docker targets are `runtime-none`, `runtime-sing-box`,
+`runtime-shoes`, and `runtime-all`.
+
+## Local installation
+
+### Requirements
+
+- Rust toolchain compatible with the 2021 edition.
+- PostgreSQL client tools, including `pg_dump` and `pg_restore`.
+- A Telegram bot and a destination chat, group, or channel.
+- Docker is optional.
+- `rage` is optional and is only needed for convenient age key generation or
+  command-line restoration.
+
+Build and validate the binary:
+
+```bash
+cargo build --release
+cargo run --release -- --dry-run
+```
+
+`--dry-run` loads and validates configuration and checks `pg_dump` availability.
+It does not dump a database or upload anything.
+
+Run a backup:
+
+```bash
+set -a
+source .env
+set +a
+
+./target/release/crab-dump
+```
+
+Each cycle prints a consolidated manifest to stdout. Successful databases and
+failed databases are both included, making partial completion visible to cron,
+systemd, or container logs:
+
+```text
+# crab-dump manifest
+servers: 2 (1 ok, 1 failed)
+server 0: production (bytes=145572521, chunks=3, compression=zstd, encryption_type=none, encrypted=false, sha256=..., duration=31.4s)
+FAILED [1] analytics: pg_dump — pg_dump exited with status 1. Action: Check DATABASE_URL, PostgreSQL access, and pg_dump availability.
+```
+
+One-shot mode exits non-zero when any database fails, after all databases have
+finished. Scheduled mode keeps running and retries failed databases during the
+next cycle.
+
+Useful Make targets:
+
+```bash
+make release       # optimized binary
+make dry-run       # configuration and pg_dump validation
+make verify        # format check, Clippy, and tests
+make compose-up    # build and start Docker Compose
+make compose-logs  # follow service logs
+```
+
+## Telegram setup
+
+1. Open [@BotFather](https://t.me/BotFather), run `/newbot`, and copy the bot
+   token into `TG_BOT_TOKEN`.
+2. Create or choose a destination chat, group, or channel.
+3. Add the bot to that destination. In a channel, grant **Post Messages**.
+4. Configure one or more contiguous `TG_CHAT_ID_N` variables.
+
+For a channel, the numeric chat ID generally starts with `-100`. A public
+channel username such as `@backup-channel` can also be used. Never commit bot
+tokens or database URLs containing passwords.
+
+## Configuration
+
+`crab-dump` supports environment variables and an optional `config.toml`.
+Environment variables override values loaded from `config.toml`. Telegram chat
+IDs and encryption settings remain environment-only; this keeps chat
+destinations and decryption-related secrets out of the TOML file.
+
+Start from the provided example:
+
+```bash
+cp .env.example .env
+```
+
+### Minimal `.env`
+
+```dotenv
+DATABASE_URL_0=postgresql://user:password@postgres.example.com:5432/app
+TG_BOT_TOKEN=replace-with-your-bot-token
+TG_CHAT_ID_0=-1001234567890
+
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=replace-with-a-long-secret
+```
+
+At least one database, one Telegram destination, and the dashboard
+administrator credentials are required.
+
+### Configuration reference
+
+| Variable | Required | Default | Description |
+|---|:---:|---|---|
+| `DATABASE_URL_N` | Yes* | — | PostgreSQL connection URL; indices must be contiguous from `0`. |
+| `DB_NAME_N` | No | URL database name | Dashboard and manifest display name. |
+| `PG_DUMP_EXTRA_ARGS` | No | — | Shared read-oriented `pg_dump` filters. |
+| `PG_DUMP_EXTRA_ARGS_N` | No | Shared value | Per-database override. |
+| `TG_BOT_TOKEN` | Yes | — | Telegram bot token. |
+| `TG_CHAT_ID_N` | Yes* | — | Contiguous Telegram destination IDs or usernames. |
+| `DASHBOARD_HOST` | No | `127.0.0.1` | Dashboard bind address. |
+| `API_PORT` | No | `8080` | Dashboard HTTP port; Compose sets `1111`. |
+| `DASHBOARD_USERNAME` | Yes | — | Administrator username. |
+| `DASHBOARD_PASSWORD` | Yes | — | Administrator password; minimum 12 characters. |
+| `DASHBOARD_OPERATOR_USERNAME` | No | — | Optional backup/database-control account. |
+| `DASHBOARD_OPERATOR_PASSWORD` | No | — | Operator password. |
+| `DASHBOARD_VIEWER_USERNAME` | No | — | Optional read-only account. |
+| `DASHBOARD_VIEWER_PASSWORD` | No | — | Viewer password. |
+| `COMPRESSION_CODEC` | No | None | `zstd`, `gzip`, or `brotli`; omit for raw `.dump`. |
+| `COMPRESSION_LEVEL` | No | Codec-native | zstd `1..22`, gzip `0..9`, brotli `0..11`. |
+| `COMPRESSION_CHECKSUM` | No | zstd enabled | zstd checksum setting; rejected for other codecs. |
+| `ENCRYPTION_TYPE` | No | `none` | `none`, `age-recipient`, or `age-passphrase`. |
+| `AGE_RECIPIENT` | Conditional | — | Age public recipient beginning with `age1`. |
+| `AGE_PASSPHRASE` | Conditional | — | Backup or restore passphrase, depending on mode. |
+| `AGE_IDENTITY_FILE` | Restore only | — | Identity file for decrypting recipient-encrypted backups. |
+| `SOCKS_PROXY` | No | — | SOCKS5 proxy, preferably `socks5h://...`. |
+| `SING_BOX_PATH` | No | `/usr/local/bin/sing-box` | Local sing-box executable path. |
+| `SHOES_PATH` | No | `/usr/local/bin/shoes` | Local shoes executable path. |
+| `CHUNK_SIZE_MB` | No | `49` | Upload part size; must be between 1 and 49 MiB. |
+| `WORK_DIR` | No | OS temporary directory | Temporary chunk and restore workspace. |
+| `MAX_PARALLEL_DATABASES` | No | `4` | Maximum concurrent database pipelines. |
+| `CRAB_MAX_DATABASES` | No | `10` | Maximum configured databases accepted at startup. |
+| `PG_DUMP_TIMEOUT_SECS` | No | `3600` | Per-database dump timeout. |
+| `MAX_DUMP_SIZE_MB` | No | `10240` | Maximum packaged output per database. |
+| `KEEP_FAILED_DUMPS` | No | Off | Preserve failed backup files for debugging. |
+| `HISTORY_DIR` | No | `./history` | Monthly JSONL backup history directory. |
+| `HISTORY_RETENTION_MONTHS` | No | `12` | Number of retained monthly history files. |
+| `HISTORY_UPLOAD_SCHEDULE` | No | `59 23 * * *` | History upload time in scheduled mode; `0` disables it. |
+| `BACKUP_INTERVAL` | No | One-shot | Interval such as `6h`, or a five-field crontab expression. |
+| `RUST_LOG` | No | `info` | Logging filter; use `debug` for detailed chunk logs. |
+
+\* Database and Telegram destination indices must be contiguous from zero.
+
+Only read-oriented `pg_dump` arguments are accepted. Connection, output-file,
+role, restore-behavior, and other unsafe arguments are rejected.
+`ENCRYPTION_TYPE`, `AGE_RECIPIENT`, and backup `AGE_PASSPHRASE` must be set
+through the environment. Restore credentials are also supplied through the
+environment when a dashboard restore is approved.
+
+### TOML configuration
+
+Copy the provided example when you prefer configuration files:
+
+```bash
+cp config.toml.example config.toml
+```
+
+Example:
+
+```toml
+[[databases]]
+url = "postgresql://user:password@db.internal:5432/production"
+name = "production"
+
+[[databases]]
+url = "postgresql://user:password@analytics.internal:5432/analytics"
+name = "analytics"
+pg_dump_extra_args = "--exclude-table=sessions"
+
+tg_bot_token = "replace-with-your-bot-token"
+compression_codec = "zstd"
+compression_level = 3
+chunk_size_mb = 49
+max_parallel_databases = 2
+```
+
+Set `TG_CHAT_ID_0`, `TG_CHAT_ID_1`, and so on in the environment. Sensitive
+values should generally remain in environment variables or container secrets.
+
+## Encryption
+
+Encryption is optional and configured globally for all databases in a run.
+The backup process uses the age Rust library; the `age` command-line tool is
+not required to create backups.
+
+Generate a recipient keypair with `rage`:
+
+```bash
+cargo install rage
+rage-keygen -o identity.txt
+```
+
+Configure recipient encryption with the public key:
+
+```dotenv
+ENCRYPTION_TYPE=age-recipient
+AGE_RECIPIENT=age1...
+```
+
+Or use a passphrase:
+
+```dotenv
+ENCRYPTION_TYPE=age-passphrase
+AGE_PASSPHRASE=replace-with-a-long-unique-passphrase
+```
+
+Keep `identity.txt` or the passphrase outside the backup host. Recipient
+encryption stores only the public recipient in the backup configuration.
 
 ## Scheduling
 
-Two options: let crab-dump schedule itself, or drive it from cron / a systemd
-timer.
+Without `BACKUP_INTERVAL`, the process runs one backup cycle and exits. This
+is the recommended mode for cron or a systemd timer:
 
-### Built-in scheduler (`BACKUP_INTERVAL`)
-
-Set `BACKUP_INTERVAL` and the process stays alive, repeating forever. Nothing
-external is needed, and the dashboard keeps serving between runs — its info bar
-shows the schedule, whether a cycle is **Running** or **Waiting**, and a live
-countdown to the next one. It takes either a plain interval or a crontab
-expression:
-
-```bash
-BACKUP_INTERVAL=6h            # every 6 hours, first backup immediately
-BACKUP_INTERVAL="0 */4 * * *" # 00:00, 04:00, 08:00, … first backup at the next match
+```cron
+0 3 * * * cd /opt/crab-dump && ./target/release/crab-dump >> /var/log/crab-dump.log 2>&1
 ```
 
-```bash
-# docker-compose.yml — long-running instead of one-shot
-services:
-  crab-dump:
-    build: .
-    env_file: .env      # with BACKUP_INTERVAL set
-    environment:
-      API_PORT: "1111"
-      DASHBOARD_HOST: "0.0.0.0"
-    ports: ["1111:1111"]
-    restart: unless-stopped
+An interval keeps the process alive, performs a backup immediately, and repeats
+from the start of each cycle:
+
+```dotenv
+BACKUP_INTERVAL=6h
 ```
 
-The bundled `docker-compose.yml` uses `${API_PORT:-1111}:1111`, persists
-`./data` state at `/app/data`, and adds `host.docker.internal` for databases or
-SOCKS proxies running on the Docker host. Set `DATABASE_URL_N` and
-`SOCKS_PROXY` to use that hostname when appropriate; `localhost` inside the
-container refers to the container itself. Compose does not replace
-`BACKUP_INTERVAL`, so the value in `.env` is honored. If it is unset, the
-one-shot process exits after its cycle; set it (for example `BACKUP_INTERVAL=6h`)
-for a long-running `docker compose up -d` service.
+Intervals may use seconds or `s`, `m`, `h`, and `d` suffixes, with a minimum of
+60 seconds. A five-field crontab expression aligns runs to local wall-clock
+time and does not run immediately at startup:
 
-Before starting a deployment, validate the rendered configuration and image:
+```dotenv
+BACKUP_INTERVAL=0 */4 * * *
+```
+
+The built-in scheduler never runs overlapping backup cycles. If one cycle
+overruns its interval, the next cycle starts as soon as the current one
+finishes.
+
+## Dashboard
+
+The embedded dashboard is served by the same binary. It requires a login
+session; mutating requests also require a same-site CSRF token. Sessions expire
+after eight hours.
+
+| Role | Capabilities |
+|---|---|
+| Administrator | Full dashboard access, routing profiles, Telegram users, services, database management, restore approval, and settings. |
+| Operator | Trigger backups, enable or disable configured databases, inspect status/history, create safe restores, and manage permitted operational actions. |
+| Viewer | Read-only status, history, service, database, and routing information. |
+
+Dashboard pages include:
+
+- Overview and process status.
+- Per-database status and enable/disable controls.
+- Backup history and manifests.
+- Restore requests and approval workflow.
+- Telegram user directory.
+- Service health checks and incidents.
+- Routing profile management.
+- Compression settings and runtime information.
+
+Place the dashboard behind HTTPS when exposing it outside localhost. The
+Compose deployment binds the dashboard to `0.0.0.0` inside the container and
+publishes it on host port `1111` by default.
+
+## Restore backups
+
+Backups use PostgreSQL custom format (`pg_dump -Fc`). Restore options depend on
+whether the stream is encrypted and whether you are restoring through the
+dashboard or shell.
+
+### Shell restore
+
+For a zstd-compressed single-part backup:
 
 ```bash
-docker compose config
-docker compose build --no-cache
+cat production_*.dump.zst | zstd -d | pg_restore --dbname="$TARGET_DATABASE_URL"
+```
+
+For a zstd-compressed multi-part backup:
+
+```bash
+cat production_*.dump.zst.part* | zstd -d | pg_restore --dbname="$TARGET_DATABASE_URL"
+```
+
+For gzip or Brotli backups, replace `zstd -d` with the matching decompressor
+(`gzip -d` or `brotli -d`). The filename extension identifies the configured
+codec.
+
+For an encrypted backup using an age identity:
+
+```bash
+cat production_*.dump.zst.age.part* \
+  | age -d -i identity.txt \
+  | zstd -d \
+  | pg_restore --dbname="$TARGET_DATABASE_URL"
+```
+
+For passphrase-encrypted backups, replace the `age -d -i identity.txt`
+operation with `age -d` and provide the passphrase interactively.
+
+Raw uncompressed backups omit the `zstd -d` stage:
+
+```bash
+cat production_*.dump | pg_restore --dbname="$TARGET_DATABASE_URL"
+```
+
+Use `pg_restore --list` to inspect archive contents before restoring. Use
+`pg_restore --clean --if-exists` only when replacing objects in an existing
+database is intentional.
+
+### Dashboard restore
+
+Dashboard restores are limited to configured database targets; users cannot
+submit arbitrary database URLs.
+
+- `safe` restores are available to operators.
+- `clean` restores use `pg_restore --clean --if-exists` and require administrator
+  approval.
+- Encrypted restores require exactly one of `AGE_IDENTITY_FILE` or
+  `AGE_PASSPHRASE`.
+- Parts are downloaded through the active routed client, reassembled, verified
+  with SHA-256, decrypted, decompressed, and passed to `pg_restore`.
+- Temporary restore files are removed after success or failure unless
+  `KEEP_FAILED_DUMPS=1` is enabled.
+
+Telegram does not expose a restore command or create restore requests.
+
+## File naming and recovery contract
+
+A backup that fits within one chunk is uploaded as a bare file:
+
+```text
+{database}_{utc_timestamp}.dump
+{database}_{utc_timestamp}.dump.zst
+{database}_{utc_timestamp}.dump.zst.age
+```
+
+Larger streams use the same prefix followed by zero-padded parts:
+
+```text
+{database}_{utc_timestamp}.dump.zst.age.part0000
+{database}_{utc_timestamp}.dump.zst.age.part0001
+```
+
+Lexicographic order is concatenation order. Multi-part backups can therefore
+be reassembled with `cat ...part*` without custom tooling. Each manifest
+records the database, byte count, chunk count, encryption state, SHA-256, and
+duration.
+
+## Routing and network access
+
+### SOCKS5 proxy
+
+Set `SOCKS_PROXY` when Telegram access requires a proxy:
+
+```dotenv
+SOCKS_PROXY=socks5h://127.0.0.1:2080
+```
+
+The `socks5h` scheme resolves DNS through the proxy. Telegram uploads,
+retries, preflight checks, and dashboard restore downloads all use the active
+routed client. A failed routed request does not fall back to a direct
+connection.
+
+In Docker, `127.0.0.1` refers to the container. Use
+`host.docker.internal` or the host's LAN address when the proxy runs on the
+Docker host.
+
+### Dashboard-managed routing profiles
+
+The dashboard can manage VMess, VLESS, Shadowsocks SIP002, and Trojan share
+URLs through the bundled `sing-box` and `shoes` cores. Profile URLs and
+credentials are never exposed in API responses or to operators/viewers.
+
+The administrator can create, test, select, and apply profiles. Applying a
+profile starts and verifies its local SOCKS5 listener before replacing the
+previous route; a failed replacement retains the previous working route.
+
+Do not configure `SOCKS_PROXY` while a dashboard routing profile is active.
+Startup rejects that combination. Local builds need the routing executable
+installed separately; Docker images bundle the executable selected by the
+runtime target.
+
+## Service monitoring
+
+The `/services` dashboard page supports authenticated HTTP health checks with:
+
+- Service name and URL.
+- Expected status code.
+- Poll interval.
+- Additional retries.
+- Consecutive-failure threshold.
+- Optional version header.
+- Selected Telegram recipients.
+- Optional use of the active routing profile.
+
+Health alerts are transition-only: one notification is sent when a service
+enters outage, and one when it recovers. Definitions and bounded incident
+history are stored in the persistent `data` directory.
+
+By default, health checks use a direct client. An administrator can enable the
+active routing profile for an individual service when that service must be
+checked through the same route as application traffic.
+
+### Container and process health
+
+The Docker image exposes a lightweight public health endpoint:
+
+```bash
+curl http://127.0.0.1:1111/healthz
+```
+
+Docker uses this endpoint for its health check. It is intentionally separate
+from authenticated dashboard APIs and does not expose backup metadata or
+secrets.
+
+## Reliability and security
+
+- Database failures are isolated; sibling databases continue to run.
+- A one-shot process exits non-zero if any database failed, after all databases
+  have completed.
+- Scheduled mode logs failures and retries them in the next cycle.
+- Temporary files are managed and cleaned on success and failure.
+- `KEEP_FAILED_DUMPS=1` is an explicit debugging override; retained files must
+  be removed manually.
+- Bot tokens, database passwords, chat IDs, and routing credentials are
+  redacted from logs, diagnostics, and dashboard responses.
+- Keep `.env`, `config.toml`, age identities, and persistent `data` volumes
+  owner-readable only.
+- Protect the dashboard with HTTPS and a network access policy when it is
+  reachable beyond localhost.
+- Store age identity files and passphrases separately from the backup host.
+- Verify Telegram destination permissions before relying on scheduled backups.
+
+### Upload retries and rate limits
+
+Telegram uploads are serialized within the process so concurrent database
+pipelines do not race the same Bot API rate limits. Each chunk allows up to
+five total attempts. Transient transport errors and HTTP 5xx responses use
+bounded exponential backoff. HTTP 429 responses honor Telegram's
+`retry_after` value, capped at five minutes.
+
+If all attempts for a destination fail, that destination is skipped while
+other configured destinations continue. If no destination receives the
+complete stream, the database backup is reported as failed.
+
+## Operational boundaries
+
+`crab-dump` is a backup packaging and delivery tool, not a hosted backup
+platform. Telegram is the configured backup destination; the application does
+not provide object storage, cross-region replication, or a separate catalog
+service.
+
+- Backups are full `pg_dump` archives. Incremental and point-in-time recovery
+  are outside the current design.
+- PostgreSQL connectivity is supplied by your database network and credentials.
+- Telegram retention, channel permissions, and available storage are managed
+  by Telegram and the operator.
+- Restores target databases already configured in `crab-dump`; arbitrary
+  destination URLs are intentionally rejected.
+- The dashboard is an operational interface, not a replacement for database
+  administration, disaster-recovery testing, or an off-site key-management
+  process.
+
+### Persistent application state
+
+In Docker Compose, keep the following state protected and persistent:
+
+| Location | Contents |
+|---|---|
+| `/app/data` | Database enablement, manifests, restore requests, Telegram users, routing profiles, and health-monitor state. |
+| `/app/history` | Monthly JSONL backup-attempt history. |
+| `WORK_DIR` | In-progress backup and restore files; normally temporary and cleaned automatically. |
+
+The `data` and `history` volumes are part of the application’s operational
+state. Include them in your host backup strategy, restrict their permissions,
+and do not expose routing profile files or restore credentials.
+
+## Troubleshooting
+
+### `pg_dump` is missing
+
+Use a Docker image, or install the PostgreSQL client package for your
+distribution. Confirm availability with:
+
+```bash
+./target/release/crab-dump --dry-run
+```
+
+### Telegram returns permission or chat errors
+
+Confirm that the bot is a member of the destination and has permission to send
+documents. Confirm that every `TG_CHAT_ID_N` index is contiguous from zero.
+
+### Docker cannot reach PostgreSQL or the proxy
+
+The container has its own network namespace. Do not use `127.0.0.1` for a
+service running on the host. Use `host.docker.internal` (provided by the
+Compose file) or a reachable LAN/Docker service name.
+
+### The dashboard is unreachable
+
+Check `DASHBOARD_HOST`, `API_PORT`, container port publishing, and logs:
+
+```bash
+docker compose ps
+docker compose logs --tail=100 crab-dump
+```
+
+### A backup runs out of disk space
+
+Lower `MAX_PARALLEL_DATABASES`, ensure `WORK_DIR` has enough free space, and
+review whether `KEEP_FAILED_DUMPS=1` has left old files behind.
+
+### An encrypted restore fails
+
+Use the identity or passphrase that matches the encryption mode. For recipient
+encryption, the restore identity must contain the private key corresponding to
+the configured `AGE_RECIPIENT`.
+
+## FAQ
+
+### Does `crab-dump` store the complete dump in memory?
+
+No. The dump, compression/encryption stages, and chunk writer use streaming
+fixed-size copies. Memory usage does not grow with database size.
+
+### What happens when one database fails?
+
+Other databases continue running. The manifest records the failure, and a
+one-shot invocation exits non-zero after the remaining databases finish.
+
+### Can I change compression from the dashboard?
+
+Yes. The dashboard can persist compression settings. A complete backup cycle
+uses one compression snapshot, so all databases in that cycle are packaged
+consistently.
+
+### Can I restore to an arbitrary PostgreSQL URL?
+
+No. Dashboard restores are restricted to configured databases. This prevents a
+restore request from becoming an arbitrary outbound database connection.
+
+### Is Telegram used for restore commands?
+
+No. Telegram is the backup transport and notification destination. Restore
+requests are created and approved through the authenticated dashboard.
+
+### Do I need both routing cores?
+
+No. Use `runtime-none` without dashboard-managed routing, or select
+`runtime-sing-box` / `runtime-shoes` when only one compatible core is required.
+Use `runtime-all` when profiles may need either core.
+
+## Project layout
+
+```text
+src/
+├── main.rs                 runtime orchestration
+├── config.rs               environment and TOML configuration
+├── dump.rs                 pg_dump process and streaming output
+├── compress.rs             compression stages
+├── encrypt.rs              age encryption stage
+├── chunk.rs                bounded chunk writer
+├── telegram.rs             Bot API uploads and retries
+├── restore.rs              restore downloads and verification
+├── routing.rs              managed routing profiles
+├── web.rs                  embedded dashboard and API
+├── health_monitor.rs       service checks and alerts
+├── history.rs              backup-attempt history
+└── database_registry.rs    dashboard-managed database registry
+```
+
+Additional architecture notes are available in:
+
+- [`docs/ADR-0001-multi-database-support.md`](docs/ADR-0001-multi-database-support.md)
+- [`docs/ADR-0002-dashboard-database-enable-disable.md`](docs/ADR-0002-dashboard-database-enable-disable.md)
+- [`docs/ADR-0003-dashboard-triggered-database-backups.md`](docs/ADR-0003-dashboard-triggered-database-backups.md)
+
+## Development and verification
+
+```bash
+cargo check
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
+
+Docker checks:
+
+```bash
+make docker-build
 make docker-smoke
-docker compose run --rm --no-deps crab-dump --dry-run
-docker compose up -d
 ```
 
-The dashboard is then available on `http://localhost:${API_PORT:-1111}`.
-The bind-mounted `./history` and `./data` directories retain history and
-dashboard profile/state files across container recreation. The image creates the
-mounted directories with ownership for its `postgres` runtime user.
+`cargo test` covers core streaming and chunk behavior. Telegram, Docker, and
+full restore paths require integration-style verification against the relevant
+services and credentials.
 
-**Interval form** — seconds, or a number with an `s`/`m`/`h`/`d` suffix, minimum
-`60s`. The first backup runs at startup. The interval is measured from the
-**start** of each cycle, so `6h` means six hours apart rather than six hours of
-idle time.
+## License
 
-**Crontab form** — any value containing whitespace is parsed as a 5-field
-crontab line, `minute hour day-of-month month day-of-week`:
-
-| Expression | Fires |
-|------------|-------|
-| `0 */4 * * *`     | every 4 hours, on the hour: 00:00, 04:00, 08:00, … |
-| `30 3 * * *`      | every day at 03:30 |
-| `0 2 * * sun`     | Sundays at 02:00 |
-| `0 9-17/2 * * 1-5`| weekdays at 09:00, 11:00, 13:00, 15:00, 17:00 |
-| `0 0 1 * *`       | the 1st of every month |
-
-`*`, `*/n`, ranges, stepped ranges, lists, and 3-letter month/weekday names all
-work; `7` is Sunday. Day-of-month and day-of-week are ORed when both are
-restricted, as in vixie cron. `@daily`-style nicknames, `L`/`W`/`#`, and a
-seconds field are not supported. Unlike the interval form, **nothing runs at
-startup** — the first backup happens at the next matching time. Times follow the
-machine's local clock, so set `TZ` if the schedule should be timezone-independent
-(a DST shift can otherwise move a cycle by an hour). A bad expression, or one
-that can never fire, is rejected at startup rather than silently never running.
-
-Cycles never overlap in either form: the next firing time is computed after a
-cycle finishes, so a slot missed by a long-running cycle is skipped rather than
-run back-to-back — two at once would double the `pg_dump` load and the
-`WORK_DIR` peak. With the interval form, an overrun logs a warning and the next
-cycle starts immediately.
-
-Failures never stop the loop: a database that fails is reported in that cycle's
-manifest and retried on the next one. Unset `BACKUP_INTERVAL` (or set it to
-`0`) for the one-shot behaviour below.
-
-### Daily history upload (`HISTORY_UPLOAD_SCHEDULE`)
-
-In scheduled mode, crab-dump independently uploads the current
-`HISTORY_DIR/YYYY-MM.jsonl` file once per matching local calendar date. The
-default is `59 23 * * *` (23:59 in the local container timezone). It uses the
-same five-field cron syntax as `BACKUP_INTERVAL`; set it to `0` or blank to
-disable. Large snapshots are sent as ordered ≤49 MiB parts, and one-shot mode
-never uploads history.
-
-### External timer (one-shot)
-
-With `BACKUP_INTERVAL` unset, crab-dump runs one cycle and exits — non-zero if
-any database failed, which is what a timer's failure handling wants.
-
-Example systemd timer (replace paths/users as needed):
-
-```ini
-# /etc/systemd/system/crab-dump.service
-[Unit]
-Description=PostgreSQL → Telegram backup
-Wants=network-online.target
-After=network-online.target postgresql.service
-
-[Service]
-Type=oneshot
-User=postgres
-EnvironmentFile=/etc/crab-dump.env
-ExecStart=/usr/local/bin/crab-dump
-
-# /etc/systemd/system/crab-dump.timer
-[Unit]
-Description=Daily PostgreSQL backup to Telegram
-
-[Timer]
-OnCalendar=*-*-* 03:30:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-Enable with `systemctl enable --now crab-dump.timer`.
-
-## Restoring
-
-On a machine with the `identity.txt` (private key) and the downloaded parts.
-`BASE` is the prefix printed in the manifest's restore line
-(`db{index}-{name}-{YYYY-MM-DD_HH:mm:ss}`):
-
-```bash
-BASE=db0-app-2026-08-12_20:55:32
-
-# Encrypted, single-chunk dump (manifest says chunks=1). Use the suffix and
-# decoder matching COMPRESSION_CODEC (`.zst`/`zstd -d`, `.gz`/`gzip -d`,
-# `.br`/`brotli -d`); for omitted COMPRESSION_CODEC, skip the decoder:
-cat "$BASE" \
-  | rage -d -i identity.txt \
-  | zstd -d \
-  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Uncompressed encrypted dump (`.dump.age`):
-cat "$BASE" | rage -d -i identity.txt | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Uncompressed encrypted dump, multiple chunks:
-cat "$BASE".part* | rage -d -i identity.txt | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Encrypted, multi-part dump (manifest says chunks>1):
-cat "$BASE".part* \
-  | rage -d -i identity.txt \
-  | zstd -d \
-  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Plain (unencrypted), single-chunk dump:
-cat "$BASE" \
-  | zstd -d \
-  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Uncompressed plain dump (`.dump`):
-cat "$BASE" | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Uncompressed plain dump, multiple chunks:
-cat "$BASE".part* | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-
-# Plain (unencrypted), multi-part dump:
-cat "$BASE".part* \
-  | zstd -d \
-  | pg_restore --dbname=postgresql://user:pass@host:5432/db --no-owner --clean --if-exists
-```
-
-Restore one database at a time — glob on the full `BASE`, not on `db*`, or you
-will concatenate two different dumps.
-
-For a **plain-text** dump (if you set `PG_DUMP_EXTRA_ARGS=--format=plain`),
-swap `pg_restore` for `psql`:
-
-```bash
-# Set RESTORE_DATABASE_URL to the target database connection string first.
-
-# Encrypted plain dump, single chunk:
-cat "$BASE" | rage -d -i identity.txt | zstd -d | psql "$RESTORE_DATABASE_URL"
-
-# Encrypted plain dump, multiple chunks:
-cat "$BASE".part* | rage -d -i identity.txt | zstd -d | psql "$RESTORE_DATABASE_URL"
-
-# Plain plain dump, single chunk:
-cat "$BASE" | zstd -d | psql "$RESTORE_DATABASE_URL"
-
-# Plain plain dump, multiple chunks:
-cat "$BASE".part* | zstd -d | psql "$RESTORE_DATABASE_URL"
-```
-
-> The `sha256` in the manifest covers the stream that was written to
-> the parts (encrypted when `ENCRYPTION_TYPE` is an age mode, otherwise the
-> compressed stream before uploading). Verify before decrypting:
-> ```bash
-> Use `cat "$BASE"` for `chunks=1`, or `cat "$BASE".part*` for `chunks>1`.
-> ```
-
-> Backups taken before the part suffix widened to four digits use two-digit
-> names (`.part00`). The globs above still match them, and they still order
-> correctly as long as the backup has fewer than 100 parts. A two-digit backup
-> with 100 or more parts must be reassembled from the manifest's `parts:` list
-> in the order given, not by glob.
-
-## Behavior notes
-
-- **Single pass, constant memory.** `pg_dump` stdout is streamed through the
-  selected compressor
-  → age → the rolling chunk writer; the uncompressed dump is never written to
-  disk.
-- **Retries.** Upload failures are retried up to 5× with exponential backoff
-  for transient errors (network, 429, 5xx). Permanent errors (e.g. 401 bad
-  token, 400 bad chat) abort immediately.
-- **Atomic-ish.** If the pipeline or upload fails partway, already-uploaded
-  chunks remain in Telegram; the failure is surfaced via non-zero exit. Temp
-  files are preserved on failure and removed on success.
-- **Limits.** This targets dumps up to ~2 GiB (chunked). For larger archives,
-  either raise `CHUNK_SIZE_MB` after standing up a [local Bot API server]
-  (2 GiB limit) or split the archive yourself.
-
-## Testing
-
-```bash
-cargo test                 # unit tests for chunk rolling/reassembly
-```
-
-A full end-to-end round-trip (dump → chunk → restore)
-was validated against a containerized Postgres 17: 128 MiB of data → 2 chunks
-→ restored row count matched exactly.
-
-[local Bot API server]: https://github.com/tdlib/telegram-bot-api
+No license file is currently included in this repository. Add a license before
+redistributing the project or publishing license-specific usage claims.
