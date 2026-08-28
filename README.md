@@ -254,8 +254,8 @@ administrator credentials are required.
 | `KEEP_FAILED_DUMPS` | No | Off | Preserve failed backup files for debugging. |
 | `HISTORY_DIR` | No | `./history` | Monthly JSONL backup history directory. |
 | `HISTORY_RETENTION_MONTHS` | No | `12` | Number of retained monthly history files. |
-| `HISTORY_UPLOAD_SCHEDULE` | No | `59 23 * * *` | History upload time in scheduled mode; `0` disables it. |
-| `BACKUP_INTERVAL` | No | One-shot | Interval such as `6h`, or a five-field crontab expression. |
+| `HISTORY_UPLOAD_SCHEDULE` | No | `59 23 * * sun` | Weekly history upload time in scheduled mode; `0` disables it. |
+| `BACKUP_INTERVAL` | No | `12h` | Interval such as `12h`, or a five-field crontab expression; `0` disables the built-in scheduler. |
 | `RUST_LOG` | No | `info` | Logging filter; use `debug` for detailed chunk logs. |
 
 \* Database and Telegram destination indices must be contiguous from zero.
@@ -328,8 +328,8 @@ encryption stores only the public recipient in the backup configuration.
 
 ## Scheduling
 
-Without `BACKUP_INTERVAL`, the process runs one backup cycle and exits. This
-is the recommended mode for cron or a systemd timer:
+Without `BACKUP_INTERVAL`, the process backs up every 12 hours. To run one
+cycle and exit for cron or a systemd timer, set `BACKUP_INTERVAL=0`:
 
 ```cron
 0 3 * * * cd /opt/crab-dump && ./target/release/crab-dump >> /var/log/crab-dump.log 2>&1
@@ -339,7 +339,7 @@ An interval keeps the process alive, performs a backup immediately, and repeats
 from the start of each cycle:
 
 ```dotenv
-BACKUP_INTERVAL=6h
+BACKUP_INTERVAL=12h
 ```
 
 Intervals may use seconds or `s`, `m`, `h`, and `d` suffixes, with a minimum of

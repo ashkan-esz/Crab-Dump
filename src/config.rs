@@ -159,12 +159,12 @@ pub struct SharedConfig {
     /// Default `false`: chunks are removed as soon as they are uploaded, and a
     /// failure sweeps whatever is left behind.
     pub keep_failed_dumps: bool,
-    /// When to repeat the whole backup cycle. `None` (the default) runs once
-    /// and exits, which is what an external cron or systemd timer wants.
-    /// `Some(_)` keeps the process alive and backs up on that schedule.
+    /// When to repeat the whole backup cycle. Defaults to every 12 hours.
+    /// `None` runs once and exits; `Some(_)` keeps the process alive and backs
+    /// up on that schedule.
     pub backup_schedule: Option<Schedule>,
-    /// When to upload the active monthly history file. Defaults to 23:59
-    /// local time; `None` disables history uploads.
+    /// When to upload the active monthly history file. Defaults to Sunday at
+    /// 23:59 local time; `None` disables history uploads.
     pub history_upload_schedule: Option<Schedule>,
     /// Monthly JSONL attempt history.
     pub history: Arc<HistoryStore>,
@@ -769,14 +769,15 @@ fn build_shared_config(raw: &RawConfigFile) -> Result<SharedConfig> {
         );
     }
 
-    // Unset (or explicitly blank/`0`) keeps the historical one-shot behaviour,
-    // so an existing cron/systemd deployment is unaffected by the upgrade.
+    // Explicitly blank/`0` keeps one-shot behaviour for cron/systemd
+    // deployments; an unset value defaults to the built-in 12-hour interval.
     let backup_schedule = match raw.backup_interval.as_deref().map(str::trim) {
-        None | Some("") | Some("0") => None,
+        None => Some(parse_schedule("12h")?),
+        Some("") | Some("0") => None,
         Some(s) => Some(parse_schedule(s)?),
     };
     let history_upload_schedule = match raw.history_upload_schedule.as_deref().map(str::trim) {
-        None => Some(parse_history_schedule("59 23 * * *")?),
+        None => Some(parse_history_schedule("59 23 * * sun")?),
         Some("") | Some("0") => None,
         Some(s) => Some(parse_history_schedule(s)?),
     };
@@ -1280,7 +1281,7 @@ mod tests {
             max_dump_size_mb: DEFAULT_MAX_DUMP_SIZE_MB,
             keep_failed_dumps: false,
             backup_schedule: None,
-            history_upload_schedule: Some(parse_schedule("59 23 * * *").unwrap()),
+            history_upload_schedule: Some(parse_schedule("59 23 * * sun").unwrap()),
             history: Arc::new(HistoryStore::new("./history", 12)),
         };
         assert_eq!(cfg.chunk_size_bytes(), 49 * 1024 * 1024);
@@ -1657,14 +1658,19 @@ mod tests {
         }
     }
 
-    /// Unset means one-shot (the historical behaviour every cron deployment
-    /// relies on); the suffixes are the whole point of the string form.
+    /// Unset defaults to a 12-hour interval; the suffixes are the whole point
+    /// of the string form.
     #[test]
-    fn backup_interval_defaults_off_and_parses_units() {
-        assert!(build_shared_config(&shared_raw())
-            .unwrap()
-            .backup_schedule
-            .is_none());
+    fn backup_interval_defaults_to_12_hours_and_parses_units() {
+        assert_eq!(
+            every(
+                &build_shared_config(&shared_raw())
+                    .unwrap()
+                    .backup_schedule
+                    .unwrap()
+            ),
+            Duration::from_secs(12 * 60 * 60),
+        );
 
         for (input, secs) in [
             ("3600", 3600),
@@ -1762,12 +1768,12 @@ mod tests {
     }
 
     #[test]
-    fn history_upload_schedule_defaults_to_daily_at_2359() {
+    fn history_upload_schedule_defaults_to_sunday_at_2359() {
         let schedule = build_shared_config(&shared_raw())
             .unwrap()
             .history_upload_schedule
             .unwrap();
-        assert_eq!(schedule_label_for_test(&schedule), "cron 59 23 * * *");
+        assert_eq!(schedule_label_for_test(&schedule), "cron 59 23 * * sun");
     }
 
     #[test]

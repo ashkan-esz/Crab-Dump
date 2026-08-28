@@ -35,7 +35,7 @@ PRs: brief description, linked issues, note config/env changes.
 ## Config
 Env-only (`set -a; source .env`). See `src/config.rs` for defaults.
 Required: indexed `DATABASE_URL_0` and `TG_CHAT_ID_0`, plus `TG_BOT_TOKEN`.
-Optional: `AGE_RECIPIENT`, `SOCKS_PROXY`, `CHUNK_SIZE_MB`, `MAX_PARALLEL_DATABASES` (4), `WORK_DIR`, `KEEP_FAILED_DUMPS` (off), `BACKUP_INTERVAL` (e.g. `6h`; default one-shot), `RUST_LOG`.
+Optional: `AGE_RECIPIENT`, `SOCKS_PROXY`, `CHUNK_SIZE_MB`, `MAX_PARALLEL_DATABASES` (4), `WORK_DIR`, `KEEP_FAILED_DUMPS` (off), `BACKUP_INTERVAL` (e.g. `12h`; default 12 hours; `0` = one-shot), `RUST_LOG`.
 
 ## Invariants
 
