@@ -401,7 +401,7 @@ fn spawn_history_upload_worker(cfg: &SharedConfig, schedule: &Schedule, client: 
     let cron = cron.clone();
     std::thread::spawn(move || {
         tracing::info!(cron = %cron, "history upload worker started");
-        for occurrence in 1u64.. {
+        for occurrence in 1u64..=u64::MAX {
             sleep_until_cron(
                 &cron,
                 occurrence,
@@ -535,7 +535,7 @@ fn run_scheduled(
 
     let controller = web::manual_backup_controller();
     let mut next_interval = None;
-    for cycle in 1u64.. {
+    for cycle in 1u64..=u64::MAX {
         if run_manual_requests(cfg, registry, client, &controller) {
             continue;
         }

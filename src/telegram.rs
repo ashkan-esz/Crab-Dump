@@ -516,7 +516,7 @@ pub fn download_file(
             .send()
         {
             Ok(response) => response,
-            Err(error) if attempt < MAX_ATTEMPTS => {
+            Err(_) if attempt < MAX_ATTEMPTS => {
                 std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
                 continue;
             }
@@ -528,7 +528,7 @@ pub fn download_file(
             .context("reading Telegram getFile response")?;
         let body: ApiEnvelope<FileResult> = match serde_json::from_slice(&bytes) {
             Ok(body) => body,
-            Err(error) if attempt < MAX_ATTEMPTS && is_transient(status.as_u16(), None) => {
+            Err(_) if attempt < MAX_ATTEMPTS && is_transient(status.as_u16(), None) => {
                 std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));
                 continue;
             }
@@ -586,7 +586,7 @@ pub fn download_file(
                 })?;
                 return Ok(bytes);
             }
-            Err(error) if attempt < MAX_ATTEMPTS => {
+            Err(_) if attempt < MAX_ATTEMPTS => {
                 drop(output);
                 let _ = std::fs::remove_file(destination);
                 std::thread::sleep(Duration::from_secs(backoff_secs(attempt, None)));

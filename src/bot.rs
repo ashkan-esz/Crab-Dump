@@ -667,7 +667,7 @@ fn get_updates(client: &Client, token: &str, offset: Option<i64>) -> Result<Vec<
             .send()
         {
             Ok(response) => response,
-            Err(error) if attempt < MAX_ATTEMPTS => {
+            Err(_) if attempt < MAX_ATTEMPTS => {
                 thread::sleep(Duration::from_secs(retry_delay(attempt, None)));
                 continue;
             }
