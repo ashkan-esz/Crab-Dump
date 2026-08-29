@@ -13,6 +13,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate release version
@@ -24,12 +28,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Run quality gates
-        run: |
-          cargo fmt --all --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-
       - name: Check tag matches Cargo version
         id: version
         shell: bash
@@ -39,9 +37,33 @@ jobs:
           test "$tag_version" = "$package_version"
           echo "version=$package_version" >> "$GITHUB_OUTPUT"
 
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-quality-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-quality-
+
+      - name: Run quality gates
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
   binaries:
     name: Build ${{ matrix.target }}
-    needs: validate
+    needs: [validate, quality]
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +79,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Install musl toolchain
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -134,6 +166,8 @@ jobs:
           target: runtime-all
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha,scope=runtime-all
+          cache-to: type=gha,mode=max,scope=runtime-all
           build-args: APP_VERSION=${{ needs.validate.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

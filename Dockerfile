@@ -17,7 +17,9 @@ ENV GOPROXY="$GOPROXY"
 
 WORKDIR /src
 
-RUN curl -fsSL "https://github.com/SagerNet/sing-box/archive/refs/tags/v${SING_BOX_VERSION}.tar.gz" \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    curl -fsSL "https://github.com/SagerNet/sing-box/archive/refs/tags/v${SING_BOX_VERSION}.tar.gz" \
        | tar -xz --strip-components=1 \
     && mkdir -p /out \
     && case "$TARGETARCH" in \
@@ -39,25 +41,29 @@ RUN apk add --no-cache build-base
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    mkdir src \
     && printf 'fn main() {}\n' > src/main.rs \
     && cargo build --release \
     && rm -rf src
 
 COPY src ./src
 COPY dashboard ./dashboard
-# Build the final application into a separate target directory. This prevents
-# Cargo from ever reusing the placeholder executable built for dependency
-# caching above, even when Docker restores an otherwise valid stale layer.
-RUN CARGO_TARGET_DIR=/build/final-target cargo build --release \
-    && strip --strip-unneeded /build/final-target/release/crab-dump
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --release --bin crab-dump \
+    && strip --strip-unneeded /build/target/release/crab-dump
 
 FROM rust:1-alpine AS shoes-builder
 
 ARG SHOES_REVISION
 
-RUN apk add --no-cache build-base \
-    && cargo install --git https://github.com/cfal/shoes.git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/target,sharing=locked \
+    apk add --no-cache build-base \
+    && CARGO_TARGET_DIR=/root/.cargo/target cargo install --git https://github.com/cfal/shoes.git \
          --rev "$SHOES_REVISION" --locked \
     && test -x /usr/local/cargo/bin/shoes
 
@@ -73,7 +79,7 @@ RUN apk add --no-cache \
     && mkdir -p /app/data /app/history /app/work \
     && chown -R postgres:postgres /app
 
-COPY --from=builder --chown=postgres:postgres /build/final-target/release/crab-dump /app/crab-dump
+COPY --from=builder --chown=postgres:postgres /build/target/release/crab-dump /app/crab-dump
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
       org.opencontainers.image.source="https://github.com/ashkan-esz/Crab-Dump" \
