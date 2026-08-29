@@ -3,6 +3,8 @@
 ARG SING_BOX_VERSION=1.11.15
 ARG SHOES_REVISION=7a5a8ee3bd1c52bc15ec57e074e95e374d41f275
 ARG APP_VERSION=dev
+ARG SING_BOX_IMAGE=scratch
+ARG SHOES_IMAGE=scratch
 
 FROM golang:1.23-alpine@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f AS singbox-builder
 
@@ -67,6 +69,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
          --rev "$SHOES_REVISION" --locked \
     && test -x /usr/local/cargo/bin/shoes
 
+FROM scratch AS singbox-image
+
+COPY --from=singbox-builder /out/sing-box /out/sing-box
+
+FROM scratch AS shoes-image
+
+COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
+
 FROM alpine:3.21 AS runtime-base
 
 ARG APP_VERSION
@@ -101,6 +111,35 @@ FROM runtime-base AS runtime-all
 
 COPY --from=singbox-builder /out/sing-box /usr/local/bin/sing-box
 COPY --from=shoes-builder /usr/local/cargo/bin/shoes /usr/local/bin/shoes
+
+FROM ${SING_BOX_IMAGE} AS prebuilt-singbox
+
+FROM ${SHOES_IMAGE} AS prebuilt-shoes
+
+FROM alpine:3.21 AS runtime-prebuilt
+
+ARG APP_VERSION
+
+WORKDIR /app
+
+RUN apk add --no-cache \
+        ca-certificates \
+        postgresql17-client \
+    && mkdir -p /app/data /app/history /app/work \
+    && chown -R postgres:postgres /app
+
+COPY --chown=postgres:postgres crab-dump /app/crab-dump
+COPY --from=prebuilt-singbox /out/sing-box /usr/local/bin/sing-box
+COPY --from=prebuilt-shoes /usr/local/bin/shoes /usr/local/bin/shoes
+
+LABEL org.opencontainers.image.title="crab-dump" \
+      org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
+      org.opencontainers.image.source="https://github.com/ashkan-esz/Crab-Dump" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
+ENTRYPOINT ["./crab-dump"]
+
+FROM runtime-prebuilt AS runtime-all-prebuilt
 
 #HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 #    CMD ["sh", "-c", "wget -q -O /dev/null \"http://127.0.0.1:${API_PORT:-1111}/healthz\" || exit 1"]

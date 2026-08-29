@@ -12,6 +12,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/${{ github.repository }}
+  SING_BOX_VERSION: "1.11.15"
+  SHOES_REVISION: "7a5a8ee3bd1c52bc15ec57e074e95e374d41f275"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -135,15 +137,109 @@ jobs:
           generate_release_notes: true
           files: artifacts/*
 
-  container:
-    name: Publish GHCR image
+  core-images:
+    name: Build ${{ matrix.core }} (${{ matrix.slug }})
     needs: validate
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - core: sing-box
+            build_target: singbox-image
+            image_name: sing-box
+            version: "1.11.15"
+            platform: linux/amd64
+            runner: ubuntu-latest
+            slug: amd64
+          - core: sing-box
+            build_target: singbox-image
+            image_name: sing-box
+            version: "1.11.15"
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+          - core: shoes
+            build_target: shoes-image
+            image_name: shoes
+            version: "7a5a8ee3bd1c52bc15ec57e074e95e374d41f275"
+            platform: linux/amd64
+            runner: ubuntu-latest
+            slug: amd64
+          - core: shoes
+            build_target: shoes-image
+            image_name: shoes
+            version: "7a5a8ee3bd1c52bc15ec57e074e95e374d41f275"
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start core build timer
+        run: echo "CORE_BUILD_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Build and publish core
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.build_target }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE_NAME }}-${{ matrix.image_name }}:${{ matrix.version }}-${{ matrix.slug }}
+          cache-from: type=gha,scope=${{ matrix.image_name }}-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image_name }}-${{ matrix.slug }}
+
+      - name: Report core build duration
+        if: always()
+        shell: bash
+        run: |
+          end="$(date +%s)"
+          duration=$((end - CORE_BUILD_START))
+          echo "Core build duration: ${duration}s" >> "$GITHUB_STEP_SUMMARY"
+
+  container:
+    name: Build ${{ matrix.platform }}
+    needs: [validate, binaries, core-images]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            slug: amd64
+            target: x86_64-unknown-linux-musl
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: /tmp/release
+
+      - name: Prepare release binary
+        shell: bash
+        run: |
+          tar -xzf /tmp/release/crab-dump-*.tar.gz -C /tmp/release
+          cp /tmp/release/crab-dump-*/crab-dump ./crab-dump
+
+      - name: Start image build timer
+        run: echo "IMAGE_BUILD_START=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: docker/login-action@v3
         with:
@@ -161,13 +257,82 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
-          target: runtime-all
-          platforms: linux/amd64,linux/arm64
+          target: runtime-all-prebuilt
+          platforms: ${{ matrix.platform }}
           push: true
-          cache-from: type=gha,scope=runtime-all
-          cache-to: type=gha,mode=max,scope=runtime-all
-          build-args: APP_VERSION=${{ needs.validate.outputs.version }}
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=runtime-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.slug }}
+          build-args: |
+            APP_VERSION=${{ needs.validate.outputs.version }}
+            SING_BOX_IMAGE=${{ env.IMAGE_NAME }}-sing-box:${{ env.SING_BOX_VERSION }}-${{ matrix.slug }}
+            SHOES_IMAGE=${{ env.IMAGE_NAME }}-shoes:${{ env.SHOES_REVISION }}-${{ matrix.slug }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Report image build duration
+        if: always()
+        shell: bash
+        run: |
+          end="$(date +%s)"
+          duration=$((end - IMAGE_BUILD_START))
+          echo "Image build duration: ${duration}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Export image digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  container-manifest:
+    name: Publish GHCR manifest
+    needs: [validate, container]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: image-digest-*
+          merge-multiple: true
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Publish multi-architecture manifest
+        shell: bash
+        run: |
+          mapfile -t sources < <(
+            for digest in /tmp/digests/*; do
+              printf '%s@sha256:%s\n' "${{ env.IMAGE_NAME }}" "$(basename "$digest")"
+            done
+          )
+          mapfile -t tags < <(printf '%s\n' "${{ steps.meta.outputs.tags }}" | sed '/^$/d')
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=("-t" "$tag")
+          done
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
