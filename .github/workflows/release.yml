@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run quality gates
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Check tag matches Cargo version
+        id: version
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          test "$tag_version" = "$package_version"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Install musl toolchain
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Build binary
+        run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          version="${{ needs.validate.outputs.version }}"
+          archive="crab-dump-v${version}-${{ matrix.target }}"
+          mkdir "$archive"
+          cp "target/${{ matrix.target }}/release/crab-dump" "$archive/"
+          cp README.md CHANGELOG.md "$archive/"
+          tar -czf "${archive}.tar.gz" "$archive"
+          sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            crab-dump-*.tar.gz
+            crab-dump-*.tar.gz.sha256
+
+  release:
+    name: Create GitHub Release
+    needs: [validate, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
+
+  container:
+    name: Publish GHCR image
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime-all
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: APP_VERSION=${{ needs.validate.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -3,6 +3,7 @@ IMAGE ?= $(PROJECT):latest
 RUNTIME_TARGET ?= runtime-all
 CARGO ?= cargo
 COMPOSE ?= docker compose
+VERSION ?= $(shell $(CARGO) pkgid 2>/dev/null | sed 's/.*@//')
 
 .DEFAULT_GOAL := help
 
@@ -41,19 +42,19 @@ dry-run: ## Validate configuration and pg_dump availability
 	$(CARGO) run --release -- --dry-run
 
 docker-build: ## Build the Docker image
-	docker build --target $(RUNTIME_TARGET) -t $(IMAGE) .
+	docker build --build-arg APP_VERSION=$(VERSION) --target $(RUNTIME_TARGET) -t $(IMAGE) .
 
 docker-build-none: ## Build the runtime image without routing cores
-	docker build --target runtime-none -t $(PROJECT):none .
+	docker build --build-arg APP_VERSION=$(VERSION) --target runtime-none -t $(PROJECT):none .
 
 docker-build-sing-box: ## Build the runtime image with sing-box only
-	docker build --target runtime-sing-box -t $(PROJECT):sing-box .
+	docker build --build-arg APP_VERSION=$(VERSION) --target runtime-sing-box -t $(PROJECT):sing-box .
 
 docker-build-shoes: ## Build the runtime image with shoes only
-	docker build --target runtime-shoes -t $(PROJECT):shoes .
+	docker build --build-arg APP_VERSION=$(VERSION) --target runtime-shoes -t $(PROJECT):shoes .
 
 docker-build-all: ## Build the runtime image with both routing cores
-	docker build --target runtime-all -t $(PROJECT):all .
+	docker build --build-arg APP_VERSION=$(VERSION) --target runtime-all -t $(PROJECT):all .
 
 docker-smoke: docker-build ## Verify the image contains the real CLI
 	@help_output="$$(docker run --rm --entrypoint /usr/local/bin/crab-dump $(IMAGE) --help)" \

@@ -2,6 +2,7 @@
 
 ARG SING_BOX_VERSION=1.11.15
 ARG SHOES_REVISION=7a5a8ee3bd1c52bc15ec57e074e95e374d41f275
+ARG APP_VERSION=dev
 
 FROM golang:1.23-alpine@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f AS singbox-builder
 
@@ -62,6 +63,8 @@ RUN apk add --no-cache build-base \
 
 FROM alpine:3.21 AS runtime-base
 
+ARG APP_VERSION
+
 WORKDIR /app
 
 RUN apk add --no-cache \
@@ -73,7 +76,8 @@ RUN apk add --no-cache \
 COPY --from=builder --chown=postgres:postgres /build/final-target/release/crab-dump /app/crab-dump
 LABEL org.opencontainers.image.title="crab-dump" \
       org.opencontainers.image.description="Stream a compressed, optionally encrypted PostgreSQL dump to Telegram" \
-      org.opencontainers.image.source="https://github.com/ashkan/crab-dump"
+      org.opencontainers.image.source="https://github.com/ashkan-esz/Crab-Dump" \
+      org.opencontainers.image.version="${APP_VERSION}"
 
 ENTRYPOINT ["./crab-dump"]
 

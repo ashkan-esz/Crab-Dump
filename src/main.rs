@@ -75,6 +75,7 @@ fn load_env() {
 
 /// CLI argument parser.
 #[derive(Debug, Parser)]
+#[command(version)]
 struct Cli {
     /// Validate config and check pg_dump availability without dumping or uploading.
     #[arg(long)]
@@ -2369,6 +2370,15 @@ fn utc_timestamp_parts(t: SystemTime) -> Result<(i64, i64, i64, i64, i64, i64)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_version_matches_cargo_package_version() {
+        let cli = Cli::try_parse_from(["crab-dump", "--version"]).unwrap_err();
+        assert_eq!(
+            cli.to_string().trim_end(),
+            format!("crab-dump {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     #[test]
     fn history_snapshot_chunks_reassemble_in_order_and_cleanly() {

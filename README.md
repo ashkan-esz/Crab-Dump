@@ -20,6 +20,7 @@ simple storage, predictable recovery commands, and no hosted backup service.
 - [How the backup pipeline works](#how-the-backup-pipeline-works)
 - [Quick start with Docker Compose](#quick-start-with-docker-compose)
 - [Local installation](#local-installation)
+- [Releases and versioning](#releases-and-versioning)
 - [Telegram setup](#telegram-setup)
 - [Configuration](#configuration)
 - [Encryption](#encryption)
@@ -142,6 +143,13 @@ cargo run --release -- --dry-run
 `--dry-run` loads and validates configuration and checks `pg_dump` availability.
 It does not dump a database or upload anything.
 
+Check the installed version without loading configuration:
+
+```bash
+./target/release/crab-dump --version
+# crab-dump 1.0.0
+```
+
 Run a backup:
 
 ```bash
@@ -176,6 +184,31 @@ make verify        # format check, Clippy, and tests
 make compose-up    # build and start Docker Compose
 make compose-logs  # follow service logs
 ```
+
+## Releases and versioning
+
+The version in `Cargo.toml` is the single source of truth and follows
+Semantic Versioning. The CLI embeds this value, and Docker images expose it as
+the `org.opencontainers.image.version` label.
+
+To publish a release:
+
+1. Update the version in `Cargo.toml` and add the matching entry to
+   `CHANGELOG.md`.
+2. Commit the changes and create a matching tag, for example:
+
+   ```bash
+   git tag v1.0.0
+   git push origin master v1.0.0
+   ```
+
+3. GitHub Actions validates the tag, runs the quality gates, builds Linux
+   `amd64` and `arm64` archives with checksums, creates the GitHub Release, and
+   publishes the multi-architecture image to GHCR.
+
+Release images are tagged with the full version and `major.minor` (for example
+`1.0.0` and `1.0`). Stable releases also update `latest`; prereleases such as
+`v1.0.0-rc.1` do not.
 
 ## Telegram setup
 

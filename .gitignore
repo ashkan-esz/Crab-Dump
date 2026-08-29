@@ -1,8 +1,9 @@
 # Rust build output
 target/
 
-# Environment & config (keep .env.example, .env has secrets)
+# Environment & config (keep examples; local files may contain secrets)
 .env
+.env.*
 !/.env.example
 
 # Local config overrides
@@ -40,8 +41,14 @@ Thumbs.db
 # Temp
 tmp/
 temp/
+work/
+release/
+dist/
+artifacts/
 *.tmp
 **/*.tmp
+*.pid
+*.sock
 history
 data/
 
@@ -55,6 +62,10 @@ data/
 *.sql
 *.sql.gz
 *.dump
+*.dump.*
+*.part[0-9][0-9][0-9][0-9]
+*.sha256
+*.sha512
 
 # Python
 __pycache__/
