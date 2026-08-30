@@ -3,12 +3,49 @@
 # or the host's LAN IP instead of 127.0.0.1.
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    network_mode: host
+    privileged: true
+    command:
+      - postgres
+      - -c
+      - listen_addresses=127.0.0.1
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - max_connections=20
+      - -c
+      - work_mem=1MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - max_wal_size=256MB
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    volumes:
+      - crab_dump_postgres:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: "unless-stopped"
+    shm_size: "128mb"
+    mem_limit: "700mb"
+
   crab-dump:
-    build:
-      context: .
-      target: ${ROUTING_TARGET:-runtime-none}
-    image: ${IMAGE_TAG:-crab-dump:latest}
+    image: ${IMAGE_TAG:-ghcr.io/ashkan-esz/crab-dump:latest}
+    network_mode: host
+    privileged: true
     env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       API_PORT: "1111"
       DASHBOARD_HOST: "0.0.0.0"
@@ -21,14 +58,13 @@ services:
       - crab_dump_history:/app/history
       - crab_dump_data:/app/data
       - crab_dump_temp:/app/tmp
-    ports:
-      - "${API_PORT:-1111}:1111"
     restart: "unless-stopped"
-    cpus: "0.10"
+    cpus: "0.20"
     mem_limit: "50mb"
     memswap_limit: "50mb"
 
 volumes:
+  crab_dump_postgres:
   crab_dump_history:
   crab_dump_data:
   crab_dump_temp:

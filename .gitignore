@@ -61,6 +61,8 @@ data/
 # Database dumps (just in case)
 *.sql
 *.sql.gz
+!postgres-init/
+!postgres-init/*.sql
 *.dump
 *.dump.*
 *.part[0-9][0-9][0-9][0-9]
