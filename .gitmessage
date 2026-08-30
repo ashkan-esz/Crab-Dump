@@ -1,0 +1,22 @@
+# Commit format: type(scope): imperative summary
+#
+# Keep the subject concise: 50 characters preferred, 72 maximum.
+# Use the body only when the reason or compatibility impact is not obvious.
+#
+# Types: feat, fix, refactor, perf, docs, test, chore, build, ci, style, revert
+#
+# Examples:
+#   fix(release): publish tags after build
+#   feat(restore): add Telegram archive download
+#   docs(readme): clarify restore commands
+#
+# Body guidance:
+# - Explain why the change is needed.
+# - Wrap lines at 72 characters.
+# - Mention migrations or breaking changes explicitly.
+# - Reference issues at the end, for example: Closes #42
+
+type(scope): summary
+
+Why:
+

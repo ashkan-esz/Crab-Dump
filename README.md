@@ -749,6 +749,34 @@ make docker-smoke
 full restore paths require integration-style verification against the relevant
 services and credentials.
 
+### Commit messages
+
+Use concise [Conventional Commits](https://www.conventionalcommits.org/)
+messages so the project history stays easy to scan:
+
+```text
+type(scope): imperative summary
+```
+
+Prefer a subject of 50 characters or fewer (72 maximum). Use these types:
+`feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `chore`, `build`, `ci`,
+`style`, and `revert`. Add a body only when the reason, migration, or
+compatibility impact is not obvious from the diff.
+
+Examples:
+
+```text
+fix(release): publish tags after build
+feat(restore): add Telegram archive download
+docs(readme): clarify restore commands
+```
+
+To use the repository's commit template locally:
+
+```bash
+git config commit.template .gitmessage
+```
+
 ## License
 
 No license file is currently included in this repository. Add a license before
