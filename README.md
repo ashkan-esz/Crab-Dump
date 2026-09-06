@@ -414,6 +414,18 @@ Place the dashboard behind HTTPS when exposing it outside localhost. The
 Compose deployment binds the dashboard to `0.0.0.0` inside the container and
 publishes it on host port `1111` by default.
 
+### Dashboard screenshots
+
+![Main dashboard](docs/main-page.png)
+
+![Database page](docs/database-page.png)
+
+![Restore page](docs/restore-page.png)
+
+![Routing page](docs/routing-page.png)
+
+![Service monitor page](docs/service-monitor-page.png)
+
 ## Restore backups
 
 Backups use PostgreSQL custom format (`pg_dump -Fc`). Restore options depend on
